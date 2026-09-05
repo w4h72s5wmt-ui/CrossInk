@@ -28,6 +28,15 @@ constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/minesweeper.bin";
 constexpr uint32_t SAVE_MAGIC = 0x4D535731;
 constexpr uint8_t SAVE_VERSION = 1;
+constexpr int UNDO_MAX_CELLS = 16 * 16;
+
+std::array<uint8_t, UNDO_MAX_CELLS> undoMines{};
+std::array<uint8_t, UNDO_MAX_CELLS> undoRevealed{};
+std::array<uint8_t, UNDO_MAX_CELLS> undoFlagged{};
+bool undoAvailable = false;
+bool undoMinesPlaced = false;
+int undoRevealedSafeCells = 0;
+int undoSelectedCellIndex = 0;
 
 constexpr const char* GRID_LABELS[] = {
     "Petite - 8 x 8",
@@ -128,6 +137,7 @@ void MinesweeperActivity::onEnter() {
   initialViewportPending_ = true;
   uiReady_ = false;
   confirmHoldHandled_ = false;
+  undoAvailable = false;
 
   mines_.fill(0);
   revealed_.fill(0);
@@ -276,6 +286,55 @@ void MinesweeperActivity::loopGrid() {
 
 void MinesweeperActivity::loopResult() {
   const Rect header = headerRect(renderer, mappedInput);
+
+  // Result is also reused for the no-save information screen. It must return to
+  // the menu without creating a bogus save file.
+  if (!gameOver_) {
+    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
+        mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      mappedInput.suppressNextBackRelease();
+      viewMode_ = ViewMode::Menu;
+      selectedIndex_ = gridSizeIndex_;
+      topIndex_ = 0;
+      initialViewportPending_ = true;
+      requestUpdate();
+    }
+    return;
+  }
+
+  const auto undoLoss = [this]() {
+    if (won_ || !undoAvailable) return;
+    mines_ = undoMines;
+    revealed_ = undoRevealed;
+    flagged_ = undoFlagged;
+    minesPlaced_ = undoMinesPlaced;
+    revealedSafeCells_ = undoRevealedSafeCells;
+    selectedCellIndex_ = undoSelectedCellIndex;
+    gameOver_ = false;
+    won_ = false;
+    viewMode_ = ViewMode::Grid;
+    undoAvailable = false;
+    saveGame();
+    requestUpdate();
+  };
+
+  if (!won_ && undoAvailable && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    undoLoss();
+    return;
+  }
+
+  int tx = 0;
+  int ty = 0;
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect undoTouchArea{renderer.getScreenWidth() / 4,
+                           renderer.getScreenHeight() - metrics.buttonHintsHeight,
+                           renderer.getScreenWidth() / 2,
+                           metrics.buttonHintsHeight};
+  if (!won_ && undoAvailable && mappedInput.wasScreenTapped(tx, ty) && pointInRect(undoTouchArea, tx, ty)) {
+    undoLoss();
+    return;
+  }
+
   if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
       mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
@@ -299,7 +358,9 @@ void MinesweeperActivity::activateRow(const int row) {
 
 void MinesweeperActivity::continueGame() {
   if (!hasSavedGame_) {
-    showInfo("Continuer", "Aucune partie sauvegardee pour le moment.");
+    gameOver_ = false;
+    viewMode_ = ViewMode::Result;
+    requestUpdate();
     return;
   }
   enterGrid();
@@ -373,6 +434,7 @@ void MinesweeperActivity::resetGame() {
   revealedSafeCells_ = 0;
   selectedCellIndex_ = 0;
   confirmHoldHandled_ = false;
+  undoAvailable = false;
 }
 
 void MinesweeperActivity::placeMines(const int firstIndex) {
@@ -397,6 +459,17 @@ void MinesweeperActivity::placeMines(const int firstIndex) {
 
 void MinesweeperActivity::revealCell(const int index) {
   if (gameOver_ || index < 0 || index >= totalCells() || flagged_[index] || revealed_[index]) return;
+
+  // One-level undo snapshot. It is kept through finishGame(false), which
+  // reveals the full solution and deletes the normal saved game.
+  undoMines = mines_;
+  undoRevealed = revealed_;
+  undoFlagged = flagged_;
+  undoMinesPlaced = minesPlaced_;
+  undoRevealedSafeCells = revealedSafeCells_;
+  undoSelectedCellIndex = selectedCellIndex_;
+  undoAvailable = true;
+
   if (!minesPlaced_) placeMines(index);
   if (mines_[index]) {
     revealed_[index] = 1;
@@ -490,6 +563,7 @@ bool MinesweeperActivity::saveGame() {
 }
 
 bool MinesweeperActivity::loadSavedGame() {
+  undoAvailable = false;
   if (!Storage.exists(SAVE_PATH)) return false;
   FsFile file;
   if (!Storage.openFileForRead("MINE", SAVE_PATH, file)) return false;
@@ -731,7 +805,8 @@ void MinesweeperActivity::renderGrid() {
   }
 
   const auto labels = gameOver_
-                          ? mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "")
+                          ? mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
+                                                  (!won_ && undoAvailable) ? "Annuler" : "", "", "")
                           : mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
                                                   "Ouvrir / tenir: drapeau", tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
@@ -739,5 +814,27 @@ void MinesweeperActivity::renderGrid() {
 }
 
 void MinesweeperActivity::renderResult() {
-  renderGrid();
+  if (gameOver_) {
+    renderGrid();
+    return;
+  }
+
+  renderer.clearScreen();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect header = headerRect(renderer, mappedInput);
+  if (mappedInput.hasTouchHardware()) {
+    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);
+  } else {
+    GUI.drawHeader(renderer, header, "Continuer", nullptr, false);
+  }
+
+  const int x = metrics.contentSidePadding;
+  const int y = header.y + header.height + metrics.verticalSpacing * 2;
+  renderer.drawText(UI_12_FONT_ID, x, y, "Aucune partie sauvegardee");
+  renderer.drawText(UI_10_FONT_ID, x, y + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing,
+                    "pour le moment.");
+
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
+  renderer.displayBuffer();
 }
