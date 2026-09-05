@@ -10,7 +10,7 @@ diff --git a/src/activities/home/HomeActivity.cpp b/src/activities/home/HomeActi
  #include "BookmarkStore.h"
  #include "ClippingStore.h"
  #include "CrossPointSettings.h"
-@@ -2351,12 +2351,9 @@ void HomeActivity::onNotesOpen() {
+@@ -2351,11 +2351,8 @@ void HomeActivity::onNotesOpen() {
    startActivityForResult(std::make_unique<NotesActivity>(renderer, mappedInput), [](const ActivityResult&) {});
  }
  
