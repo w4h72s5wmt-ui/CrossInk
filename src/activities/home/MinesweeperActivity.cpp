@@ -15,11 +15,14 @@
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
+#include "fontIds.h"
 
 namespace fui = freeink::ui;
 
 namespace {
 constexpr fui::ActionId ACTION_ROW = 1;
+constexpr int HEADER_ACTION_SIZE = 48;
+constexpr int HEADER_ACTION_MARGIN = 8;
 
 constexpr const char* GRID_LABELS[] = {
     "Petite - 8 x 8",
@@ -42,6 +45,56 @@ Rect menuListRect(const GfxRenderer& renderer, const MappedInputManager& mappedI
   return Rect{0, contentTop, renderer.getScreenWidth(),
               renderer.getScreenHeight() - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing};
 }
+
+Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int height = mappedInput.hasTouchHardware() ? TouchHeaderBackButton::height(metrics, mappedInput)
+                                                     : metrics.headerHeight;
+  return Rect{0, metrics.topPadding, renderer.getScreenWidth(), height};
+}
+
+Rect closeButtonRect(const Rect& header) {
+  const int size = std::min(HEADER_ACTION_SIZE, std::max(32, header.height - 8));
+  return Rect{header.x + header.width - size - HEADER_ACTION_MARGIN,
+              header.y + std::max(0, (header.height - size) / 2), size, size};
+}
+
+void drawCloseButton(GfxRenderer& renderer, const Rect& rect) {
+  renderer.drawRect(rect.x, rect.y, rect.width, rect.height, 1, true);
+  const char* label = "X";
+  const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, label);
+  const int textHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  renderer.drawText(UI_10_FONT_ID, rect.x + std::max(0, (rect.width - textWidth) / 2),
+                    rect.y + std::max(0, (rect.height - textHeight) / 2), label);
+}
+
+bool pointInRect(const Rect& rect, const int x, const int y) {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+}
+
+struct GridGeometry {
+  Rect header;
+  Rect grid;
+  Rect close;
+  int cellSize = 1;
+};
+
+GridGeometry gridGeometry(const GfxRenderer& renderer, const MappedInputManager& mappedInput, const int dimension) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+  const Rect header = headerRect(renderer, mappedInput);
+  const int contentTop = header.y + header.height + metrics.verticalSpacing;
+  const int footerTop = screenHeight - metrics.buttonHintsHeight;
+  const int availableHeight = std::max(1, footerTop - contentTop - metrics.verticalSpacing);
+  const int availableWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
+  const int cellSize = std::max(1, std::min(availableWidth / dimension, availableHeight / dimension));
+  const int gridWidth = cellSize * dimension;
+  const int gridHeight = cellSize * dimension;
+  const int gridX = (screenWidth - gridWidth) / 2;
+  const int gridY = contentTop + std::max(0, (availableHeight - gridHeight) / 2);
+  return GridGeometry{header, Rect{gridX, gridY, gridWidth, gridHeight}, closeButtonRect(header), cellSize};
+}
 }  // namespace
 
 MinesweeperActivity::MinesweeperActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -57,6 +110,8 @@ void MinesweeperActivity::onEnter() {
   visibleRows_ = 1;
   initialViewportPending_ = true;
   uiReady_ = false;
+  selectedCellIndex_ = 0;
+  confirmedCellIndex_ = -1;
 
   applySharedUiTheme(app_, uiTarget_);
   app_.on(ACTION_ROW, &MinesweeperActivity::onRowEvent, this);
@@ -73,7 +128,14 @@ void MinesweeperActivity::loop() {
 }
 
 void MinesweeperActivity::loopMenu() {
-  if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, renderer)) ||
+  const Rect header = headerRect(renderer, mappedInput);
+  const Rect close = closeButtonRect(header);
+  if (mappedInput.hasTouchHardware() && mappedInput.wasTapInRect(close.x, close.y, close.width, close.height)) {
+    finish();
+    return;
+  }
+
+  if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
       mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
     finish();
@@ -124,11 +186,54 @@ void MinesweeperActivity::loopMenu() {
 }
 
 void MinesweeperActivity::loopGrid() {
-  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+  const int dimension = gridDimension();
+  const int totalCells = dimension * dimension;
+  const GridGeometry geometry = gridGeometry(renderer, mappedInput, dimension);
+
+  if (mappedInput.hasTouchHardware() &&
+      mappedInput.wasTapInRect(geometry.close.x, geometry.close.y, geometry.close.width, geometry.close.height)) {
+    returnToMenu();
+    return;
+  }
+
+  if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, geometry.header)) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
     returnToMenu();
     return;
   }
+
+  int tx = 0;
+  int ty = 0;
+  if (mappedInput.wasScreenTapped(tx, ty) && pointInRect(geometry.grid, tx, ty)) {
+    const int col = std::clamp((tx - geometry.grid.x) / geometry.cellSize, 0, dimension - 1);
+    const int row = std::clamp((ty - geometry.grid.y) / geometry.cellSize, 0, dimension - 1);
+    selectedCellIndex_ = row * dimension + col;
+    confirmedCellIndex_ = -1;
+    requestUpdate();
+    return;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    confirmedCellIndex_ = selectedCellIndex_;
+    requestUpdate();
+    return;
+  }
+
+  const auto moveCell = [this, totalCells](const int index) {
+    selectedCellIndex_ = index;
+    confirmedCellIndex_ = -1;
+    requestUpdate();
+  };
+
+  buttonNavigator_.onNextRelease(
+      [this, totalCells, &moveCell] { moveCell(ButtonNavigator::nextIndex(selectedCellIndex_, totalCells)); });
+  buttonNavigator_.onPreviousRelease(
+      [this, totalCells, &moveCell] { moveCell(ButtonNavigator::previousIndex(selectedCellIndex_, totalCells)); });
+  buttonNavigator_.onNextContinuous(
+      [this, totalCells, &moveCell] { moveCell(ButtonNavigator::nextIndex(selectedCellIndex_, totalCells)); });
+  buttonNavigator_.onPreviousContinuous(
+      [this, totalCells, &moveCell] { moveCell(ButtonNavigator::previousIndex(selectedCellIndex_, totalCells)); });
 }
 
 void MinesweeperActivity::activateRow(const int row) {
@@ -160,6 +265,8 @@ void MinesweeperActivity::newGame() {
 void MinesweeperActivity::enterGrid() {
   viewMode_ = ViewMode::Grid;
   uiReady_ = false;
+  selectedCellIndex_ = 0;
+  confirmedCellIndex_ = -1;
   requestUpdate();
 }
 
@@ -168,6 +275,7 @@ void MinesweeperActivity::returnToMenu() {
   selectedIndex_ = gridSizeIndex_;
   topIndex_ = 0;
   initialViewportPending_ = true;
+  confirmedCellIndex_ = -1;
   requestUpdate();
 }
 
@@ -255,12 +363,11 @@ void MinesweeperActivity::render(RenderLock&&) {
 void MinesweeperActivity::renderMenu() {
   renderer.clearScreen();
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect header{0, metrics.topPadding, renderer.getScreenWidth(),
-                    TouchHeaderBackButton::height(metrics, mappedInput)};
-
+  const Rect header = headerRect(renderer, mappedInput);
   if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Demineur", false);
+    const int rightReserve = HEADER_ACTION_SIZE + 2 * HEADER_ACTION_MARGIN;
+    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Demineur", false, rightReserve);
+    drawCloseButton(renderer, closeButtonRect(header));
   } else {
     GUI.drawHeader(renderer, header, "Demineur", nullptr, false);
   }
@@ -278,37 +385,49 @@ void MinesweeperActivity::renderMenu() {
 void MinesweeperActivity::renderGrid() {
   renderer.clearScreen();
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const int screenWidth = renderer.getScreenWidth();
-  const int screenHeight = renderer.getScreenHeight();
-  const int headerHeight = metrics.headerHeight;
-  const int headerTop = metrics.topPadding;
-  const int contentTop = headerTop + headerHeight + metrics.verticalSpacing;
-  const int footerTop = screenHeight - metrics.buttonHintsHeight;
-  const int availableHeight = std::max(1, footerTop - contentTop - metrics.verticalSpacing);
-  const int availableWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
   const int dimension = gridDimension();
-  const int cellSize = std::max(1, std::min(availableWidth / dimension, availableHeight / dimension));
-  const int gridWidth = cellSize * dimension;
-  const int gridHeight = cellSize * dimension;
-  const int gridX = (screenWidth - gridWidth) / 2;
-  const int gridY = contentTop + std::max(0, (availableHeight - gridHeight) / 2);
+  const GridGeometry geometry = gridGeometry(renderer, mappedInput, dimension);
 
   char title[48];
   std::snprintf(title, sizeof(title), "Demineur - %s", GRID_DIMS[gridSizeIndex_]);
-  GUI.drawHeader(renderer, Rect{0, headerTop, screenWidth, headerHeight}, title);
-
-  renderer.drawRect(gridX, gridY, gridWidth + 1, gridHeight + 1, 1, true);
-  for (int i = 1; i < dimension; ++i) {
-    const int x = gridX + i * cellSize;
-    renderer.drawLine(x, gridY, x, gridY + gridHeight, 1, true);
-  }
-  for (int i = 1; i < dimension; ++i) {
-    const int y = gridY + i * cellSize;
-    renderer.drawLine(gridX, y, gridX + gridWidth, y, 1, true);
+  if (mappedInput.hasTouchHardware()) {
+    const int rightReserve = HEADER_ACTION_SIZE + 2 * HEADER_ACTION_MARGIN;
+    TouchHeaderBackButton::draw(renderer, uiTarget_, geometry.header, title, false, rightReserve);
+    drawCloseButton(renderer, geometry.close);
+  } else {
+    GUI.drawHeader(renderer, geometry.header, title);
   }
 
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
+  renderer.drawRect(geometry.grid.x, geometry.grid.y, geometry.grid.width + 1, geometry.grid.height + 1, 1, true);
+  for (int i = 1; i < dimension; ++i) {
+    const int x = geometry.grid.x + i * geometry.cellSize;
+    renderer.drawLine(x, geometry.grid.y, x, geometry.grid.y + geometry.grid.height, 1, true);
+  }
+  for (int i = 1; i < dimension; ++i) {
+    const int y = geometry.grid.y + i * geometry.cellSize;
+    renderer.drawLine(geometry.grid.x, y, geometry.grid.x + geometry.grid.width, y, 1, true);
+  }
+
+  const int selectedRow = selectedCellIndex_ / dimension;
+  const int selectedCol = selectedCellIndex_ % dimension;
+  const int selectedX = geometry.grid.x + selectedCol * geometry.cellSize;
+  const int selectedY = geometry.grid.y + selectedRow * geometry.cellSize;
+  if (geometry.cellSize >= 5) {
+    renderer.drawRect(selectedX + 2, selectedY + 2, std::max(1, geometry.cellSize - 3),
+                      std::max(1, geometry.cellSize - 3), 2, true);
+  }
+
+  if (confirmedCellIndex_ >= 0 && confirmedCellIndex_ < dimension * dimension) {
+    const int confirmedRow = confirmedCellIndex_ / dimension;
+    const int confirmedCol = confirmedCellIndex_ % dimension;
+    const int cx = geometry.grid.x + confirmedCol * geometry.cellSize + geometry.cellSize / 2;
+    const int cy = geometry.grid.y + confirmedRow * geometry.cellSize + geometry.cellSize / 2;
+    const int marker = std::max(2, geometry.cellSize / 10);
+    renderer.fillRect(cx - marker, cy - marker, marker * 2 + 1, marker * 2 + 1, true);
+  }
+
+  const auto labels =
+      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
   renderer.displayBuffer();
 }

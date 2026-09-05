@@ -38,6 +38,8 @@ class MinesweeperActivity final : public Activity {
   int visibleRows_ = 1;
   int topIndex_ = 0;
   bool initialViewportPending_ = true;
+  int selectedCellIndex_ = 0;
+  int confirmedCellIndex_ = -1;
 
   static void menuScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
