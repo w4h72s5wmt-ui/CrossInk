@@ -1,0 +1,62 @@
+name: CrossInk Notes X4 Pro
+
+on:
+  push:
+    branches: [x4-pro-notes]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-x4-pro-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact CrossInk base
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Apply Notes alpha patch
+        run: git apply --check crossink-notes-alpha1.patch && git apply crossink-notes-alpha1.patch
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Build X4 Pro Notes firmware
+        run: |
+          set -euo pipefail
+          pio run -j1 -e x4-pro | tee pio-x4-pro-notes.log
+
+      - name: Upload X4 Pro Notes firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-notes-alpha1
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-notes-build-log
+          path: pio-x4-pro-notes.log
+          if-no-files-found: ignore
