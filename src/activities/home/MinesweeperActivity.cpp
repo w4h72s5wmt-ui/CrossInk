@@ -4,6 +4,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <esp_random.h>
+#include <esp_timer.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -29,6 +30,7 @@ constexpr const char SAVE_PATH[] = "/.crosspoint/minesweeper.bin";
 constexpr uint32_t SAVE_MAGIC = 0x4D535731;
 constexpr uint8_t SAVE_VERSION = 1;
 constexpr int UNDO_MAX_CELLS = 16 * 16;
+constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
 
 std::array<uint8_t, UNDO_MAX_CELLS> undoMines{};
 std::array<uint8_t, UNDO_MAX_CELLS> undoRevealed{};
@@ -37,6 +39,7 @@ bool undoAvailable = false;
 bool undoMinesPlaced = false;
 int undoRevealedSafeCells = 0;
 int undoSelectedCellIndex = 0;
+int64_t lossUndoDeadlineUs = 0;
 
 constexpr const char* GRID_LABELS[] = {
     "Petite - 8 x 8",
@@ -138,6 +141,7 @@ void MinesweeperActivity::onEnter() {
   uiReady_ = false;
   confirmHoldHandled_ = false;
   undoAvailable = false;
+  lossUndoDeadlineUs = 0;
 
   mines_.fill(0);
   revealed_.fill(0);
@@ -302,8 +306,17 @@ void MinesweeperActivity::loopResult() {
     return;
   }
 
+  // During the five-second grace period, keep the solution hidden. Once it
+  // expires, reveal the complete board and permanently disable undo.
+  if (!won_ && undoAvailable && esp_timer_get_time() >= lossUndoDeadlineUs) {
+    undoAvailable = false;
+    lossUndoDeadlineUs = 0;
+    for (int i = 0; i < totalCells(); ++i) revealed_[i] = 1;
+    requestUpdate();
+  }
+
   const auto undoLoss = [this]() {
-    if (won_ || !undoAvailable) return;
+    if (won_ || !undoAvailable || esp_timer_get_time() >= lossUndoDeadlineUs) return;
     mines_ = undoMines;
     revealed_ = undoRevealed;
     flagged_ = undoFlagged;
@@ -314,6 +327,7 @@ void MinesweeperActivity::loopResult() {
     won_ = false;
     viewMode_ = ViewMode::Grid;
     undoAvailable = false;
+    lossUndoDeadlineUs = 0;
     saveGame();
     requestUpdate();
   };
@@ -387,6 +401,8 @@ void MinesweeperActivity::returnToMenu() {
   topIndex_ = 0;
   initialViewportPending_ = true;
   confirmHoldHandled_ = false;
+  undoAvailable = false;
+  lossUndoDeadlineUs = 0;
   requestUpdate();
 }
 
@@ -435,6 +451,7 @@ void MinesweeperActivity::resetGame() {
   selectedCellIndex_ = 0;
   confirmHoldHandled_ = false;
   undoAvailable = false;
+  lossUndoDeadlineUs = 0;
 }
 
 void MinesweeperActivity::placeMines(const int firstIndex) {
@@ -460,8 +477,7 @@ void MinesweeperActivity::placeMines(const int firstIndex) {
 void MinesweeperActivity::revealCell(const int index) {
   if (gameOver_ || index < 0 || index >= totalCells() || flagged_[index] || revealed_[index]) return;
 
-  // One-level undo snapshot. It is kept through finishGame(false), which
-  // reveals the full solution and deletes the normal saved game.
+  // One-level undo snapshot taken immediately before the reveal action.
   undoMines = mines_;
   undoRevealed = revealed_;
   undoFlagged = flagged_;
@@ -524,10 +540,20 @@ void MinesweeperActivity::checkWin() {
 void MinesweeperActivity::finishGame(const bool won) {
   gameOver_ = true;
   won_ = won;
-  for (int i = 0; i < totalCells(); ++i) {
-    revealed_[i] = 1;
-    if (won && mines_[i]) flagged_[i] = 1;
+
+  if (won) {
+    undoAvailable = false;
+    lossUndoDeadlineUs = 0;
+    for (int i = 0; i < totalCells(); ++i) {
+      revealed_[i] = 1;
+      if (mines_[i]) flagged_[i] = 1;
+    }
+  } else {
+    // Do not reveal the solution yet. The player gets five seconds to undo the
+    // mine click; only the mine just hit remains visible during this window.
+    lossUndoDeadlineUs = esp_timer_get_time() + LOSS_UNDO_WINDOW_US;
   }
+
   clearSavedGame();
   viewMode_ = ViewMode::Result;
   requestUpdate();
@@ -564,6 +590,7 @@ bool MinesweeperActivity::saveGame() {
 
 bool MinesweeperActivity::loadSavedGame() {
   undoAvailable = false;
+  lossUndoDeadlineUs = 0;
   if (!Storage.exists(SAVE_PATH)) return false;
   FsFile file;
   if (!Storage.openFileForRead("MINE", SAVE_PATH, file)) return false;
@@ -806,7 +833,7 @@ void MinesweeperActivity::renderGrid() {
 
   const auto labels = gameOver_
                           ? mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
-                                                  (!won_ && undoAvailable) ? "Annuler" : "", "", "")
+                                                  (!won_ && undoAvailable) ? "Annuler (5 s)" : "", "", "")
                           : mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
                                                   "Ouvrir / tenir: drapeau", tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
