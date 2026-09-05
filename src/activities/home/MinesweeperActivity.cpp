@@ -98,13 +98,19 @@ bool readValue(FsFile& file, T& value) {
 
 void drawHiddenCellPattern(GfxRenderer& renderer, const int x, const int y, const int size) {
   if (size <= 4) return;
-  const int left = x + 2;
-  const int right = x + size - 2;
-  const int top = y + 2;
-  const int bottom = y + size - 2;
-  for (int py = top; py < bottom; py += 4) {
-    renderer.drawLine(left, py, right, py, 1, true);
+
+  // Light Windows-style raised cell: dotted grey face with dark bottom/right bevel.
+  renderer.fillRect(x + 1, y + 1, std::max(1, size - 1), std::max(1, size - 1), false);
+  for (int py = y + 4; py < y + size - 3; py += 4) {
+    const int offset = (((py - y) / 4) & 1) ? 2 : 0;
+    for (int px = x + 4 + offset; px < x + size - 3; px += 4) {
+      renderer.fillRect(px, py, 1, 1, true);
+    }
   }
+
+  const int bevel = size >= 20 ? 2 : 1;
+  renderer.fillRect(x + 1, y + size - 1 - bevel, std::max(1, size - 2), bevel, true);
+  renderer.fillRect(x + size - 1 - bevel, y + 1, bevel, std::max(1, size - 2), true);
 }
 }  // namespace
 
@@ -671,6 +677,9 @@ void MinesweeperActivity::renderGrid() {
       }
 
       if (revealed_[index]) {
+        // Revealed cells are always pure white for maximum e-ink readability.
+        renderer.fillRect(x + 1, y + 1, std::max(1, geometry.cellSize - 1),
+                          std::max(1, geometry.cellSize - 1), false);
         if (mines_[index]) {
           const int margin = std::max(2, geometry.cellSize / 4);
           renderer.fillRect(x + margin, y + margin, std::max(1, geometry.cellSize - 2 * margin),
