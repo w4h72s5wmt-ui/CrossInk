@@ -1,4 +1,4 @@
-name: CrossInk Notes X4 Pro
+name: CrossInk Notes + Demineur HELLO X4 Pro
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply Notes alpha 5 patches
+      - name: Apply Notes alpha 5 and Demineur HELLO patches
         run: |
           git apply --check crossink-notes-alpha4-i18n.patch
           git apply crossink-notes-alpha4-i18n.patch
@@ -29,6 +29,8 @@ jobs:
           git apply crossink-notes-alpha4-keyboard.patch
           git apply --check crossink-notes-alpha5.patch
           git apply crossink-notes-alpha5.patch
+          git apply --check crossink-minesweeper-hello-alpha1.patch
+          git apply crossink-minesweeper-hello-alpha1.patch
 
       - uses: actions/setup-python@v6
         with:
@@ -51,15 +53,15 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Build X4 Pro Notes firmware
+      - name: Build X4 Pro Notes + Demineur HELLO firmware
         run: |
           set -euo pipefail
           pio run -j1 -e x4-pro | tee pio-x4-pro-notes.log
 
-      - name: Upload X4 Pro Notes firmware
+      - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-notes-alpha5
+          name: firmware-x4-pro-notes-demineur-hello-alpha1
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -67,6 +69,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-notes-alpha5-build-log
+          name: x4-pro-notes-demineur-hello-alpha1-build-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
