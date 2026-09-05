@@ -1,4 +1,4 @@
-name: CrossInk Notes + Demineur Interaction X4 Pro
+name: CrossInk Notes + Demineur Readability X4 Pro
 
 on:
   push:
@@ -65,7 +65,7 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Build X4 Pro Notes + Demineur Interaction firmware
+      - name: Build X4 Pro Notes + Demineur Readability firmware
         run: |
           set -euo pipefail
           pio run -e x4-pro | tee pio-x4-pro-notes.log
@@ -73,7 +73,7 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-notes-demineur-interaction-alpha4
+          name: firmware-x4-pro-notes-demineur-readability-alpha5
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -81,6 +81,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-notes-demineur-interaction-alpha4-build-log
+          name: x4-pro-notes-demineur-readability-alpha5-build-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
