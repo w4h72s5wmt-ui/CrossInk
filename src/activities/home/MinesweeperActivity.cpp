@@ -28,7 +28,8 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/minesweeper.bin";
 constexpr uint32_t SAVE_MAGIC = 0x4D535731;
-constexpr uint8_t SAVE_VERSION = 1;
+constexpr uint8_t SAVE_VERSION = 2;
+constexpr uint8_t PREVIOUS_SAVE_VERSION = 1;
 constexpr int UNDO_MAX_CELLS = 16 * 16;
 constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
 
@@ -40,6 +41,12 @@ bool undoMinesPlaced = false;
 int undoRevealedSafeCells = 0;
 int undoSelectedCellIndex = 0;
 int64_t lossUndoDeadlineUs = 0;
+
+// New-game counter option. It is configured before starting a new game and
+// the active value is saved with the game so Continue keeps the same mode.
+bool newGameSetupActive = false;
+bool assistedCounterChoice = false;
+bool assistedCounterActive = false;
 
 constexpr const char* GRID_LABELS[] = {
     "Petite - 9 x 9 - 10 Mines",
@@ -98,6 +105,25 @@ GridGeometry gridGeometry(const GfxRenderer& renderer, const MappedInputManager&
   return GridGeometry{header, Rect{gridX, gridY, gridWidth, gridHeight}, cellSize};
 }
 
+struct NewGameSetupGeometry {
+  Rect header;
+  Rect assistRow;
+  Rect startButton;
+};
+
+NewGameSetupGeometry newGameSetupGeometry(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect header = headerRect(renderer, mappedInput);
+  const int x = metrics.contentSidePadding;
+  const int width = std::max(1, renderer.getScreenWidth() - 2 * x);
+  const int contentTop = header.y + header.height + metrics.verticalSpacing * 2;
+  const int assistY = contentTop + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing * 2;
+  const Rect assistRow{x, assistY, width, 72};
+  const int footerTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
+  const Rect startButton{x, std::max(assistY + 88, footerTop - 60), width, 48};
+  return NewGameSetupGeometry{header, assistRow, startButton};
+}
+
 template <typename T>
 bool writeValue(FsFile& file, const T& value) {
   return file.write(reinterpret_cast<const uint8_t*>(&value), sizeof(T)) == sizeof(T);
@@ -142,6 +168,9 @@ void MinesweeperActivity::onEnter() {
   confirmHoldHandled_ = false;
   undoAvailable = false;
   lossUndoDeadlineUs = 0;
+  newGameSetupActive = false;
+  assistedCounterChoice = false;
+  assistedCounterActive = false;
 
   mines_.fill(0);
   revealed_.fill(0);
@@ -291,6 +320,74 @@ void MinesweeperActivity::loopGrid() {
 void MinesweeperActivity::loopResult() {
   const Rect header = headerRect(renderer, mappedInput);
 
+  if (!gameOver_ && newGameSetupActive) {
+    const NewGameSetupGeometry setup = newGameSetupGeometry(renderer, mappedInput);
+
+    const auto backToMenu = [this]() {
+      newGameSetupActive = false;
+      viewMode_ = ViewMode::Menu;
+      selectedIndex_ = gridSizeIndex_;
+      topIndex_ = 0;
+      initialViewportPending_ = true;
+      requestUpdate();
+    };
+
+    const auto startConfiguredGame = [this]() {
+      assistedCounterActive = assistedCounterChoice;
+      newGameSetupActive = false;
+      resetGame();
+      clearSavedGame();
+      enterGrid();
+    };
+
+    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, setup.header)) ||
+        mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+      mappedInput.suppressNextBackRelease();
+      backToMenu();
+      return;
+    }
+
+    int tx = 0;
+    int ty = 0;
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      if (pointInRect(setup.assistRow, tx, ty)) {
+        assistedCounterChoice = !assistedCounterChoice;
+        selectedIndex_ = 0;
+        requestUpdate();
+        return;
+      }
+      if (pointInRect(setup.startButton, tx, ty)) {
+        selectedIndex_ = 1;
+        startConfiguredGame();
+        return;
+      }
+    }
+
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      if (selectedIndex_ == 0) {
+        assistedCounterChoice = !assistedCounterChoice;
+        requestUpdate();
+      } else {
+        startConfiguredGame();
+      }
+      return;
+    }
+
+    const auto moveSetupSelection = [this](const int index) {
+      selectedIndex_ = std::clamp(index, 0, 1);
+      requestUpdate();
+    };
+    buttonNavigator_.onNextRelease(
+        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::nextIndex(selectedIndex_, 2)); });
+    buttonNavigator_.onPreviousRelease(
+        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::previousIndex(selectedIndex_, 2)); });
+    buttonNavigator_.onNextContinuous(
+        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::nextIndex(selectedIndex_, 2)); });
+    buttonNavigator_.onPreviousContinuous(
+        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::previousIndex(selectedIndex_, 2)); });
+    return;
+  }
+
   // Result is also reused for the no-save information screen. It must return to
   // the menu without creating a bogus save file.
   if (!gameOver_) {
@@ -385,9 +482,14 @@ void MinesweeperActivity::continueGame() {
 }
 
 void MinesweeperActivity::newGame() {
-  resetGame();
-  clearSavedGame();
-  enterGrid();
+  // Show a real pre-game option screen instead of changing game behaviour
+  // silently from the main menu.
+  newGameSetupActive = true;
+  assistedCounterChoice = false;
+  gameOver_ = false;
+  selectedIndex_ = 0;
+  viewMode_ = ViewMode::Result;
+  requestUpdate();
 }
 
 void MinesweeperActivity::enterGrid() {
@@ -400,6 +502,7 @@ void MinesweeperActivity::enterGrid() {
 
 void MinesweeperActivity::returnToMenu() {
   if (!gameOver_) saveGame();
+  newGameSetupActive = false;
   viewMode_ = ViewMode::Menu;
   selectedIndex_ = gridSizeIndex_;
   topIndex_ = 0;
@@ -571,13 +674,14 @@ bool MinesweeperActivity::saveGame() {
 
   const uint8_t grid = static_cast<uint8_t>(gridSizeIndex_);
   const uint8_t minesPlaced = minesPlaced_ ? 1 : 0;
+  const uint8_t assistedCounter = assistedCounterActive ? 1 : 0;
   const uint16_t selected = static_cast<uint16_t>(std::clamp(selectedCellIndex_, 0, totalCells() - 1));
   const uint16_t revealedCount = static_cast<uint16_t>(revealedSafeCells_);
   const uint16_t cellCount = static_cast<uint16_t>(totalCells());
 
   bool ok = writeValue(file, SAVE_MAGIC) && writeValue(file, SAVE_VERSION) && writeValue(file, grid) &&
-            writeValue(file, minesPlaced) && writeValue(file, selected) && writeValue(file, revealedCount) &&
-            writeValue(file, cellCount);
+            writeValue(file, minesPlaced) && writeValue(file, assistedCounter) && writeValue(file, selected) &&
+            writeValue(file, revealedCount) && writeValue(file, cellCount);
   if (ok) ok = file.write(mines_.data(), cellCount) == cellCount;
   if (ok) ok = file.write(revealed_.data(), cellCount) == cellCount;
   if (ok) ok = file.write(flagged_.data(), cellCount) == cellCount;
@@ -595,6 +699,8 @@ bool MinesweeperActivity::saveGame() {
 bool MinesweeperActivity::loadSavedGame() {
   undoAvailable = false;
   lossUndoDeadlineUs = 0;
+  assistedCounterActive = false;
+  assistedCounterChoice = false;
   if (!Storage.exists(SAVE_PATH)) return false;
   FsFile file;
   if (!Storage.openFileForRead("MINE", SAVE_PATH, file)) return false;
@@ -603,15 +709,18 @@ bool MinesweeperActivity::loadSavedGame() {
   uint8_t version = 0;
   uint8_t grid = 0;
   uint8_t minesPlaced = 0;
+  uint8_t assistedCounter = 0;
   uint16_t selected = 0;
   uint16_t revealedCount = 0;
   uint16_t cellCount = 0;
 
   bool ok = readValue(file, magic) && readValue(file, version) && readValue(file, grid) &&
-            readValue(file, minesPlaced) && readValue(file, selected) && readValue(file, revealedCount) &&
-            readValue(file, cellCount);
+            readValue(file, minesPlaced);
+  if (ok && version == SAVE_VERSION) ok = readValue(file, assistedCounter);
+  if (ok) ok = readValue(file, selected) && readValue(file, revealedCount) && readValue(file, cellCount);
 
-  if (!ok || magic != SAVE_MAGIC || version != SAVE_VERSION || grid >= kGridOptionCount) {
+  if (!ok || magic != SAVE_MAGIC ||
+      (version != SAVE_VERSION && version != PREVIOUS_SAVE_VERSION) || grid >= kGridOptionCount) {
     file.close();
     clearSavedGame();
     return false;
@@ -640,6 +749,8 @@ bool MinesweeperActivity::loadSavedGame() {
   }
 
   minesPlaced_ = minesPlaced != 0;
+  assistedCounterActive = version == SAVE_VERSION && assistedCounter != 0;
+  assistedCounterChoice = assistedCounterActive;
   selectedCellIndex_ = selected;
   revealedSafeCells_ = revealedCount;
   gameOver_ = false;
@@ -753,14 +864,21 @@ void MinesweeperActivity::renderGrid() {
   const GridGeometry geometry = gridGeometry(renderer, mappedInput, dimension);
 
   int flags = 0;
-  for (int i = 0; i < totalCells(); ++i) flags += flagged_[i] ? 1 : 0;
+  int correctFlags = 0;
+  for (int i = 0; i < totalCells(); ++i) {
+    if (!flagged_[i]) continue;
+    ++flags;
+    if (minesPlaced_ && mines_[i]) ++correctFlags;
+  }
 
   char title[64];
   if (gameOver_) {
     std::snprintf(title, sizeof(title), "%s - %s", won_ ? "Victoire !" : "Perdu !", GRID_DIMS[gridSizeIndex_]);
-  } else {
+  } else if (assistedCounterActive) {
     std::snprintf(title, sizeof(title), "Demineur %s  Mines: %d", GRID_DIMS[gridSizeIndex_],
-                  std::max(0, mineCount() - flags));
+                  std::max(0, mineCount() - correctFlags));
+  } else {
+    std::snprintf(title, sizeof(title), "Demineur %s  Drapeaux: %d", GRID_DIMS[gridSizeIndex_], flags);
   }
   if (mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::draw(renderer, uiTarget_, geometry.header, title, false);
@@ -878,6 +996,54 @@ void MinesweeperActivity::renderResult() {
   renderer.clearScreen();
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect header = headerRect(renderer, mappedInput);
+
+  if (newGameSetupActive) {
+    const NewGameSetupGeometry setup = newGameSetupGeometry(renderer, mappedInput);
+    if (mappedInput.hasTouchHardware()) {
+      TouchHeaderBackButton::draw(renderer, uiTarget_, setup.header, "Nouvelle partie", false);
+    } else {
+      GUI.drawHeader(renderer, setup.header, "Nouvelle partie", nullptr, false);
+    }
+
+    const int x = metrics.contentSidePadding;
+    const int y = setup.header.y + setup.header.height + metrics.verticalSpacing * 2;
+    renderer.drawText(UI_12_FONT_ID, x, y, GRID_LABELS[gridSizeIndex_]);
+
+    const int boxSize = 26;
+    const int boxX = setup.assistRow.x + 4;
+    const int boxY = setup.assistRow.y + 8;
+    renderer.drawRect(boxX, boxY, boxSize, boxSize, 2, true);
+    if (assistedCounterChoice) {
+      renderer.drawLine(boxX + 5, boxY + 13, boxX + 11, boxY + 20, 2, true);
+      renderer.drawLine(boxX + 11, boxY + 20, boxX + 22, boxY + 6, 2, true);
+    }
+    renderer.drawText(UI_12_FONT_ID, boxX + boxSize + 12, boxY + 2, "Aide compteur de mines");
+    renderer.drawText(UI_10_FONT_ID, boxX + boxSize + 12,
+                      boxY + renderer.getLineHeight(UI_12_FONT_ID) + 4,
+                      "Baisse seulement si le drapeau est juste.");
+    if (selectedIndex_ == 0) {
+      renderer.drawRect(setup.assistRow.x, setup.assistRow.y, setup.assistRow.width, setup.assistRow.height, 2, true);
+    }
+
+    renderer.fillRect(setup.startButton.x, setup.startButton.y, setup.startButton.width, setup.startButton.height, false);
+    renderer.drawRect(setup.startButton.x, setup.startButton.y, setup.startButton.width, setup.startButton.height,
+                      selectedIndex_ == 1 ? 3 : 1, true);
+    const char* startLabel = "COMMENCER";
+    const int startFont = UI_12_FONT_ID;
+    const int startTextWidth = renderer.getTextWidth(startFont, startLabel);
+    const int startTextHeight = renderer.getLineHeight(startFont);
+    renderer.drawText(startFont,
+                      setup.startButton.x + std::max(2, (setup.startButton.width - startTextWidth) / 2),
+                      setup.startButton.y + std::max(1, (setup.startButton.height - startTextHeight) / 2),
+                      startLabel);
+
+    const auto labels =
+        mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
+    renderer.displayBuffer();
+    return;
+  }
+
   if (mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);
   } else {
