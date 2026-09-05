@@ -451,14 +451,9 @@ void MinesweeperActivity::checkWin() {
 void MinesweeperActivity::finishGame(const bool won) {
   gameOver_ = true;
   won_ = won;
-  if (!won) {
-    for (int i = 0; i < totalCells(); ++i) {
-      if (mines_[i]) revealed_[i] = 1;
-    }
-  } else {
-    for (int i = 0; i < totalCells(); ++i) {
-      if (mines_[i]) flagged_[i] = 1;
-    }
+  for (int i = 0; i < totalCells(); ++i) {
+    revealed_[i] = 1;
+    if (won && mines_[i]) flagged_[i] = 1;
   }
   clearSavedGame();
   viewMode_ = ViewMode::Result;
@@ -656,8 +651,12 @@ void MinesweeperActivity::renderGrid() {
   for (int i = 0; i < totalCells(); ++i) flags += flagged_[i] ? 1 : 0;
 
   char title[64];
-  std::snprintf(title, sizeof(title), "Demineur %s  Mines: %d", GRID_DIMS[gridSizeIndex_],
-                std::max(0, mineCount() - flags));
+  if (gameOver_) {
+    std::snprintf(title, sizeof(title), "%s - %s", won_ ? "Victoire !" : "Perdu !", GRID_DIMS[gridSizeIndex_]);
+  } else {
+    std::snprintf(title, sizeof(title), "Demineur %s  Mines: %d", GRID_DIMS[gridSizeIndex_],
+                  std::max(0, mineCount() - flags));
+  }
   if (mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::draw(renderer, uiTarget_, geometry.header, title, false);
   } else {
@@ -718,43 +717,27 @@ void MinesweeperActivity::renderGrid() {
     renderer.drawLine(geometry.grid.x, y, geometry.grid.x + geometry.grid.width, y, 1, true);
   }
 
-  const int selectedRow = selectedCellIndex_ / dimension;
-  const int selectedCol = selectedCellIndex_ % dimension;
-  const int selectedX = geometry.grid.x + selectedCol * geometry.cellSize;
-  const int selectedY = geometry.grid.y + selectedRow * geometry.cellSize;
-  if (geometry.cellSize >= 7) {
-    renderer.drawRect(selectedX + 2, selectedY + 2, std::max(1, geometry.cellSize - 3),
-                      std::max(1, geometry.cellSize - 3), 2, true);
-    renderer.drawRect(selectedX + 5, selectedY + 5, std::max(1, geometry.cellSize - 9),
-                      std::max(1, geometry.cellSize - 9), 1, true);
+  if (!gameOver_) {
+    const int selectedRow = selectedCellIndex_ / dimension;
+    const int selectedCol = selectedCellIndex_ % dimension;
+    const int selectedX = geometry.grid.x + selectedCol * geometry.cellSize;
+    const int selectedY = geometry.grid.y + selectedRow * geometry.cellSize;
+    if (geometry.cellSize >= 7) {
+      renderer.drawRect(selectedX + 2, selectedY + 2, std::max(1, geometry.cellSize - 3),
+                        std::max(1, geometry.cellSize - 3), 2, true);
+      renderer.drawRect(selectedX + 5, selectedY + 5, std::max(1, geometry.cellSize - 9),
+                        std::max(1, geometry.cellSize - 9), 1, true);
+    }
   }
 
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "Ouvrir / tenir: drapeau",
-                                             tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = gameOver_
+                          ? mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "")
+                          : mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
+                                                  "Ouvrir / tenir: drapeau", tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
   renderer.displayBuffer();
 }
 
 void MinesweeperActivity::renderResult() {
-  renderer.clearScreen();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect header = headerRect(renderer, mappedInput);
-  const char* title = won_ ? "Victoire !" : "Perdu !";
-  if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, uiTarget_, header, title, false);
-  } else {
-    GUI.drawHeader(renderer, header, title, nullptr, false);
-  }
-
-  const char* line1 = won_ ? "Bravo, grille terminee." : "Une mine a explose.";
-  const char* line2 = "Retour : menu Demineur";
-  const int contentTop = header.y + header.height + metrics.verticalSpacing * 2;
-  const int x = metrics.contentSidePadding;
-  renderer.drawText(UI_12_FONT_ID, x, contentTop, line1);
-  renderer.drawText(UI_10_FONT_ID, x, contentTop + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing,
-                    line2);
-
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
-  renderer.displayBuffer();
+  renderGrid();
 }
