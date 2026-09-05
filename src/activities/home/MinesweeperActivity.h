@@ -30,6 +30,7 @@ class MinesweeperActivity final : public Activity {
   enum class ViewMode {
     Menu,
     Grid,
+    Result,
   };
 
   ButtonNavigator buttonNavigator_;
@@ -67,8 +68,10 @@ class MinesweeperActivity final : public Activity {
   void returnToMenu();
   void loopMenu();
   void loopGrid();
+  void loopResult();
   void renderMenu();
   void renderGrid();
+  void renderResult();
 
   int gridDimension() const;
   int mineCount() const;
