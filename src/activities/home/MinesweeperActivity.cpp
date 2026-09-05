@@ -42,18 +42,18 @@ int undoSelectedCellIndex = 0;
 int64_t lossUndoDeadlineUs = 0;
 
 constexpr const char* GRID_LABELS[] = {
-    "Petite - 8 x 8 - 10 Mines",
+    "Petite - 9 x 9 - 10 Mines",
     "Moyenne - 12 x 12 - 24 Mines",
     "Grande - 16 x 16 - 40 Mines",
 };
 
 constexpr const char* GRID_DIMS[] = {
-    "8 x 8",
+    "9 x 9",
     "12 x 12",
     "16 x 16",
 };
 
-constexpr int GRID_SIZES[] = {8, 12, 16};
+constexpr int GRID_SIZES[] = {9, 12, 16};
 constexpr int MINE_COUNTS[] = {10, 24, 40};
 
 Rect menuListRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
