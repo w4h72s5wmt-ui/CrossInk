@@ -1,0 +1,483 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index acee7a4..634b927 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,7 @@
+ 
+ ### Added
+ 
++- Added a standalone Notes screen for creating and editing UTF-8 `.txt` notes stored in `/Notes`.
+ - Keyboard layouts can now be enabled in Settings and switched from the keyboard's language key.
+ - Xteink X4 Classic support, including its six buttons, SD card, USB Drive, display profile, and board-specific firmware builds.
+ - Full Xteink X4 Pro support, including USB Drive access to its SD card and direct USB file transfers.
+diff --git a/lib/I18n/translations/english.yaml b/lib/I18n/translations/english.yaml
+index 1b564f3..e0ef773 100644
+--- a/lib/I18n/translations/english.yaml
++++ b/lib/I18n/translations/english.yaml
+@@ -9,6 +9,9 @@ STR_PM: "PM"
+ STR_SLEEPING: "SLEEPING"
+ STR_ENTERING_SLEEP: "Going to sleep"
+ STR_BROWSE_FILES: "Browse Files"
++STR_NOTES: "Notes"
++STR_NEW_NOTE: "+ New note"
++STR_NOTE_TITLE: "Note title"
+ STR_BROWSE: "Browse"
+ STR_FILE_TRANSFER: "File Transfer"
+ STR_SETTINGS_TITLE: "Settings"
+diff --git a/lib/I18n/translations/french.yaml b/lib/I18n/translations/french.yaml
+index 0c487bf..1092458 100644
+--- a/lib/I18n/translations/french.yaml
++++ b/lib/I18n/translations/french.yaml
+@@ -14,6 +14,9 @@ STR_BOOTING: "DÉMARRAGE EN COURS"
+ STR_SLEEPING: "VEILLE"
+ STR_ENTERING_SLEEP: "Mise en veille"
+ STR_BROWSE_FILES: "Parcourir les fichiers"
++STR_NOTES: "Notes"
++STR_NEW_NOTE: "+ Nouvelle note"
++STR_NOTE_TITLE: "Titre de la note"
+ STR_BROWSE: "Parcourir"
+ STR_FILE_TRANSFER: "Transfert de fichiers"
+ STR_SETTINGS_TITLE: "Réglages"
+diff --git a/src/activities/home/HomeActivity.cpp b/src/activities/home/HomeActivity.cpp
+index ad16af0..fb0d6f3 100644
+--- a/src/activities/home/HomeActivity.cpp
++++ b/src/activities/home/HomeActivity.cpp
+@@ -35,6 +35,7 @@
+ #include "RecentBookProgress.h"
+ #include "RecentBooksStore.h"
+ #include "SavedItemsHomeActivity.h"
++#include "NotesActivity.h"
+ #include "components/UITheme.h"
+ #include "components/themes/dashboard/DashboardTheme.h"
+ #include "components/themes/lyra/LyraCarouselTheme.h"
+@@ -60,6 +61,7 @@ enum class HomeMenuAction {
+   OpdsBrowser,
+   ReadingStats,
+   Bookmarks,
++  Notes,
+   FileTransfer,
+   Settings,
+ };
+@@ -71,7 +73,7 @@ struct HomeMenuEntry {
+ };
+ 
+ struct HomeMenuEntries {
+-  static constexpr int kCapacity = 8;
++  static constexpr int kCapacity = 9;
+   std::array<HomeMenuEntry, kCapacity> entries{};
+   int count = 0;
+ 
+@@ -277,6 +279,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
+     items.push({savedItemsLabel(hasBookmarks, hasClippings), BookmarkIcon, HomeMenuAction::Bookmarks});
+   }
+ 
++  items.push({tr(STR_NOTES), BookmarkIcon, HomeMenuAction::Notes});
+   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
+   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
+ }
+@@ -301,6 +304,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
+     items.push({tr(STR_READING_STATS), Chart, HomeMenuAction::ReadingStats});
+   }
+ 
++  items.push({tr(STR_NOTES), BookmarkIcon, HomeMenuAction::Notes});
+   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
+   return items;
+ }
+@@ -596,7 +600,7 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
+ 
+ int HomeActivity::getMenuItemCount() const {
+   const auto& metrics = UITheme::getInstance().getMetrics();
+-  int count = 4;  // File Browser, Recents, File transfer, Settings
++  int count = 5;  // File Browser, Recents, Notes, File transfer, Settings
+   if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
+     count += getVisibleRecentBookCount();
+   } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
+@@ -1545,6 +1549,9 @@ void HomeActivity::loop() {
+           case HomeMenuAction::Bookmarks:
+             onSavedItemsOpen();
+             break;
++          case HomeMenuAction::Notes:
++            onNotesOpen();
++            break;
+           case HomeMenuAction::FileTransfer:
+             onFileTransferOpen();
+             break;
+@@ -1786,6 +1793,9 @@ void HomeActivity::loop() {
+       case HomeMenuAction::Bookmarks:
+         onSavedItemsOpen();
+         break;
++      case HomeMenuAction::Notes:
++        onNotesOpen();
++        break;
+       case HomeMenuAction::FileTransfer:
+         onFileTransferOpen();
+         break;
+@@ -2316,6 +2326,10 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
+ 
+ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+ 
++void HomeActivity::onNotesOpen() {
++  startActivityForResult(std::make_unique<NotesActivity>(renderer, mappedInput), [](const ActivityResult&) {});
++}
++
+ void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+ 
+ void HomeActivity::onReadingStatsOpen() {
+diff --git a/src/activities/home/HomeActivity.h b/src/activities/home/HomeActivity.h
+index 008603e..c8129ae 100644
+--- a/src/activities/home/HomeActivity.h
++++ b/src/activities/home/HomeActivity.h
+@@ -91,6 +91,7 @@ class HomeActivity final : public Activity {
+   void onOpdsBrowserOpen();
+   void onReadingStatsOpen();
+   void onSavedItemsOpen();
++  void onNotesOpen();
+ 
+   int getMenuItemCount() const;
+   bool storeCoverBuffer();    // Store frame buffer for cover image
+diff --git a/src/activities/home/NotesActivity.cpp b/src/activities/home/NotesActivity.cpp
+new file mode 100644
+index 0000000..fda1988
+--- /dev/null
++++ b/src/activities/home/NotesActivity.cpp
+@@ -0,0 +1,233 @@
++#include "NotesActivity.h"
++
++#include <GfxRenderer.h>
++#include <HalStorage.h>
++#include <I18n.h>
++
++#include <algorithm>
++#include <cctype>
++#include <memory>
++
++#include "MappedInputManager.h"
++#include "activities/util/KeyboardEntryActivity.h"
++#include "components/TouchHeaderBackButton.h"
++#include "components/UITheme.h"
++#include "fontIds.h"
++
++namespace {
++constexpr UIIcon kNoteIcon = BookmarkIcon;
++}
++
++NotesActivity::NotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
++    : Activity("Notes", renderer, mappedInput) {}
++
++void NotesActivity::onEnter() {
++  Activity::onEnter();
++  Storage.mkdir(kNotesDir);
++  reloadNotes();
++  selectorIndex = 0;
++  requestUpdate();
++}
++
++void NotesActivity::onExit() {
++  notes.clear();
++  Activity::onExit();
++}
++
++void NotesActivity::reloadNotes() {
++  notes.clear();
++  auto dir = Storage.open(kNotesDir);
++  if (!dir || !dir.isDirectory()) {
++    if (dir) dir.close();
++    return;
++  }
++
++  char name[256];
++  for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
++    if (!file.isDirectory()) {
++      file.getName(name, sizeof(name));
++      const std::string filename{name};
++      if (filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".txt") == 0) {
++        notes.push_back(filename);
++      }
++    }
++    file.close();
++  }
++  dir.close();
++  std::sort(notes.begin(), notes.end());
++}
++
++std::string NotesActivity::displayName(const std::string& filename) {
++  if (filename.size() > 4 && filename.compare(filename.size() - 4, 4, ".txt") == 0) {
++    return filename.substr(0, filename.size() - 4);
++  }
++  return filename;
++}
++
++std::string NotesActivity::sanitizeFilename(const std::string& title) {
++  std::string out;
++  out.reserve(std::min<size_t>(title.size(), 48));
++  for (const unsigned char c : title) {
++    if (out.size() >= 48) break;
++    if (c < 0x20 || c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' ||
++        c == '>' || c == '|') {
++      out.push_back('_');
++    } else {
++      out.push_back(static_cast<char>(c));
++    }
++  }
++  while (!out.empty() && (out.back() == ' ' || out.back() == '.')) out.pop_back();
++  if (out.empty()) out = "Note";
++  return out;
++}
++
++std::string NotesActivity::uniquePathForTitle(const std::string& title) const {
++  const std::string base = sanitizeFilename(title);
++  std::string path = std::string(kNotesDir) + "/" + base + ".txt";
++  if (!Storage.exists(path.c_str())) return path;
++
++  for (int suffix = 2; suffix < 1000; ++suffix) {
++    path = std::string(kNotesDir) + "/" + base + " " + std::to_string(suffix) + ".txt";
++    if (!Storage.exists(path.c_str())) return path;
++  }
++  return std::string(kNotesDir) + "/Note.txt";
++}
++
++bool NotesActivity::loadNote(const std::string& path, std::string& text) const {
++  text.clear();
++  FsFile file;
++  if (!Storage.openFileForRead("NOTES", path, file)) return false;
++
++  const uint32_t size = file.size();
++  if (size > kMaxNoteBytes) {
++    file.close();
++    return false;
++  }
++
++  text.resize(size);
++  if (size > 0 && file.read(text.data(), size) != static_cast<int>(size)) {
++    file.close();
++    text.clear();
++    return false;
++  }
++  file.close();
++  return true;
++}
++
++bool NotesActivity::saveNote(const std::string& path, const std::string& text) const {
++  if (text.size() > kMaxNoteBytes) return false;
++  FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
++  if (!file) return false;
++  const size_t written = text.empty() ? 0 : file.write(reinterpret_cast<const uint8_t*>(text.data()), text.size());
++  file.close();
++  return written == text.size();
++}
++
++void NotesActivity::editNote(const std::string& path, const std::string& title) {
++  std::string initialText;
++  if (!loadNote(path, initialText)) initialText.clear();
++
++  startActivityForResult(
++      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes,
++                                              InputType::Multiline),
++      [this, path](const ActivityResult& result) {
++        if (result.isCancelled) return;
++        const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
++        if (!keyboard) return;
++        if (!saveNote(path, keyboard->text)) {
++          LOG_ERR("NOTES", "Failed to save note: %s", path.c_str());
++        }
++        reloadNotes();
++      });
++}
++
++void NotesActivity::createNote() {
++  startActivityForResult(
++      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_TITLE), "", 48, InputType::Text, 1),
++      [this](const ActivityResult& result) {
++        if (result.isCancelled) return;
++        const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
++        if (!keyboard || keyboard->text.empty()) return;
++        const std::string path = uniquePathForTitle(keyboard->text);
++        if (!saveNote(path, "")) {
++          LOG_ERR("NOTES", "Failed to create note: %s", path.c_str());
++          return;
++        }
++        reloadNotes();
++        editNote(path, keyboard->text);
++      });
++}
++
++void NotesActivity::openSelectedNote() {
++  if (selectorIndex == 0) {
++    createNote();
++    return;
++  }
++  const int noteIndex = selectorIndex - 1;
++  if (noteIndex < 0 || noteIndex >= static_cast<int>(notes.size())) return;
++  const std::string& filename = notes[noteIndex];
++  editNote(std::string(kNotesDir) + "/" + filename, displayName(filename));
++}
++
++void NotesActivity::loop() {
++  if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
++    finish();
++    return;
++  }
++
++  int tappedIndex = -1;
++  if (mappedInput.wasItemTapped(tappedIndex)) {
++    if (tappedIndex >= 0 && tappedIndex <= static_cast<int>(notes.size())) {
++      selectorIndex = tappedIndex;
++      openSelectedNote();
++      return;
++    }
++  }
++
++  const int itemCount = static_cast<int>(notes.size()) + 1;
++  buttonNavigator.onNextRelease([this, itemCount] {
++    selectorIndex = ButtonNavigator::nextIndex(selectorIndex, itemCount);
++    requestUpdate();
++  });
++  buttonNavigator.onPreviousRelease([this, itemCount] {
++    selectorIndex = ButtonNavigator::previousIndex(selectorIndex, itemCount);
++    requestUpdate();
++  });
++
++  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
++    openSelectedNote();
++    return;
++  }
++  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
++    finish();
++  }
++}
++
++void NotesActivity::render(RenderLock&&) {
++  renderer.clearScreen();
++  const auto& metrics = UITheme::getInstance().getMetrics();
++  const int width = renderer.getScreenWidth();
++  const int height = renderer.getScreenHeight();
++  const Rect header{0, metrics.topPadding, width, TouchHeaderBackButton::height(metrics, mappedInput)};
++  if (mappedInput.hasTouchHardware()) {
++    TouchHeaderBackButton::draw(renderer, header, tr(STR_NOTES), false);
++  } else {
++    GUI.drawHeader(renderer, header, tr(STR_NOTES));
++  }
++
++  const int top = header.y + header.height + metrics.verticalSpacing;
++  const int bottomReserve = metrics.buttonHintsHeight + metrics.verticalSpacing;
++  const int itemCount = static_cast<int>(notes.size()) + 1;
++  GUI.drawButtonMenu(
++      renderer, Rect{0, top, width, std::max(1, height - top - bottomReserve)}, itemCount, selectorIndex,
++      [this](int index) -> const char* {
++        if (index == 0) return tr(STR_NEW_NOTE);
++        static std::string label;
++        label = displayName(notes[static_cast<size_t>(index - 1)]);
++        return label.c_str();
++      },
++      [](int index) { return index == 0 ? Recent : kNoteIcon; });
++
++  const auto labels = mappedInput.mapLabels(tr(STR_SELECT), tr(STR_BACK), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
++  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
++}
+diff --git a/src/activities/home/NotesActivity.h b/src/activities/home/NotesActivity.h
+new file mode 100644
+index 0000000..e855f73
+--- /dev/null
++++ b/src/activities/home/NotesActivity.h
+@@ -0,0 +1,35 @@
++#pragma once
++
++#include <string>
++#include <vector>
++
++#include "activities/Activity.h"
++#include "util/ButtonNavigator.h"
++
++class NotesActivity final : public Activity {
++ public:
++  explicit NotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
++
++  void onEnter() override;
++  void onExit() override;
++  void loop() override;
++  void render(RenderLock&&) override;
++
++ private:
++  static constexpr const char* kNotesDir = "/Notes";
++  static constexpr size_t kMaxNoteBytes = 32 * 1024;
++
++  ButtonNavigator buttonNavigator;
++  std::vector<std::string> notes;
++  int selectorIndex = 0;
++
++  void reloadNotes();
++  void createNote();
++  void openSelectedNote();
++  void editNote(const std::string& path, const std::string& title);
++  bool loadNote(const std::string& path, std::string& text) const;
++  bool saveNote(const std::string& path, const std::string& text) const;
++  std::string uniquePathForTitle(const std::string& title) const;
++  static std::string displayName(const std::string& filename);
++  static std::string sanitizeFilename(const std::string& title);
++};
+diff --git a/src/activities/util/KeyboardEntryActivity.cpp b/src/activities/util/KeyboardEntryActivity.cpp
+index d76c1b9..a0ed62c 100644
+--- a/src/activities/util/KeyboardEntryActivity.cpp
++++ b/src/activities/util/KeyboardEntryActivity.cpp
+@@ -291,6 +291,10 @@ bool KeyboardEntryActivity::activateValue(const int16_t value, const bool longPr
+       clampSelection();
+       return true;
+     case fui::QWERTY_KEY_ENTER:
++      if (inputType == InputType::Multiline) {
++        insertUtf8("\n");
++        return true;
++      }
+       if (text.length() < minLength) return true;
+       onComplete(text);
+       return false;
+@@ -344,6 +348,11 @@ bool KeyboardEntryActivity::clearAllOrAltOnSelected() {
+ 
+ std::string KeyboardEntryActivity::displayTextForCurrentState() const {
+   std::string displayText = text;
++  if (inputType == InputType::Multiline) {
++    for (char& c : displayText) {
++      if (c == '\n' || c == '\r') c = ' ';
++    }
++  }
+   if (inputType != InputType::Password || passwordVisible) {
+     return displayText;
+   }
+@@ -528,7 +537,11 @@ fui::Rect KeyboardEntryActivity::keyboardRect() const {
+ void KeyboardEntryActivity::loop() {
+ #if CROSSINK_APP_CAP_TOUCH
+   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
+-    onCancel();
++    if (inputType == InputType::Multiline) {
++      onComplete(text);
++    } else {
++      onCancel();
++    }
+     return;
+   }
+ 
+@@ -731,7 +744,11 @@ void KeyboardEntryActivity::loop() {
+ 
+   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+     mappedInput.suppressNextBackRelease();
+-    onCancel();
++    if (inputType == InputType::Multiline) {
++      onComplete(text);
++    } else {
++      onCancel();
++    }
+   }
+ 
+   if (hintVisible && !cursorMode && millis() - hintShowTime > 4000) {
+diff --git a/src/activities/util/KeyboardEntryActivity.h b/src/activities/util/KeyboardEntryActivity.h
+index 971bed1..d1412cb 100644
+--- a/src/activities/util/KeyboardEntryActivity.h
++++ b/src/activities/util/KeyboardEntryActivity.h
+@@ -10,7 +10,7 @@
+ #include "activities/Activity.h"
+ #include "util/ButtonNavigator.h"
+ 
+-enum class InputType { Text, Password, Url };
++enum class InputType { Text, Password, Url, Multiline };
+ 
+ // Text entry on the FreeInkUI keyboard component: the SDK layout tables and
+ // keyboard() do the key rendering and hit-rect registration, InteractionBuffer
