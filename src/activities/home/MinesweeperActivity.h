@@ -22,11 +22,17 @@ class MinesweeperActivity final : public Activity {
   static constexpr int kGridOptionCount = 3;
   static constexpr int kMenuRowCount = 5;
 
+  enum class ViewMode {
+    Menu,
+    Grid,
+  };
+
   ButtonNavigator buttonNavigator_;
   freeink::ui::GfxRendererTarget uiTarget_;
   UiApp app_;
   std::atomic<bool> uiReady_{false};
 
+  ViewMode viewMode_ = ViewMode::Menu;
   int selectedIndex_ = 0;
   int gridSizeIndex_ = 0;
   int visibleRows_ = 1;
@@ -41,4 +47,11 @@ class MinesweeperActivity final : public Activity {
   void showInfo(const char* title, const char* body);
   void continueGame();
   void newGame();
+  void enterGrid();
+  void returnToMenu();
+  void loopMenu();
+  void loopGrid();
+  void renderMenu();
+  void renderGrid();
+  int gridDimension() const;
 };
