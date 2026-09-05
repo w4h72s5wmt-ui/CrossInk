@@ -3,7 +3,9 @@
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
 
+#include <array>
 #include <atomic>
+#include <cstdint>
 
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
@@ -13,6 +15,7 @@ class MinesweeperActivity final : public Activity {
   MinesweeperActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
 
   void onEnter() override;
+  void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
 
@@ -21,6 +24,8 @@ class MinesweeperActivity final : public Activity {
 
   static constexpr int kGridOptionCount = 3;
   static constexpr int kMenuRowCount = 5;
+  static constexpr int kMaxCells = 16 * 16;
+  static constexpr unsigned long kFlagHoldMs = 700;
 
   enum class ViewMode {
     Menu,
@@ -39,7 +44,16 @@ class MinesweeperActivity final : public Activity {
   int topIndex_ = 0;
   bool initialViewportPending_ = true;
   int selectedCellIndex_ = 0;
-  int confirmedCellIndex_ = -1;
+
+  std::array<uint8_t, kMaxCells> mines_{};
+  std::array<uint8_t, kMaxCells> revealed_{};
+  std::array<uint8_t, kMaxCells> flagged_{};
+  bool minesPlaced_ = false;
+  bool gameOver_ = false;
+  bool won_ = false;
+  bool hasSavedGame_ = false;
+  bool confirmHoldHandled_ = false;
+  int revealedSafeCells_ = 0;
 
   static void menuScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
@@ -55,5 +69,21 @@ class MinesweeperActivity final : public Activity {
   void loopGrid();
   void renderMenu();
   void renderGrid();
+
   int gridDimension() const;
+  int mineCount() const;
+  int totalCells() const;
+  int adjacentMineCount(int index) const;
+  bool isValidCell(int row, int col) const;
+  void resetGame();
+  void placeMines(int firstIndex);
+  void revealCell(int index);
+  void revealFlood(int startIndex);
+  void toggleFlag(int index);
+  void checkWin();
+  void finishGame(bool won);
+
+  bool loadSavedGame();
+  bool saveGame();
+  void clearSavedGame();
 };
