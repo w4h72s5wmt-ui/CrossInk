@@ -23,6 +23,8 @@ jobs:
           git apply crossink-notes-alpha1.patch
           git apply --check crossink-notes-alpha2-touch.patch
           git apply crossink-notes-alpha2-touch.patch
+          git apply --check crossink-notes-alpha3-editor.patch
+          git apply crossink-notes-alpha3-editor.patch
 
       - uses: actions/setup-python@v6
         with:
@@ -53,7 +55,7 @@ jobs:
       - name: Upload X4 Pro Notes firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-notes-alpha2
+          name: firmware-x4-pro-notes-alpha3
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -61,6 +63,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-notes-alpha2-build-log
+          name: x4-pro-notes-alpha3-build-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
