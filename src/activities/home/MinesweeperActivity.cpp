@@ -42,9 +42,9 @@ int undoSelectedCellIndex = 0;
 int64_t lossUndoDeadlineUs = 0;
 
 constexpr const char* GRID_LABELS[] = {
-    "Petite - 8 x 8",
-    "Moyenne - 12 x 12",
-    "Grande - 16 x 16",
+    "Petite - 8 x 8 - 10 Mines",
+    "Moyenne - 12 x 12 - 24 Mines",
+    "Grande - 16 x 16 - 40 Mines",
 };
 
 constexpr const char* GRID_DIMS[] = {
@@ -831,12 +831,32 @@ void MinesweeperActivity::renderGrid() {
     }
   }
 
-  const auto labels = gameOver_
-                          ? mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
-                                                  (!won_ && undoAvailable) ? "Annuler (5 s)" : "", "", "")
-                          : mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
-                                                  "Ouvrir / tenir: drapeau", tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
+  const bool showUndoButton = gameOver_ && !won_ && undoAvailable && esp_timer_get_time() < lossUndoDeadlineUs;
+  if (showUndoButton) {
+    // Draw a real, high-contrast button instead of relying on the generic
+    // hardware hint labels, so it is unmissable on e-ink and touchable.
+    const auto& metrics = UITheme::getInstance().getMetrics();
+    const int footerTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
+    const int buttonX = renderer.getScreenWidth() / 4;
+    const int buttonY = footerTop + 2;
+    const int buttonWidth = renderer.getScreenWidth() / 2;
+    const int buttonHeight = std::max(12, metrics.buttonHintsHeight - 4);
+    const char* undoLabel = "ANNULER - 5 s";
+    const int font = UI_12_FONT_ID;
+    const int textWidth = renderer.getTextWidth(font, undoLabel);
+    const int textHeight = renderer.getLineHeight(font);
+
+    renderer.fillRect(buttonX, buttonY, buttonWidth, buttonHeight, false);
+    renderer.drawRect(buttonX, buttonY, buttonWidth, buttonHeight, 2, true);
+    renderer.drawText(font, buttonX + std::max(2, (buttonWidth - textWidth) / 2),
+                      buttonY + std::max(1, (buttonHeight - textHeight) / 2), undoLabel);
+  } else {
+    const auto labels = gameOver_
+                            ? mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "")
+                            : mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
+                                                    "Ouvrir / tenir: drapeau", tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
+  }
   renderer.displayBuffer();
 }
 
