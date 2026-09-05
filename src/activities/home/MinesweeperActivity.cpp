@@ -306,9 +306,10 @@ void MinesweeperActivity::loopResult() {
     return;
   }
 
-  // During the five-second grace period, keep the solution hidden. Once it
-  // expires, reveal the complete board and permanently disable undo.
-  if (!won_ && undoAvailable && esp_timer_get_time() >= lossUndoDeadlineUs) {
+  // Start the five-second countdown only after the loss screen has actually
+  // been rendered. A zero deadline means the visible undo screen is still
+  // being presented for the first time.
+  if (!won_ && undoAvailable && lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) {
     undoAvailable = false;
     lossUndoDeadlineUs = 0;
     for (int i = 0; i < totalCells(); ++i) revealed_[i] = 1;
@@ -316,7 +317,8 @@ void MinesweeperActivity::loopResult() {
   }
 
   const auto undoLoss = [this]() {
-    if (won_ || !undoAvailable || esp_timer_get_time() >= lossUndoDeadlineUs) return;
+    if (won_ || !undoAvailable) return;
+    if (lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) return;
     mines_ = undoMines;
     revealed_ = undoRevealed;
     flagged_ = undoFlagged;
@@ -339,11 +341,13 @@ void MinesweeperActivity::loopResult() {
 
   int tx = 0;
   int ty = 0;
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect undoTouchArea{renderer.getScreenWidth() / 4,
-                           renderer.getScreenHeight() - metrics.buttonHintsHeight,
-                           renderer.getScreenWidth() / 2,
-                           metrics.buttonHintsHeight};
+  const GridGeometry geometry = gridGeometry(renderer, mappedInput, gridDimension());
+  const int undoWidth = std::min(260, renderer.getScreenWidth() - 40);
+  const int undoHeight = 48;
+  const int undoX = (renderer.getScreenWidth() - undoWidth) / 2;
+  const int undoY = std::min(renderer.getScreenHeight() - undoHeight - 16,
+                             geometry.grid.y + geometry.grid.height + 16);
+  const Rect undoTouchArea{undoX, undoY, undoWidth, undoHeight};
   if (!won_ && undoAvailable && mappedInput.wasScreenTapped(tx, ty) && pointInRect(undoTouchArea, tx, ty)) {
     undoLoss();
     return;
@@ -549,9 +553,9 @@ void MinesweeperActivity::finishGame(const bool won) {
       if (mines_[i]) flagged_[i] = 1;
     }
   } else {
-    // Do not reveal the solution yet. The player gets five seconds to undo the
-    // mine click; only the mine just hit remains visible during this window.
-    lossUndoDeadlineUs = esp_timer_get_time() + LOSS_UNDO_WINDOW_US;
+    // Keep the solution hidden. The five-second timer is armed only after the
+    // undo button has actually been drawn on the e-ink screen.
+    lossUndoDeadlineUs = 0;
   }
 
   clearSavedGame();
@@ -831,17 +835,16 @@ void MinesweeperActivity::renderGrid() {
     }
   }
 
-  const bool showUndoButton = gameOver_ && !won_ && undoAvailable && esp_timer_get_time() < lossUndoDeadlineUs;
+  const bool showUndoButton = gameOver_ && !won_ && undoAvailable;
   if (showUndoButton) {
-    // Draw a real, high-contrast button instead of relying on the generic
-    // hardware hint labels, so it is unmissable on e-ink and touchable.
-    const auto& metrics = UITheme::getInstance().getMetrics();
-    const int footerTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
-    const int buttonX = renderer.getScreenWidth() / 4;
-    const int buttonY = footerTop + 2;
-    const int buttonWidth = renderer.getScreenWidth() / 2;
-    const int buttonHeight = std::max(12, metrics.buttonHintsHeight - 4);
-    const char* undoLabel = "ANNULER - 5 s";
+    // Put the undo control directly below the grid. This remains visible on
+    // touch-only layouts where the generic button-hints footer can be absent.
+    const int buttonWidth = std::min(260, renderer.getScreenWidth() - 40);
+    const int buttonHeight = 48;
+    const int buttonX = (renderer.getScreenWidth() - buttonWidth) / 2;
+    const int buttonY = std::min(renderer.getScreenHeight() - buttonHeight - 16,
+                                 geometry.grid.y + geometry.grid.height + 16);
+    const char* undoLabel = "ANNULER (5 s)";
     const int font = UI_12_FONT_ID;
     const int textWidth = renderer.getTextWidth(font, undoLabel);
     const int textHeight = renderer.getLineHeight(font);
@@ -858,6 +861,12 @@ void MinesweeperActivity::renderGrid() {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
   }
   renderer.displayBuffer();
+
+  // Arm the grace-period clock after the frame containing the button has been
+  // sent to the display, so the user gets the full five seconds to react.
+  if (showUndoButton && lossUndoDeadlineUs == 0) {
+    lossUndoDeadlineUs = esp_timer_get_time() + LOSS_UNDO_WINDOW_US;
+  }
 }
 
 void MinesweeperActivity::renderResult() {
