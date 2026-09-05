@@ -1,0 +1,119 @@
+diff --git a/src/activities/home/NotesActivity.cpp b/src/activities/home/NotesActivity.cpp
+index dbd1ea8..6119a05 100644
+--- a/src/activities/home/NotesActivity.cpp
++++ b/src/activities/home/NotesActivity.cpp
+@@ -18,6 +18,7 @@ constexpr int kTopMargin = 12;
+ constexpr int kControlHeight = 52;
+ constexpr int kControlGap = 8;
+ constexpr int kSideButtonWidth = 52;
++constexpr int kSearchClearWidth = 44;
+ constexpr int kRowHeight = 58;
+ constexpr int kRowSidePadding = 16;
+ constexpr int kCornerRadius = 6;
+@@ -267,7 +268,17 @@ void NotesActivity::loop() {
+       return;
+     }
+     if (pointInRect(searchRect, tx, ty)) {
+-      editSearch();
++      const Rect clearRect{searchRect.x + searchRect.width - kSearchClearWidth, searchRect.y, kSearchClearWidth,
++                           searchRect.height};
++      if (!searchQuery.empty() && pointInRect(clearRect, tx, ty)) {
++        searchQuery.clear();
++        selectorIndex = 0;
++        topIndex = 0;
++        applyFilter();
++        requestUpdate();
++      } else {
++        editSearch();
++      }
+       return;
+     }
+     if (pointInRect(closeRect, tx, ty)) {
+@@ -337,12 +348,20 @@ void NotesActivity::render(RenderLock&&) {
+   drawCenteredLabel(renderer, closeRect, "X");
+ 
+   const char* placeholder = tr(STR_SEARCH_NOTES);
+-  const std::string searchLabel = searchQuery.empty()
+-                                      ? std::string(placeholder)
+-                                      : renderer.truncatedText(UI_12_FONT_ID, searchQuery.c_str(), searchRect.width - 20);
++  const int searchTextReserve = searchQuery.empty() ? 20 : 20 + kSearchClearWidth;
++  const std::string searchLabel =
++      searchQuery.empty()
++          ? std::string(placeholder)
++          : renderer.truncatedText(UI_12_FONT_ID, searchQuery.c_str(), searchRect.width - searchTextReserve);
+   const int searchTextH = renderer.getLineHeight(UI_12_FONT_ID);
+   renderer.drawText(UI_12_FONT_ID, searchRect.x + 10, searchRect.y + (searchRect.height - searchTextH) / 2,
+                     searchLabel.c_str());
++  if (!searchQuery.empty()) {
++    const Rect clearRect{searchRect.x + searchRect.width - kSearchClearWidth, searchRect.y, kSearchClearWidth,
++                         searchRect.height};
++    renderer.drawLine(clearRect.x, clearRect.y + 8, clearRect.x, clearRect.y + clearRect.height - 9, 1, true);
++    drawCenteredLabel(renderer, clearRect, "X");
++  }
+ 
+   const int listTop = controlsY + kControlHeight + kControlGap;
+   const int listBottom = height - metrics.buttonHintsHeight - kTopMargin;
+diff --git a/src/activities/util/KeyboardEntryActivity.cpp b/src/activities/util/KeyboardEntryActivity.cpp
+index bf85a48..cef7900 100644
+--- a/src/activities/util/KeyboardEntryActivity.cpp
++++ b/src/activities/util/KeyboardEntryActivity.cpp
+@@ -348,11 +348,6 @@ bool KeyboardEntryActivity::clearAllOrAltOnSelected() {
+ 
+ std::string KeyboardEntryActivity::displayTextForCurrentState() const {
+   std::string displayText = text;
+-  if (inputType == InputType::Multiline) {
+-    for (char& c : displayText) {
+-      if (c == '\n' || c == '\r') c = ' ';
+-    }
+-  }
+   if (inputType != InputType::Password || passwordVisible) {
+     return displayText;
+   }
+@@ -393,9 +388,11 @@ bool KeyboardEntryActivity::rangeIsRtl(std::string& s, const int start, const in
+ 
+ int KeyboardEntryActivity::lineBreakEnd(std::string& s, const int start, const int maxWidth) const {
+   const int len = static_cast<int>(s.length());
+-  if (measureRange(s, start, len) <= maxWidth) return len;
++  const size_t newlinePos = s.find('\n', static_cast<size_t>(start));
++  const int hardEnd = newlinePos == std::string::npos ? len : static_cast<int>(newlinePos);
++  if (measureRange(s, start, hardEnd) <= maxWidth) return hardEnd;
+   int lo = start + 1;
+-  int hi = len - 1;
++  int hi = hardEnd - 1;
+   int best = start + 1;
+   while (lo <= hi) {
+     const int mid = lo + (hi - lo) / 2;
+@@ -456,6 +453,7 @@ KeyboardEntryActivity::InputFieldTouchTarget KeyboardEntryActivity::inputFieldTo
+ 
+   while (true) {
+     const int lineEndIdx = lineBreakEnd(displayText, lineStartIdx, maxLineWidth);
++    const bool forcedBreak = lineEndIdx < static_cast<int>(displayText.length()) && displayText[lineEndIdx] == '\n';
+     const int textWidth = measureRange(displayText, lineStartIdx, lineEndIdx);
+     const bool isLastLine = lineEndIdx == static_cast<int>(displayText.length());
+     if (isLastLine && inputType == InputType::Password && x >= effectiveMargin + maxLineWidth &&
+@@ -504,7 +502,7 @@ KeyboardEntryActivity::InputFieldTouchTarget KeyboardEntryActivity::inputFieldTo
+     }
+ 
+     lineY += lineHeight;
+-    lineStartIdx = lineEndIdx;
++    lineStartIdx = forcedBreak ? lineEndIdx + 1 : lineEndIdx;
+   }
+ 
+   const int underlineBottom = lineY + lineHeight + metrics.verticalSpacing + 8;
+@@ -818,6 +816,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
+ 
+   while (true) {
+     const int lineEndIdx = lineBreakEnd(displayText, lineStartIdx, maxLineWidth);
++    const bool forcedBreak = lineEndIdx < static_cast<int>(displayText.length()) && displayText[lineEndIdx] == '\n';
+     const std::string lineText = displayText.substr(lineStartIdx, lineEndIdx - lineStartIdx);
+     textWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, lineText.c_str(), EpdFontFamily::REGULAR);
+     {
+@@ -875,7 +874,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
+       }
+ 
+       inputHeight += lineHeight;
+-      lineStartIdx = lineEndIdx;
++      lineStartIdx = forcedBreak ? lineEndIdx + 1 : lineEndIdx;
+     }
+   }
+ 
