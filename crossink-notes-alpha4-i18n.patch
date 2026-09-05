@@ -1,0 +1,44 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index acee7a4..634b927 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,7 @@
+ 
+ ### Added
+ 
++- Added a standalone Notes screen for creating and editing UTF-8 `.txt` notes stored in `/Notes`.
+ - Keyboard layouts can now be enabled in Settings and switched from the keyboard's language key.
+ - Xteink X4 Classic support, including its six buttons, SD card, USB Drive, display profile, and board-specific firmware builds.
+ - Full Xteink X4 Pro support, including USB Drive access to its SD card and direct USB file transfers.
+diff --git a/lib/I18n/translations/english.yaml b/lib/I18n/translations/english.yaml
+index 1b564f3..5976362 100644
+--- a/lib/I18n/translations/english.yaml
++++ b/lib/I18n/translations/english.yaml
+@@ -9,6 +9,11 @@ STR_PM: "PM"
+ STR_SLEEPING: "SLEEPING"
+ STR_ENTERING_SLEEP: "Going to sleep"
+ STR_BROWSE_FILES: "Browse Files"
++STR_NOTES: "Notes"
++STR_NEW_NOTE: "+ New note"
++STR_NOTE_TITLE: "Note title"
++STR_SEARCH_NOTES: "Search notes"
++STR_NO_NOTES: "No notes"
+ STR_BROWSE: "Browse"
+ STR_FILE_TRANSFER: "File Transfer"
+ STR_SETTINGS_TITLE: "Settings"
+diff --git a/lib/I18n/translations/french.yaml b/lib/I18n/translations/french.yaml
+index 0c487bf..24168e5 100644
+--- a/lib/I18n/translations/french.yaml
++++ b/lib/I18n/translations/french.yaml
+@@ -14,6 +14,11 @@ STR_BOOTING: "DÉMARRAGE EN COURS"
+ STR_SLEEPING: "VEILLE"
+ STR_ENTERING_SLEEP: "Mise en veille"
+ STR_BROWSE_FILES: "Parcourir les fichiers"
++STR_NOTES: "Notes"
++STR_NEW_NOTE: "+ Nouvelle note"
++STR_NOTE_TITLE: "Titre de la note"
++STR_SEARCH_NOTES: "Rechercher dans les notes"
++STR_NO_NOTES: "Aucune note"
+ STR_BROWSE: "Parcourir"
+ STR_FILE_TRANSFER: "Transfert de fichiers"
+ STR_SETTINGS_TITLE: "Réglages"
