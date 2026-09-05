@@ -17,14 +17,16 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply Notes alpha patches
+      - name: Apply Notes alpha 4 patches
         run: |
-          git apply --check crossink-notes-alpha1.patch
-          git apply crossink-notes-alpha1.patch
-          git apply --check crossink-notes-alpha2-touch.patch
-          git apply crossink-notes-alpha2-touch.patch
-          git apply --check crossink-notes-alpha3-editor.patch
-          git apply crossink-notes-alpha3-editor.patch
+          git apply --check crossink-notes-alpha4-i18n.patch
+          git apply crossink-notes-alpha4-i18n.patch
+          git apply --check crossink-notes-alpha4-home.patch
+          git apply crossink-notes-alpha4-home.patch
+          git apply --check crossink-notes-alpha4-notes.patch
+          git apply crossink-notes-alpha4-notes.patch
+          git apply --check crossink-notes-alpha4-keyboard.patch
+          git apply crossink-notes-alpha4-keyboard.patch
 
       - uses: actions/setup-python@v6
         with:
@@ -55,7 +57,7 @@ jobs:
       - name: Upload X4 Pro Notes firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-notes-alpha3
+          name: firmware-x4-pro-notes-alpha4
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -63,6 +65,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-notes-alpha3-build-log
+          name: x4-pro-notes-alpha4-build-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
