@@ -1,0 +1,429 @@
+diff --git a/src/activities/home/NotesActivity.cpp b/src/activities/home/NotesActivity.cpp
+new file mode 100644
+index 0000000..dbd1ea8
+--- /dev/null
++++ b/src/activities/home/NotesActivity.cpp
+@@ -0,0 +1,376 @@
++#include "NotesActivity.h"
++
++#include <GfxRenderer.h>
++#include <HalStorage.h>
++#include <I18n.h>
++
++#include <algorithm>
++#include <cctype>
++#include <memory>
++
++#include "MappedInputManager.h"
++#include "activities/util/KeyboardEntryActivity.h"
++#include "components/UITheme.h"
++#include "fontIds.h"
++
++namespace {
++constexpr int kTopMargin = 12;
++constexpr int kControlHeight = 52;
++constexpr int kControlGap = 8;
++constexpr int kSideButtonWidth = 52;
++constexpr int kRowHeight = 58;
++constexpr int kRowSidePadding = 16;
++constexpr int kCornerRadius = 6;
++
++bool pointInRect(const Rect& rect, const int x, const int y) {
++  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
++}
++
++std::string lowerAscii(std::string value) {
++  for (char& c : value) {
++    const unsigned char uc = static_cast<unsigned char>(c);
++    if (uc < 0x80) c = static_cast<char>(std::tolower(uc));
++  }
++  return value;
++}
++
++void drawCenteredLabel(GfxRenderer& renderer, const Rect& rect, const char* label) {
++  const int textW = renderer.getTextWidth(UI_12_FONT_ID, label);
++  const int textH = renderer.getLineHeight(UI_12_FONT_ID);
++  renderer.drawText(UI_12_FONT_ID, rect.x + (rect.width - textW) / 2, rect.y + (rect.height - textH) / 2, label);
++}
++}  // namespace
++
++NotesActivity::NotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
++    : Activity("Notes", renderer, mappedInput) {}
++
++void NotesActivity::onEnter() {
++  Activity::onEnter();
++  Storage.mkdir(kNotesDir);
++  reloadNotes();
++  applyFilter();
++  selectorIndex = 0;
++  topIndex = 0;
++  requestUpdate();
++}
++
++void NotesActivity::onExit() {
++  filteredNotes.clear();
++  notes.clear();
++  Activity::onExit();
++}
++
++void NotesActivity::reloadNotes() {
++  notes.clear();
++  auto dir = Storage.open(kNotesDir);
++  if (!dir || !dir.isDirectory()) {
++    if (dir) dir.close();
++    return;
++  }
++
++  char name[256];
++  for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
++    if (!file.isDirectory()) {
++      file.getName(name, sizeof(name));
++      const std::string filename{name};
++      if (filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".txt") == 0) {
++        notes.push_back(filename);
++      }
++    }
++    file.close();
++  }
++  dir.close();
++  std::sort(notes.begin(), notes.end());
++}
++
++void NotesActivity::applyFilter() {
++  filteredNotes.clear();
++  if (searchQuery.empty()) {
++    filteredNotes = notes;
++  } else {
++    const std::string needle = lowerAscii(searchQuery);
++    for (const auto& filename : notes) {
++      bool matches = lowerAscii(displayName(filename)).find(needle) != std::string::npos;
++      if (!matches) {
++        std::string content;
++        if (loadNote(std::string(kNotesDir) + "/" + filename, content)) {
++          matches = lowerAscii(std::move(content)).find(needle) != std::string::npos;
++        }
++      }
++      if (matches) filteredNotes.push_back(filename);
++    }
++  }
++
++  if (filteredNotes.empty()) {
++    selectorIndex = 0;
++    topIndex = 0;
++  } else {
++    selectorIndex = std::clamp(selectorIndex, 0, static_cast<int>(filteredNotes.size()) - 1);
++    topIndex = std::clamp(topIndex, 0, selectorIndex);
++  }
++}
++
++std::string NotesActivity::displayName(const std::string& filename) {
++  if (filename.size() > 4 && filename.compare(filename.size() - 4, 4, ".txt") == 0) {
++    return filename.substr(0, filename.size() - 4);
++  }
++  return filename;
++}
++
++std::string NotesActivity::sanitizeFilename(const std::string& title) {
++  std::string out;
++  out.reserve(std::min<size_t>(title.size(), 48));
++  for (const unsigned char c : title) {
++    if (out.size() >= 48) break;
++    if (c < 0x20 || c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' ||
++        c == '>' || c == '|') {
++      out.push_back('_');
++    } else {
++      out.push_back(static_cast<char>(c));
++    }
++  }
++  while (!out.empty() && (out.back() == ' ' || out.back() == '.')) out.pop_back();
++  if (out.empty()) out = "Note";
++  return out;
++}
++
++std::string NotesActivity::uniquePathForTitle(const std::string& title) const {
++  const std::string base = sanitizeFilename(title);
++  std::string path = std::string(kNotesDir) + "/" + base + ".txt";
++  if (!Storage.exists(path.c_str())) return path;
++
++  for (int suffix = 2; suffix < 1000; ++suffix) {
++    path = std::string(kNotesDir) + "/" + base + " " + std::to_string(suffix) + ".txt";
++    if (!Storage.exists(path.c_str())) return path;
++  }
++  return std::string(kNotesDir) + "/Note.txt";
++}
++
++bool NotesActivity::loadNote(const std::string& path, std::string& text) const {
++  text.clear();
++  FsFile file;
++  if (!Storage.openFileForRead("NOTES", path, file)) return false;
++
++  const uint32_t size = file.size();
++  if (size > kMaxNoteBytes) {
++    file.close();
++    return false;
++  }
++
++  text.resize(size);
++  if (size > 0 && file.read(text.data(), size) != static_cast<int>(size)) {
++    file.close();
++    text.clear();
++    return false;
++  }
++  file.close();
++  return true;
++}
++
++bool NotesActivity::saveNote(const std::string& path, const std::string& text) const {
++  if (text.size() > kMaxNoteBytes) return false;
++  FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
++  if (!file) return false;
++  const size_t written = text.empty() ? 0 : file.write(reinterpret_cast<const uint8_t*>(text.data()), text.size());
++  file.close();
++  return written == text.size();
++}
++
++void NotesActivity::editNote(const std::string& path, const std::string& title) {
++  std::string initialText;
++  if (!loadNote(path, initialText)) initialText.clear();
++
++  startActivityForResult(
++      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes,
++                                              InputType::Multiline),
++      [this, path](const ActivityResult& result) {
++        if (!result.isCancelled) {
++          const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
++          if (keyboard && !saveNote(path, keyboard->text)) {
++            LOG_ERR("NOTES", "Failed to save note: %s", path.c_str());
++          }
++        }
++        reloadNotes();
++        applyFilter();
++        requestUpdate();
++      });
++}
++
++void NotesActivity::createNote() {
++  startActivityForResult(
++      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_TITLE), "", 48, InputType::Text, 1),
++      [this](const ActivityResult& result) {
++        if (result.isCancelled) {
++          requestUpdate();
++          return;
++        }
++        const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
++        if (!keyboard || keyboard->text.empty()) {
++          requestUpdate();
++          return;
++        }
++        const std::string path = uniquePathForTitle(keyboard->text);
++        if (!saveNote(path, "")) {
++          LOG_ERR("NOTES", "Failed to create note: %s", path.c_str());
++          requestUpdate();
++          return;
++        }
++        reloadNotes();
++        applyFilter();
++        editNote(path, keyboard->text);
++      });
++}
++
++void NotesActivity::editSearch() {
++  startActivityForResult(
++      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH_NOTES), searchQuery, 80,
++                                              InputType::Text),
++      [this](const ActivityResult& result) {
++        if (!result.isCancelled) {
++          const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
++          if (keyboard) searchQuery = keyboard->text;
++        }
++        selectorIndex = 0;
++        topIndex = 0;
++        applyFilter();
++        requestUpdate();
++      });
++}
++
++void NotesActivity::openNoteAt(const int index) {
++  if (index < 0 || index >= static_cast<int>(filteredNotes.size())) return;
++  selectorIndex = index;
++  const std::string filename = filteredNotes[static_cast<size_t>(index)];
++  editNote(std::string(kNotesDir) + "/" + filename, displayName(filename));
++}
++
++void NotesActivity::openSelectedNote() { openNoteAt(selectorIndex); }
++
++void NotesActivity::loop() {
++  const auto& metrics = UITheme::getInstance().getMetrics();
++  const int width = renderer.getScreenWidth();
++  const int height = renderer.getScreenHeight();
++  const int controlsY = metrics.topPadding + kTopMargin;
++  const Rect addRect{kTopMargin, controlsY, kSideButtonWidth, kControlHeight};
++  const Rect closeRect{width - kTopMargin - kSideButtonWidth, controlsY, kSideButtonWidth, kControlHeight};
++  const Rect searchRect{addRect.x + addRect.width + kControlGap, controlsY,
++                        closeRect.x - kControlGap - (addRect.x + addRect.width + kControlGap), kControlHeight};
++  const int listTop = controlsY + kControlHeight + kControlGap;
++  const int listBottom = height - metrics.buttonHintsHeight - kTopMargin;
++  const int visibleRows = std::max(1, (listBottom - listTop) / kRowHeight);
++
++  int tx = 0;
++  int ty = 0;
++  if (mappedInput.wasScreenTapped(tx, ty)) {
++    if (pointInRect(addRect, tx, ty)) {
++      createNote();
++      return;
++    }
++    if (pointInRect(searchRect, tx, ty)) {
++      editSearch();
++      return;
++    }
++    if (pointInRect(closeRect, tx, ty)) {
++      finish();
++      return;
++    }
++    if (ty >= listTop && ty < listBottom) {
++      const int row = (ty - listTop) / kRowHeight;
++      const int index = topIndex + row;
++      if (row >= 0 && row < visibleRows && index >= 0 && index < static_cast<int>(filteredNotes.size())) {
++        openNoteAt(index);
++        return;
++      }
++    }
++  }
++
++  const int itemCount = static_cast<int>(filteredNotes.size());
++  if (itemCount > 0) {
++    const auto moveSelection = [this, itemCount, visibleRows](const int next) {
++      selectorIndex = next;
++      if (selectorIndex < topIndex) topIndex = selectorIndex;
++      if (selectorIndex >= topIndex + visibleRows) topIndex = selectorIndex - visibleRows + 1;
++      topIndex = std::clamp(topIndex, 0, std::max(0, itemCount - visibleRows));
++      requestUpdate();
++    };
++    buttonNavigator.onNextRelease(
++        [this, itemCount, &moveSelection] { moveSelection(ButtonNavigator::nextIndex(selectorIndex, itemCount)); });
++    buttonNavigator.onPreviousRelease(
++        [this, itemCount, &moveSelection] { moveSelection(ButtonNavigator::previousIndex(selectorIndex, itemCount)); });
++
++    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
++      openSelectedNote();
++      return;
++    }
++
++    const auto swipe = mappedInput.wasSwipe();
++    if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
++      const int maxTop = std::max(0, itemCount - visibleRows);
++      const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleRows : -visibleRows;
++      topIndex = std::clamp(topIndex + delta, 0, maxTop);
++      selectorIndex = std::clamp(selectorIndex, topIndex, std::min(itemCount - 1, topIndex + visibleRows - 1));
++      requestUpdate();
++      return;
++    }
++  }
++
++  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
++    finish();
++  }
++}
++
++void NotesActivity::render(RenderLock&&) {
++  renderer.clearScreen();
++  const auto& metrics = UITheme::getInstance().getMetrics();
++  const int width = renderer.getScreenWidth();
++  const int height = renderer.getScreenHeight();
++  const int controlsY = metrics.topPadding + kTopMargin;
++  const Rect addRect{kTopMargin, controlsY, kSideButtonWidth, kControlHeight};
++  const Rect closeRect{width - kTopMargin - kSideButtonWidth, controlsY, kSideButtonWidth, kControlHeight};
++  const Rect searchRect{addRect.x + addRect.width + kControlGap, controlsY,
++                        closeRect.x - kControlGap - (addRect.x + addRect.width + kControlGap), kControlHeight};
++
++  renderer.drawRoundedRect(addRect.x, addRect.y, addRect.width, addRect.height, 1, kCornerRadius, true);
++  drawCenteredLabel(renderer, addRect, "+");
++  renderer.drawRoundedRect(searchRect.x, searchRect.y, searchRect.width, searchRect.height, 1, kCornerRadius, true);
++  renderer.drawRoundedRect(closeRect.x, closeRect.y, closeRect.width, closeRect.height, 1, kCornerRadius, true);
++  drawCenteredLabel(renderer, closeRect, "X");
++
++  const char* placeholder = tr(STR_SEARCH_NOTES);
++  const std::string searchLabel = searchQuery.empty()
++                                      ? std::string(placeholder)
++                                      : renderer.truncatedText(UI_12_FONT_ID, searchQuery.c_str(), searchRect.width - 20);
++  const int searchTextH = renderer.getLineHeight(UI_12_FONT_ID);
++  renderer.drawText(UI_12_FONT_ID, searchRect.x + 10, searchRect.y + (searchRect.height - searchTextH) / 2,
++                    searchLabel.c_str());
++
++  const int listTop = controlsY + kControlHeight + kControlGap;
++  const int listBottom = height - metrics.buttonHintsHeight - kTopMargin;
++  const int visibleRows = std::max(1, (listBottom - listTop) / kRowHeight);
++  const int itemCount = static_cast<int>(filteredNotes.size());
++  const int maxTop = std::max(0, itemCount - visibleRows);
++  topIndex = std::clamp(topIndex, 0, maxTop);
++
++  if (filteredNotes.empty()) {
++    renderer.drawCenteredText(UI_12_FONT_ID, listTop + kRowHeight, tr(STR_NO_NOTES), true);
++  } else {
++    for (int row = 0; row < visibleRows; ++row) {
++      const int index = topIndex + row;
++      if (index >= itemCount) break;
++      const int rowY = listTop + row * kRowHeight;
++      const Rect rowRect{kTopMargin, rowY, width - kTopMargin * 2, kRowHeight - 2};
++      if (index == selectorIndex) {
++        renderer.drawRoundedRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, 1, kCornerRadius, true);
++      }
++      const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(filteredNotes[index]).c_str(),
++                                                       rowRect.width - kRowSidePadding * 2);
++      const int textH = renderer.getLineHeight(UI_12_FONT_ID);
++      renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, rowRect.y + (rowRect.height - textH) / 2,
++                        title.c_str());
++    }
++  }
++
++  const auto labels = mappedInput.mapLabels(tr(STR_SELECT), tr(STR_BACK), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
++  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
++  renderer.displayBuffer();
++}
+diff --git a/src/activities/home/NotesActivity.h b/src/activities/home/NotesActivity.h
+new file mode 100644
+index 0000000..bc0fa45
+--- /dev/null
++++ b/src/activities/home/NotesActivity.h
+@@ -0,0 +1,41 @@
++#pragma once
++
++#include <string>
++#include <vector>
++
++#include "activities/Activity.h"
++#include "util/ButtonNavigator.h"
++
++class NotesActivity final : public Activity {
++ public:
++  explicit NotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
++
++  void onEnter() override;
++  void onExit() override;
++  void loop() override;
++  void render(RenderLock&&) override;
++
++ private:
++  static constexpr const char* kNotesDir = "/Notes";
++  static constexpr size_t kMaxNoteBytes = 32 * 1024;
++
++  ButtonNavigator buttonNavigator;
++  std::vector<std::string> notes;
++  std::vector<std::string> filteredNotes;
++  std::string searchQuery;
++  int selectorIndex = 0;
++  int topIndex = 0;
++
++  void reloadNotes();
++  void applyFilter();
++  void createNote();
++  void editSearch();
++  void openSelectedNote();
++  void openNoteAt(int index);
++  void editNote(const std::string& path, const std::string& title);
++  bool loadNote(const std::string& path, std::string& text) const;
++  bool saveNote(const std::string& path, const std::string& text) const;
++  std::string uniquePathForTitle(const std::string& title) const;
++  static std::string displayName(const std::string& filename);
++  static std::string sanitizeFilename(const std::string& title);
++};
