@@ -1,0 +1,119 @@
+diff --git a/src/activities/home/HomeActivity.cpp b/src/activities/home/HomeActivity.cpp
+index ad16af0..caedbf2 100644
+--- a/src/activities/home/HomeActivity.cpp
++++ b/src/activities/home/HomeActivity.cpp
+@@ -35,6 +35,7 @@
+ #include "RecentBookProgress.h"
+ #include "RecentBooksStore.h"
+ #include "SavedItemsHomeActivity.h"
++#include "NotesActivity.h"
+ #include "components/UITheme.h"
+ #include "components/themes/dashboard/DashboardTheme.h"
+ #include "components/themes/lyra/LyraCarouselTheme.h"
+@@ -60,6 +61,7 @@ enum class HomeMenuAction {
+   OpdsBrowser,
+   ReadingStats,
+   Bookmarks,
++  Notes,
+   FileTransfer,
+   Settings,
+ };
+@@ -71,7 +73,7 @@ struct HomeMenuEntry {
+ };
+ 
+ struct HomeMenuEntries {
+-  static constexpr int kCapacity = 8;
++  static constexpr int kCapacity = 9;
+   std::array<HomeMenuEntry, kCapacity> entries{};
+   int count = 0;
+ 
+@@ -277,6 +279,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
+     items.push({savedItemsLabel(hasBookmarks, hasClippings), BookmarkIcon, HomeMenuAction::Bookmarks});
+   }
+ 
++  items.push({tr(STR_NOTES), BookmarkIcon, HomeMenuAction::Notes});
+   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
+   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
+ }
+@@ -301,6 +304,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
+     items.push({tr(STR_READING_STATS), Chart, HomeMenuAction::ReadingStats});
+   }
+ 
++  items.push({tr(STR_NOTES), BookmarkIcon, HomeMenuAction::Notes});
+   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
+   return items;
+ }
+@@ -596,7 +600,7 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
+ 
+ int HomeActivity::getMenuItemCount() const {
+   const auto& metrics = UITheme::getInstance().getMetrics();
+-  int count = 4;  // File Browser, Recents, File transfer, Settings
++  int count = 5;  // File Browser, Recents, Notes, File transfer, Settings
+   if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
+     count += getVisibleRecentBookCount();
+   } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
+@@ -1545,6 +1549,9 @@ void HomeActivity::loop() {
+           case HomeMenuAction::Bookmarks:
+             onSavedItemsOpen();
+             break;
++          case HomeMenuAction::Notes:
++            onNotesOpen();
++            break;
+           case HomeMenuAction::FileTransfer:
+             onFileTransferOpen();
+             break;
+@@ -1554,6 +1561,21 @@ void HomeActivity::loop() {
+         }
+       };
+ 
++      int menuTapX = 0;
++      int menuTapY = 0;
++      if (mappedInput.wasScreenTapped(menuTapX, menuTapY)) {
++        const Rect panel = MinimalTheme::buttonMenuPanelRect(renderer, menuCount);
++        if (containsPoint(panel, menuTapX, menuTapY)) {
++          const int rowHeight = menuCount > 0 ? std::max(1, (panel.height - 2) / menuCount) : 1;
++          const int tappedRow = (menuTapY - panel.y - 1) / rowHeight;
++          if (tappedRow >= 0 && tappedRow < menuCount) {
++            minimalMenuIndex = tappedRow;
++            activateMinimalMenuAction();
++            return;
++          }
++        }
++      }
++
+       int touchedMenuIndex = -1;
+       if (mappedInput.wasItemTouchedDown(touchedMenuIndex) && touchedMenuIndex >= 0 && touchedMenuIndex < menuCount) {
+         if (minimalMenuIndex != touchedMenuIndex) {
+@@ -1786,6 +1808,9 @@ void HomeActivity::loop() {
+       case HomeMenuAction::Bookmarks:
+         onSavedItemsOpen();
+         break;
++      case HomeMenuAction::Notes:
++        onNotesOpen();
++        break;
+       case HomeMenuAction::FileTransfer:
+         onFileTransferOpen();
+         break;
+@@ -2316,6 +2341,10 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
+ 
+ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+ 
++void HomeActivity::onNotesOpen() {
++  startActivityForResult(std::make_unique<NotesActivity>(renderer, mappedInput), [](const ActivityResult&) {});
++}
++
+ void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+ 
+ void HomeActivity::onReadingStatsOpen() {
+diff --git a/src/activities/home/HomeActivity.h b/src/activities/home/HomeActivity.h
+index 008603e..c8129ae 100644
+--- a/src/activities/home/HomeActivity.h
++++ b/src/activities/home/HomeActivity.h
+@@ -91,6 +91,7 @@ class HomeActivity final : public Activity {
+   void onOpdsBrowserOpen();
+   void onReadingStatsOpen();
+   void onSavedItemsOpen();
++  void onNotesOpen();
+ 
+   int getMenuItemCount() const;
+   bool storeCoverBuffer();    // Store frame buffer for cover image
