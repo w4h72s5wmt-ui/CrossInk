@@ -1,4 +1,4 @@
-name: CrossInk Notes + Demineur HELLO X4 Pro
+name: CrossInk Notes + Demineur Home X4 Pro
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply Notes alpha 5 and Demineur HELLO patches
+      - name: Apply Notes alpha 5 and Demineur home patches
         run: |
           git apply --check crossink-notes-alpha4-i18n.patch
           git apply crossink-notes-alpha4-i18n.patch
@@ -31,6 +31,8 @@ jobs:
           git apply crossink-notes-alpha5.patch
           git apply --check crossink-minesweeper-hello-alpha1.patch
           git apply crossink-minesweeper-hello-alpha1.patch
+          git apply --check crossink-minesweeper-home-alpha2.patch
+          git apply crossink-minesweeper-home-alpha2.patch
 
       - uses: actions/setup-python@v6
         with:
@@ -50,18 +52,28 @@ jobs:
             ~/.platformio/platforms
           key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
 
+      - name: Cache incremental X4 Pro build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pio/build/x4-pro
+            .pio/libdeps/x4-pro
+          key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-x4-pro-pio6.1.19-
+
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Build X4 Pro Notes + Demineur HELLO firmware
+      - name: Build X4 Pro Notes + Demineur Home firmware
         run: |
           set -euo pipefail
-          pio run -j1 -e x4-pro | tee pio-x4-pro-notes.log
+          pio run -e x4-pro | tee pio-x4-pro-notes.log
 
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-notes-demineur-hello-alpha1
+          name: firmware-x4-pro-notes-demineur-home-alpha2
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -69,6 +81,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-notes-demineur-hello-alpha1-build-log
+          name: x4-pro-notes-demineur-home-alpha2-build-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
