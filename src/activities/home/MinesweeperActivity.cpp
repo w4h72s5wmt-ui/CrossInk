@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -32,6 +33,8 @@ constexpr const char* GRID_DIMS[] = {
     "16 x 16",
 };
 
+constexpr int GRID_SIZES[] = {8, 12, 16};
+
 Rect menuListRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int contentTop =
@@ -48,6 +51,7 @@ MinesweeperActivity::MinesweeperActivity(GfxRenderer& renderer, MappedInputManag
 
 void MinesweeperActivity::onEnter() {
   Activity::onEnter();
+  viewMode_ = ViewMode::Menu;
   selectedIndex_ = gridSizeIndex_;
   topIndex_ = 0;
   visibleRows_ = 1;
@@ -61,6 +65,14 @@ void MinesweeperActivity::onEnter() {
 }
 
 void MinesweeperActivity::loop() {
+  if (viewMode_ == ViewMode::Grid) {
+    loopGrid();
+  } else {
+    loopMenu();
+  }
+}
+
+void MinesweeperActivity::loopMenu() {
   if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, renderer)) ||
       mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
@@ -111,6 +123,14 @@ void MinesweeperActivity::loop() {
   });
 }
 
+void MinesweeperActivity::loopGrid() {
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    mappedInput.suppressNextBackRelease();
+    returnToMenu();
+    return;
+  }
+}
+
 void MinesweeperActivity::activateRow(const int row) {
   if (row >= 0 && row < kGridOptionCount) {
     gridSizeIndex_ = row;
@@ -134,10 +154,25 @@ void MinesweeperActivity::continueGame() {
 }
 
 void MinesweeperActivity::newGame() {
-  char body[96];
-  std::snprintf(body, sizeof(body), "Grille %s selectionnee. La grille arrive a l'etape suivante.",
-                GRID_DIMS[gridSizeIndex_]);
-  showInfo("Nouvelle partie", body);
+  enterGrid();
+}
+
+void MinesweeperActivity::enterGrid() {
+  viewMode_ = ViewMode::Grid;
+  uiReady_ = false;
+  requestUpdate();
+}
+
+void MinesweeperActivity::returnToMenu() {
+  viewMode_ = ViewMode::Menu;
+  selectedIndex_ = gridSizeIndex_;
+  topIndex_ = 0;
+  initialViewportPending_ = true;
+  requestUpdate();
+}
+
+int MinesweeperActivity::gridDimension() const {
+  return GRID_SIZES[std::clamp(gridSizeIndex_, 0, kGridOptionCount - 1)];
 }
 
 void MinesweeperActivity::showInfo(const char* title, const char* body) {
@@ -210,6 +245,14 @@ void MinesweeperActivity::buildMenuScreen(UiApp::ScreenType& screen) {
 }
 
 void MinesweeperActivity::render(RenderLock&&) {
+  if (viewMode_ == ViewMode::Grid) {
+    renderGrid();
+  } else {
+    renderMenu();
+  }
+}
+
+void MinesweeperActivity::renderMenu() {
   renderer.clearScreen();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -228,6 +271,44 @@ void MinesweeperActivity::render(RenderLock&&) {
 
   const auto labels =
       mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
+  renderer.displayBuffer();
+}
+
+void MinesweeperActivity::renderGrid() {
+  renderer.clearScreen();
+
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+  const int headerHeight = metrics.headerHeight;
+  const int headerTop = metrics.topPadding;
+  const int contentTop = headerTop + headerHeight + metrics.verticalSpacing;
+  const int footerTop = screenHeight - metrics.buttonHintsHeight;
+  const int availableHeight = std::max(1, footerTop - contentTop - metrics.verticalSpacing);
+  const int availableWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
+  const int dimension = gridDimension();
+  const int cellSize = std::max(1, std::min(availableWidth / dimension, availableHeight / dimension));
+  const int gridWidth = cellSize * dimension;
+  const int gridHeight = cellSize * dimension;
+  const int gridX = (screenWidth - gridWidth) / 2;
+  const int gridY = contentTop + std::max(0, (availableHeight - gridHeight) / 2);
+
+  char title[48];
+  std::snprintf(title, sizeof(title), "Demineur - %s", GRID_DIMS[gridSizeIndex_]);
+  GUI.drawHeader(renderer, Rect{0, headerTop, screenWidth, headerHeight}, title);
+
+  renderer.drawRect(gridX, gridY, gridWidth + 1, gridHeight + 1, 1, true);
+  for (int i = 1; i < dimension; ++i) {
+    const int x = gridX + i * cellSize;
+    renderer.drawLine(x, gridY, x, gridY + gridHeight, 1, true);
+  }
+  for (int i = 1; i < dimension; ++i) {
+    const int y = gridY + i * cellSize;
+    renderer.drawLine(gridX, y, gridX + gridWidth, y, 1, true);
+  }
+
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
   renderer.displayBuffer();
 }
