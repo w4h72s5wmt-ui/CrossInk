@@ -1,53 +1,72 @@
-name: CrossInk source migration
+name: CrossInk Notes + Demineur X4 Pro
 
 on:
   push:
     branches: [x4-pro-notes]
-    paths:
-      - .github/workflows/notes-build.yml
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  migrate-sources:
+  build-x4-pro-notes:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout CrossInk
+      - name: Checkout CrossInk sources
         uses: actions/checkout@v6
         with:
           submodules: recursive
-          fetch-depth: 0
 
-      - name: Materialize feature stack into source files
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Cache incremental X4 Pro build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pio/build/x4-pro
+            .pio/libdeps/x4-pro
+          key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-x4-pro-pio6.1.19-
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
+      - name: Build X4 Pro firmware directly from sources
         run: |
           set -euo pipefail
-          git apply crossink-notes-alpha4-i18n.patch
-          git apply crossink-notes-alpha4-home.patch
-          git apply crossink-notes-alpha4-notes.patch
-          git apply crossink-notes-alpha4-keyboard.patch
-          git apply crossink-notes-alpha5.patch
-          git apply crossink-notes-alpha6-trash.patch
-          git apply --recount crossink-notes-alpha7-native-ui.patch
-          git apply --recount crossink-notes-alpha8-polish.patch
-          git apply --recount crossink-notes-alpha9-predictive.patch
-          git apply --recount crossink-notes-alpha10-rename.patch
-          git apply crossink-minesweeper-hello-alpha1.patch
-          git apply crossink-minesweeper-home-alpha2.patch
-          git apply crossink-minesweeper-score-alpha3.patch
-          git apply --recount crossink-minesweeper-ui-alpha4.patch
-          git apply --recount crossink-minesweeper-confirm-alpha5.patch
+          pio run -e x4-pro | tee pio-x4-pro-notes.log
 
-          sed -i 's/^  Rect predictiveBarRect() const;/  freeink::ui::Rect predictiveBarRect() const;/' src/activities/util/KeyboardEntryActivity.h
-          sed -i 's/^Rect KeyboardEntryActivity::predictiveBarRect() const {/fui::Rect KeyboardEntryActivity::predictiveBarRect() const {/' src/activities/util/KeyboardEntryActivity.cpp
-          sed -i 's/^  return Rect{kb.x, y, kb.width, height};/  return fui::Rect{kb.x, static_cast<int16_t>(y), kb.width, static_cast<int16_t>(height)};/' src/activities/util/KeyboardEntryActivity.cpp
-          sed -i 's/const Rect bar = predictiveBarRect()/const fui::Rect bar = predictiveBarRect()/g' src/activities/util/KeyboardEntryActivity.cpp
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-build-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
 
-          rm -f crossink-notes-*.patch crossink-minesweeper-*.patch
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git reset .github/workflows/notes-build.yml
-          git commit -m "refactor: materialize Notes and Minesweeper sources"
-          git push origin HEAD:x4-pro-notes
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-build-${{ github.run_number }}-log
+          path: pio-x4-pro-notes.log
+          if-no-files-found: ignore
