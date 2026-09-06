@@ -54,9 +54,9 @@ class ParsedText {
   // True after an intermediate flush leaves the rest of the same paragraph
   // buffered. The next layout pass must not apply first-line paragraph rules.
   bool isContinuation_ = false;
+  bool allowCharacterBreaks_ = false;
   std::vector<std::string> reorderedWordsScratch;
   std::vector<EpdFontFamily::Style> reorderedStylesScratch;
-  std::vector<uint16_t> reorderedWidthsScratch;
   std::vector<bool> reorderedContinuesScratch;
   std::vector<bool> reorderedNoSpaceBeforeScratch;
   std::vector<uint8_t> reorderedBionicBoundaryScratch;
@@ -67,6 +67,7 @@ class ParsedText {
   std::vector<uint16_t> lineWidthsScratch;
   std::vector<uint8_t> lineBionicBoundaryScratch;
   std::vector<bool> lineGuideDotBeforeScratch;
+  std::vector<bool> lineHasSpaceBeforeScratch;
   std::vector<uint8_t> lineBackgroundBlackScratch;
   std::vector<uint16_t> visualOrderScratch;
 
@@ -83,7 +84,7 @@ class ParsedText {
                                    std::vector<bool>& noSpaceBeforeVec, ArenaVector<size_t>& lineBreakIndices);
   bool hyphenateWordAtIndex(size_t wordIndex, int availableWidth, const GfxRenderer& renderer, int fontId,
                             ArenaVector<uint16_t>& wordWidths, bool allowFallbackBreaks);
-  bool splitPathologicalTokenAtIndex(size_t wordIndex, int availableWidth, const GfxRenderer& renderer, int fontId,
+  bool splitTokenAtCodepointBoundary(size_t wordIndex, int availableWidth, const GfxRenderer& renderer, int fontId,
                                      ArenaVector<uint16_t>& wordWidths);
   uint32_t visibleOffsetBaseAt(size_t wordIndex) const;
   uint32_t visibleOffsetAt(size_t wordIndex) const;
@@ -134,5 +135,6 @@ class ParsedText {
                              const std::function<void(std::shared_ptr<TextBlock>, uint32_t)>& processLine,
                              bool includeLastLine = true);
   bool layoutAndExtractLinesPreservingSource(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
-                                             const std::function<void(std::shared_ptr<TextBlock>)>& processLine) const;
+                                             const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
+                                             bool allowCharacterBreaks = false) const;
 };
