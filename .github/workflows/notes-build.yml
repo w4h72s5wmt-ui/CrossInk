@@ -12,43 +12,48 @@ jobs:
   build-x4-pro-notes:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout exact CrossInk base
+      - name: Checkout CrossInk
         uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      - name: Apply Notes alpha 10 and Demineur confirmation patches
+      - name: Materialize legacy feature stack
         run: |
-          git apply --check crossink-notes-alpha4-i18n.patch
+          set -euo pipefail
           git apply crossink-notes-alpha4-i18n.patch
-          git apply --check crossink-notes-alpha4-home.patch
           git apply crossink-notes-alpha4-home.patch
-          git apply --check crossink-notes-alpha4-notes.patch
           git apply crossink-notes-alpha4-notes.patch
-          git apply --check crossink-notes-alpha4-keyboard.patch
           git apply crossink-notes-alpha4-keyboard.patch
-          git apply --check crossink-notes-alpha5.patch
           git apply crossink-notes-alpha5.patch
-          git apply --check crossink-notes-alpha6-trash.patch
           git apply crossink-notes-alpha6-trash.patch
-          git apply --recount --check crossink-notes-alpha7-native-ui.patch
           git apply --recount crossink-notes-alpha7-native-ui.patch
-          git apply --recount --check crossink-notes-alpha8-polish.patch
           git apply --recount crossink-notes-alpha8-polish.patch
-          git apply --recount --check crossink-notes-alpha9-predictive.patch
           git apply --recount crossink-notes-alpha9-predictive.patch
-          git apply --recount --check crossink-notes-alpha10-rename.patch
           git apply --recount crossink-notes-alpha10-rename.patch
-          git apply --check crossink-minesweeper-hello-alpha1.patch
           git apply crossink-minesweeper-hello-alpha1.patch
-          git apply --check crossink-minesweeper-home-alpha2.patch
           git apply crossink-minesweeper-home-alpha2.patch
-          git apply --check crossink-minesweeper-score-alpha3.patch
           git apply crossink-minesweeper-score-alpha3.patch
-          git apply --recount --check crossink-minesweeper-ui-alpha4.patch
           git apply --recount crossink-minesweeper-ui-alpha4.patch
-          git apply --recount --check crossink-minesweeper-confirm-alpha5.patch
           git apply --recount crossink-minesweeper-confirm-alpha5.patch
+
+          # Fix the predictive-bar type at source level before materializing.
+          sed -i 's/^  Rect predictiveBarRect() const;/  freeink::ui::Rect predictiveBarRect() const;/' src/activities/util/KeyboardEntryActivity.h
+          sed -i 's/^Rect KeyboardEntryActivity::predictiveBarRect() const {/fui::Rect KeyboardEntryActivity::predictiveBarRect() const {/' src/activities/util/KeyboardEntryActivity.cpp
+          sed -i 's/^  return Rect{kb.x, y, kb.width, height};/  return fui::Rect{kb.x, static_cast<int16_t>(y), kb.width, static_cast<int16_t>(height)};/' src/activities/util/KeyboardEntryActivity.cpp
+          sed -i 's/const Rect bar = predictiveBarRect()/const fui::Rect bar = predictiveBarRect()/g' src/activities/util/KeyboardEntryActivity.cpp
+
+          git status --porcelain
+          git status --porcelain | sed 's/^.. //' > materialized-files.txt
+          tar -czf materialized-sources.tar.gz -T materialized-files.txt
+
+      - name: Upload materialized sources
+        uses: actions/upload-artifact@v7
+        with:
+          name: materialized-sources-${{ github.run_number }}
+          path: |
+            materialized-sources.tar.gz
+            materialized-files.txt
+          if-no-files-found: error
 
       - uses: actions/setup-python@v6
         with:
@@ -84,7 +89,7 @@ jobs:
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
-      - name: Build X4 Pro Notes + Demineur Readability firmware
+      - name: Build X4 Pro Notes + Demineur firmware
         run: |
           set -euo pipefail
           pio run -e x4-pro | tee pio-x4-pro-notes.log
