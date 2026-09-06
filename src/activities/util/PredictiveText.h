@@ -20,11 +20,48 @@ class PredictiveText {
   bool dirty() const { return dirty_; }
 
  private:
+  static constexpr size_t kPersonalWordBytes = 40;
+
+  class CompactWord {
+   public:
+    CompactWord() = default;
+    CompactWord(const std::string& value) { assign(value); }
+
+    CompactWord& operator=(const std::string& value) {
+      assign(value);
+      return *this;
+    }
+
+    const char* c_str() const { return data_.data(); }
+
+    bool operator<(const CompactWord& other) const {
+      const char* left = data_.data();
+      const char* right = other.data_.data();
+      while (*left != '\0' && *right != '\0' && *left == *right) {
+        ++left;
+        ++right;
+      }
+      return static_cast<unsigned char>(*left) < static_cast<unsigned char>(*right);
+    }
+
+   private:
+    std::array<char, kPersonalWordBytes + 1> data_{};
+
+    void assign(const std::string& value) {
+      const size_t length = value.size() < kPersonalWordBytes ? value.size() : kPersonalWordBytes;
+      for (size_t i = 0; i < length; ++i) data_[i] = value[i];
+      data_[length] = '\0';
+    }
+  };
+
   struct PersonalWord {
-    std::string word;
+    CompactWord word;
     uint16_t count = 1;
   };
 
+  // All personal words now live directly inside this single contiguous vector.
+  // CompactWord owns no heap memory, so learning hundreds of words no longer
+  // creates hundreds of independent std::string allocations.
   std::vector<PersonalWord> personal_;
   bool dirty_ = false;
   uint32_t revision_ = 1;
