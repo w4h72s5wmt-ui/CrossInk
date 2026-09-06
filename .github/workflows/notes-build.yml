@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-x4-pro-notes:
@@ -16,6 +16,27 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+
+      - name: Apply one-shot optimizer if present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .github/workflows/optimize-predictive-once.yml ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+          workflow = Path('.github/workflows/optimize-predictive-once.yml').read_text()
+          marker = "python3 - <<'PY'\n"
+          code = workflow.split(marker, 1)[1].split("\n          PY", 1)[0]
+          exec(textwrap.dedent(code), {})
+          PY
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git rm .github/workflows/optimize-predictive-once.yml
+            git add src/activities/util/PredictiveText.cpp
+            git commit -m "perf: remove predictive hot-path allocations"
+            git push origin HEAD:x4-pro-notes
+          fi
 
       - uses: actions/setup-python@v6
         with:
