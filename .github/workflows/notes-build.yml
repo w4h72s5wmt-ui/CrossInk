@@ -21,10 +21,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/app_optimize_v3.py
+          git checkout -- .github/workflows/notes-build.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm scripts/app_optimize_v3.py
-          git add .github/workflows/notes-build.yml src/activities/home/MinesweeperActivity.h \
+          git add src/activities/home/MinesweeperActivity.h \
                   src/activities/home/MinesweeperActivity.cpp src/activities/util/PredictiveText.cpp
           git commit -m "perf: pack minesweeper state and stream predictive storage"
           git push origin HEAD:x4-pro-notes
