@@ -5,15 +5,16 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 
 namespace {
 constexpr const char kPersonalDir[] = "/.crosspoint";
 constexpr const char kPersonalPath[] = "/.crosspoint/notes-predictive.txt";
-constexpr size_t kMaxPersonalWords = 128;
-constexpr size_t kMaxPersonalFileBytes = 16384;
+constexpr size_t kMaxPersonalWords = 512;
+constexpr size_t kMaxPersonalFileBytes = 65536;
 
-// Ordered roughly by usefulness/frequency. Matching is accent-insensitive, so
-// typing "etr" can still propose "être".
+// The list is deliberately ordered by general usefulness. PredictiveText adds
+// contextual and personal-frequency bonuses on top of this base ordering.
 constexpr const char* kFrenchWords[] = {
     "bonjour", "bonsoir", "bonne", "bon", "merci", "oui", "non", "avec", "sans", "pour", "dans", "sur", "sous",
     "entre", "vers", "chez", "depuis", "avant", "après", "pendant", "comme", "mais", "donc", "car", "parce", "que",
@@ -34,32 +35,168 @@ constexpr const char* kFrenchWords[] = {
     "nom", "prénom", "adresse", "téléphone", "message", "mail", "email", "réponse", "question", "idée", "information",
     "important", "importante", "urgent", "urgente", "problème", "solution", "erreur", "résultat", "exemple", "liste", "texte",
     "note", "notes", "titre", "mot", "mots", "phrase", "page", "document", "fichier", "dossier", "écran", "clavier", "bouton",
-    "retour", "menu", "application", "version", "mise", "jour", "réglage", "option", "mode", "grille", "score", "points",
-    "mine", "mines", "drapeau", "drapeaux", "partie", "jeu", "jouer", "gagner", "perdre", "annuler", "continuer", "nouvelle",
-    "ordinateur", "ordinateurs", "internet", "réseau", "wifi", "connexion", "serveur", "système", "logiciel", "programme",
-    "code", "projet", "build", "compilation", "firmware", "binaire", "fichier", "télécharger", "installer", "copier", "coller",
-    "photo", "image", "vidéo", "musique", "livre", "lecture", "liseuse", "chapitre", "auteur", "histoire", "français",
-    "française", "langue", "mot", "dictionnaire", "prédiction", "suggestion", "correction", "écriture", "écrire", "lire",
-    "manger", "boire", "acheter", "vendre", "payer", "prix", "argent", "magasin", "commande", "livraison", "voiture", "train",
-    "avion", "route", "ville", "pays", "voyage", "vacances", "hôtel", "restaurant", "café", "eau", "pain", "repas",
-    "santé", "médecin", "sport", "marcher", "courir", "dormir", "réveiller", "fatigué", "content", "contente", "heureux",
-    "heureuse", "désolé", "désolée", "d'accord", "certain", "certaine", "peut-être", "vraiment", "exactement", "simplement",
-    "rapidement", "normalement", "finalement", "ensemble", "seul", "seule", "tout", "toute", "tous", "toutes", "rien",
-    "quelque", "quelques", "chaque", "aucun", "aucune", "plusieurs", "premièrement", "ensuite", "puis", "enfin", "voici",
-    "voilà", "ici", "là", "dessus", "dessous", "dedans", "dehors", "gauche", "droite", "haut", "bas", "centre", "centrer",
-    "aligner", "vertical", "verticalement", "horizontal", "horizontalement", "clair", "claire", "foncé", "foncée", "gris", "noir",
-    "blanc", "afficher", "affichage", "interface", "sélection", "sélectionner", "toucher", "tactile", "appuyer", "ouvrir", "fermer",
-    "créer", "création", "modifier", "modification", "supprimer", "suppression", "sauvegarde", "recherche", "résultat", "meilleur",
-    "meilleure", "meilleurs", "score", "scores", "compteur", "nombre", "taille", "ligne", "colonne", "tableau", "entête",
-    "dessiner", "rendre", "rafraîchir", "rafraîchissement", "mémoire", "stockage", "personnel", "personnelle", "fréquent", "fréquente",
-    "utilisateur", "utilisatrice", "fonction", "fonctionner", "propre", "correct", "correcte", "bien", "mal", "mieux", "parfait",
-    "parfaite", "super", "ok", "salut", "coucou", "bientôt", "probablement", "certainement", "également", "concernant", "rapport",
-    "attention", "rappel", "objectif", "priorité", "prochaine", "prochain", "étape", "tâche", "faire", "fait", "faite", "faits",
-    "prévoir", "prévu", "prévue", "terminé", "terminée", "disponible", "disponibles", "actuel", "actuelle", "actuellement",
+    "retour", "menu", "application", "version", "mise", "réglage", "option", "mode", "grille", "score", "points", "mine",
+    "mines", "drapeau", "drapeaux", "partie", "jeu", "jouer", "gagner", "perdre", "annuler", "ordinateur", "ordinateurs",
+    "internet", "réseau", "wifi", "connexion", "serveur", "système", "logiciel", "programme", "code", "projet", "build",
+    "compilation", "firmware", "binaire", "télécharger", "installer", "copier", "coller", "photo", "image", "vidéo", "musique",
+    "livre", "lecture", "liseuse", "chapitre", "auteur", "histoire", "français", "française", "langue", "dictionnaire",
+    "prédiction", "suggestion", "correction", "écriture", "manger", "boire", "acheter", "vendre", "payer", "prix", "argent",
+    "magasin", "commande", "livraison", "voiture", "train", "avion", "route", "ville", "pays", "voyage", "vacances", "hôtel",
+    "restaurant", "café", "eau", "pain", "repas", "santé", "médecin", "sport", "marcher", "courir", "dormir", "réveiller",
+    "fatigué", "content", "contente", "heureux", "heureuse", "désolé", "désolée", "d'accord", "certain", "certaine",
+    "peut-être", "vraiment", "exactement", "simplement", "rapidement", "normalement", "finalement", "ensemble", "seul", "seule",
+    "tout", "toute", "tous", "toutes", "rien", "quelque", "quelques", "chaque", "aucun", "aucune", "plusieurs", "ensuite",
+    "puis", "enfin", "voici", "voilà", "ici", "là", "dessus", "dessous", "dedans", "dehors", "gauche", "droite", "haut",
+    "bas", "centre", "centrer", "aligner", "vertical", "verticalement", "horizontal", "horizontalement", "clair", "claire",
+    "foncé", "foncée", "gris", "noir", "blanc", "afficher", "affichage", "interface", "sélection", "sélectionner", "toucher",
+    "tactile", "appuyer", "créer", "création", "modification", "suppression", "sauvegarde", "recherche", "meilleur", "meilleure",
+    "meilleurs", "compteur", "nombre", "taille", "ligne", "colonne", "tableau", "entête", "dessiner", "rendre", "rafraîchir",
+    "rafraîchissement", "mémoire", "stockage", "personnel", "personnelle", "fréquent", "fréquente", "utilisateur", "utilisatrice",
+    "fonction", "fonctionner", "propre", "correct", "correcte", "bien", "mal", "mieux", "parfait", "parfaite", "super", "ok",
+    "salut", "coucou", "bientôt", "probablement", "certainement", "également", "concernant", "rapport", "attention", "rappel",
+    "objectif", "priorité", "prochaine", "prochain", "étape", "tâche", "fait", "faite", "faits", "prévoir", "prévu", "prévue",
+    "terminé", "terminée", "disponible", "disponibles", "actuel", "actuelle", "actuellement",
+
+    // Frequent everyday French, common forms and useful writing vocabulary.
+    "à", "a", "ai", "as", "avons", "avez", "ont", "suis", "es", "est", "sommes", "êtes", "sont", "étais", "était",
+    "étions", "étiez", "étaient", "serai", "seras", "sera", "serons", "serez", "seront", "été", "serait", "seraient",
+    "j'ai", "j'aime", "j'espère", "j'aimerais", "j'avais", "j'étais", "j'irai", "j'arrive", "j'attends", "j'utilise",
+    "c'est", "c'était", "cette", "ça", "cela", "ceci", "n'est", "n'ai", "n'a", "n'ont", "n'était", "n'est-ce", "qu'il",
+    "qu'elle", "qu'on", "qu'ils", "qu'elles", "qu'un", "qu'une", "quand-même", "l'écran", "l'application", "l'appareil",
+    "l'idée", "l'heure", "l'autre", "l'état", "l'écriture", "l'utilisateur", "l'ordinateur", "l'information", "d'abord",
+    "d'ailleurs", "d'autres", "d'une", "d'un", "d'accord", "s'il", "s'ils", "surtout", "jusqu'à", "presque", "plutôt",
+    "afin", "ainsi", "alors", "aussi", "autant", "autour", "ailleurs", "cependant", "pourtant", "néanmoins", "sinon",
+    "donc", "or", "ni", "et", "ou", "où", "dont", "lorsque", "puisque", "tandis", "malgré", "selon", "contre", "parmi",
+    "près", "loin", "devant", "derrière", "autour", "côté", "milieu", "intérieur", "extérieur", "général", "générale",
+    "principal", "principale", "suivant", "suivante", "précédent", "précédente", "suivre", "précéder", "début", "fin",
+    "débuter", "terminer", "continuité", "suite", "prochaine", "prochainement", "immédiatement", "directement", "automatiquement",
+    "manuellement", "facilement", "difficilement", "correctement", "complètement", "partiellement", "uniquement", "seulement",
+    "notamment", "noter", "notamment", "vérifier", "vérification", "valider", "validation", "confirmer", "confirmation",
+    "corriger", "corrigé", "corrigée", "améliorer", "amélioration", "optimiser", "optimisation", "adapter", "adaptation",
+    "ajout", "retirer", "retrait", "remplacer", "remplacement", "déplacer", "déplacement", "position", "positionner", "centrage",
+    "largeur", "hauteur", "dimension", "dimensions", "espace", "espaces", "marge", "marges", "zone", "zones", "case", "cases",
+    "champ", "champs", "barre", "icône", "icônes", "thème", "thèmes", "couleur", "couleurs", "police", "polices", "caractère",
+    "caractères", "lettre", "lettres", "accent", "accents", "apostrophe", "tiret", "ponctuation", "majuscule", "minuscule",
+    "saisie", "prédictif", "prédictive", "prédire", "proposer", "proposition", "propositions", "apprendre", "apprentissage",
+    "fréquence", "contexte", "habitude", "habitudes", "préfixe", "phrase", "phrases", "paragraphe", "paragraphes", "mot-clé",
+    "reconnaître", "reconnu", "reconnue", "choix", "sélecteur", "sélectionné", "sélectionnée", "coché", "cochée", "activer",
+    "désactiver", "activé", "activée", "désactivé", "désactivée", "fonctionnalité", "fonctionnalités", "paramètre", "paramètres",
+    "préférence", "préférences", "configuration", "configurer", "réglages", "valeur", "valeurs", "donnée", "données", "état",
+    "états", "historique", "statistique", "statistiques", "record", "records", "niveau", "niveaux", "débutant", "intermédiaire",
+    "expert", "difficulté", "facilité", "parties", "joueur", "joueuse", "victoire", "défaite", "temps", "chrono", "seconde",
+    "secondes", "minutes", "heures", "total", "totale", "restant", "restante", "restants", "restantes", "compter", "compte",
+    "calcul", "calculer", "valide", "invalide", "vrai", "faux", "possible", "nécessaire", "nécessaires", "utile", "utiles",
+    "pratique", "agréable", "confortable", "fluide", "stable", "fiable", "léger", "légère", "lourde", "performant",
+    "performante", "performance", "vitesse", "latence", "instantané", "instantanée", "lentement", "rapidité", "qualité",
+    "meilleure", "bonne", "mauvaise", "excellent", "excellente", "génial", "géniale", "sympa", "joli", "jolie", "beau",
+    "belle", "design", "style", "visuel", "visuelle", "proprement", "lisible", "lisibilité", "centré", "centrée", "aligné",
+    "alignée", "haut", "bas", "gauche", "droite", "milieu", "dessiner", "dessiné", "dessinée", "rafraîchi", "rafraîchie",
+    "écran", "écrans", "pixel", "pixels", "tactile", "toucher", "touché", "appui", "appuyer", "boutons", "physique", "physiques",
+    "navigation", "naviguer", "ouvrir", "fermer", "quitter", "sortir", "entrée", "sortie", "retourner", "revenir", "accueil",
+    "démarrer", "démarrage", "lancer", "lancement", "relancer", "reprendre", "continuer", "nouveau", "nouvelle", "existant",
+    "existante", "existe", "existait", "sauvé", "sauvée", "sauvegardé", "sauvegardée", "charger", "chargement", "chargé",
+    "stocké", "stockée", "carte", "sd", "flash", "mémoire", "fichier", "fichiers", "répertoire", "dossiers", "format",
+    "formats", "texte", "contenu", "contenus", "nommer", "renommer", "renommage", "effacer", "effacement", "rechercher",
+    "trouver", "trouvé", "trouvée", "filtrer", "filtre", "résultats", "afficher", "cacher", "masquer", "visible", "invisible",
+    "ligne", "lignes", "retour", "retours", "clavier", "claviers", "touche", "touches", "entrée", "espace", "suppr", "shift",
+    "langue", "français", "anglais", "allemand", "espagnol", "italien", "portugais", "azerty", "qwerty", "lettres", "chiffres",
+    "symbole", "symboles", "adresse", "url", "lien", "liens", "site", "sites", "web", "http", "https", "serveur", "client",
+    "réseau", "wifi", "mot-de-passe", "identifiant", "compte", "connexion", "connecter", "déconnecter", "téléchargement",
+    "téléchargé", "envoi", "envoyer", "recevoir", "reçu", "reçue", "partager", "partage", "synchroniser", "synchronisation",
+    "mise-à-jour", "version", "versions", "branche", "branches", "commit", "commits", "dépôt", "github", "action", "actions",
+    "workflow", "build", "builds", "compiler", "compilé", "compilée", "erreurs", "bug", "bugs", "corrigé", "correctif", "patch",
+    "source", "sources", "fonction", "classe", "méthode", "variable", "variables", "constante", "table", "liste", "vecteur",
+    "chaîne", "chaînes", "octet", "octets", "utf-8", "unicode", "accentué", "accentuée", "compatible", "compatibilité",
+    "ancien", "ancienne", "migration", "migrer", "conserver", "préserver", "perdre", "perdu", "perdue", "réinitialiser",
+    "réinitialisation", "restaurer", "restauration", "copie", "copier", "coller", "déplacer", "exporter", "importer", "archive",
+    "sauvegarde", "sécurité", "test", "tests", "tester", "essayé", "essai", "fonctionne", "fonctionnait", "fonctionnera",
+    "marche", "marcher", "bloqué", "bloquée", "plantage", "redémarrage", "redémarrer", "redémarré", "batterie", "charge",
+    "charger", "autonomie", "énergie", "veille", "réveil", "luminosité", "contraste", "rotation", "orientation", "portrait",
+    "paysage", "page", "pages", "livres", "bibliothèque", "lecture", "lecteur", "lectrice", "chapitres", "marque-page",
+    "surligner", "surlignage", "police", "taille", "zoom", "sommaire", "couverture", "auteurs", "titre", "titres", "éditeur",
+    "édition", "epub", "pdf", "document", "documents", "notes", "note", "écrire", "écrit", "écrite", "écriture", "brouillon",
+    "idées", "rappel", "rappels", "agenda", "calendrier", "réunion", "réunions", "rendez-vous", "événement", "événements",
+    "aujourd'hui", "demain", "après-demain", "hier", "avant-hier", "lundi", "mardi", "mercredi", "jeudi", "vendredi",
+    "samedi", "dimanche", "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre",
+    "novembre", "décembre", "matin", "matinée", "midi", "après-midi", "soir", "soirée", "nuit", "week-end", "weekend",
+    "maintenant", "bientôt", "tard", "tôt", "déjà", "encore", "toujours", "jamais", "souvent", "rarement", "parfois",
+    "quotidien", "quotidienne", "hebdomadaire", "mensuel", "mensuelle", "annuel", "annuelle", "prochain", "prochaine",
+    "dernier", "dernière", "prochainement", "immédiat", "immédiate", "durée", "durer", "attente", "attendre", "retard",
+    "avance", "prévu", "prévue", "prévision", "planning", "programme", "organisation", "organiser", "préparer", "préparation",
+    "commencer", "terminer", "continuer", "reprendre", "arrêter", "pause", "priorité", "urgent", "urgente", "important",
+    "importante", "secondaire", "principal", "principale", "objectif", "objectifs", "projet", "projets", "tâche", "tâches",
+    "travail", "travailler", "bureau", "équipe", "équipes", "collègue", "collègues", "responsable", "client", "clients",
+    "service", "services", "produit", "produits", "vente", "ventes", "achat", "achats", "commande", "commandes", "facture",
+    "factures", "paiement", "payer", "budget", "coût", "coûts", "prix", "gratuit", "gratuite", "payant", "payante",
+    "maison", "appartement", "pièce", "chambre", "salon", "cuisine", "salle", "porte", "fenêtre", "table", "chaise", "lit",
+    "jardin", "garage", "clé", "clés", "sac", "boîte", "boite", "papier", "stylo", "crayon", "lampe", "lumière", "eau",
+    "café", "thé", "lait", "sucre", "sel", "pain", "fromage", "viande", "poisson", "légume", "légumes", "fruit", "fruits",
+    "déjeuner", "dîner", "petit-déjeuner", "restaurant", "repas", "manger", "boire", "faim", "soif", "recette", "courses",
+    "magasin", "supermarché", "marché", "acheter", "vendre", "payer", "carte", "espèces", "argent", "euro", "euros",
+    "famille", "parent", "parents", "père", "mère", "papa", "maman", "frère", "sœur", "soeur", "fils", "fille", "enfant",
+    "enfants", "ami", "amie", "amis", "amies", "personne", "personnes", "voisin", "voisine", "homme", "femme", "monsieur",
+    "madame", "nom", "prénom", "âge", "adresse", "téléphone", "portable", "message", "messages", "email", "mail", "réponse",
+    "répondre", "appeler", "appel", "conversation", "discussion", "parler", "dire", "demander", "question", "questions", "bonjour",
+    "salut", "coucou", "merci", "bienvenue", "désolé", "désolée", "pardon", "excuse", "excuser", "félicitations", "bravo",
+    "plaisir", "heureux", "heureuse", "content", "contente", "triste", "fatigué", "fatiguée", "calme", "stressé", "stressée",
+    "peur", "envie", "besoin", "préférence", "aimer", "adorer", "détester", "vouloir", "souhaiter", "espérer", "penser",
+    "croire", "savoir", "comprendre", "compris", "connaître", "connais", "apprendre", "oublier", "souvenir", "rappeler",
+    "expliquer", "explication", "montrer", "regarder", "voir", "écouter", "entendre", "sentir", "lire", "écrire", "parler",
+    "choisir", "décider", "décision", "accepter", "refuser", "proposer", "essayer", "réussir", "échouer", "aider", "aide",
+    "changer", "garder", "laisser", "prendre", "mettre", "donner", "recevoir", "envoyer", "porter", "apporter", "ramener",
+    "aller", "venir", "partir", "arriver", "entrer", "sortir", "monter", "descendre", "marcher", "courir", "rouler", "conduire",
+    "voiture", "vélo", "bus", "métro", "train", "avion", "bateau", "route", "rue", "chemin", "gare", "station", "aéroport",
+    "ville", "village", "pays", "France", "Europe", "voyage", "voyager", "vacances", "hôtel", "réservation", "réserver",
+    "place", "places", "billet", "billets", "départ", "arrivée", "destination", "distance", "kilomètre", "kilomètres",
+    "météo", "soleil", "pluie", "neige", "vent", "chaud", "chaude", "froid", "froide", "température", "degré", "degrés",
+    "printemps", "été", "automne", "hiver", "ciel", "nuage", "nuages", "orage", "beau", "mauvais", "mauvaise",
+    "santé", "médecin", "docteur", "pharmacie", "médicament", "douleur", "malade", "maladie", "rendez-vous", "urgence",
+    "sport", "marche", "course", "courir", "vélo", "natation", "football", "tennis", "musculation", "entraînement", "repos",
+    "dormir", "sommeil", "réveiller", "réveil", "fatigue", "énergie", "forme", "bien-être", "musique", "film", "films",
+    "série", "séries", "photo", "photos", "vidéo", "vidéos", "image", "images", "livre", "livres", "histoire", "histoires",
+    "jeu", "jeux", "jouer", "partie", "parties", "score", "scores", "point", "points", "niveau", "niveaux", "gagner",
+    "perdre", "victoire", "défaite", "mine", "mines", "drapeau", "drapeaux", "grille", "grilles", "démineur", "case", "cases"
 };
 constexpr size_t kFrenchWordCount = sizeof(kFrenchWords) / sizeof(kFrenchWords[0]);
 
+struct ContextEntry {
+  const char* previous;
+  const char* next1;
+  const char* next2;
+  const char* next3;
+};
+
+constexpr ContextEntry kContexts[] = {
+    {"je", "suis", "veux", "pense"}, {"j'ai", "besoin", "envie", "déjà"}, {"j'aimerais", "avoir", "faire", "savoir"},
+    {"tu", "peux", "es", "veux"}, {"il", "est", "faut", "peut"}, {"elle", "est", "peut", "a"},
+    {"on", "peut", "va", "est"}, {"nous", "avons", "sommes", "pouvons"}, {"vous", "pouvez", "avez", "êtes"},
+    {"ils", "sont", "ont", "peuvent"}, {"elles", "sont", "ont", "peuvent"}, {"c'est", "bien", "possible", "fait"},
+    {"ce", "sera", "n'est", "que"}, {"ça", "marche", "fonctionne", "va"}, {"merci", "pour", "beaucoup", "encore"},
+    {"très", "bien", "important", "simple"}, {"plus", "de", "simple", "rapide"}, {"moins", "de", "important", "rapide"},
+    {"avec", "le", "la", "un"}, {"sans", "le", "la", "problème"}, {"dans", "le", "la", "les"},
+    {"sur", "le", "la", "les"}, {"pour", "le", "la", "les"}, {"de", "la", "le", "plus"},
+    {"du", "coup", "tout", "temps"}, {"une", "nouvelle", "bonne", "autre"}, {"un", "nouveau", "bon", "autre"},
+    {"bonne", "idée", "journée", "nouvelle"}, {"nouvelle", "version", "partie", "note"}, {"nouveau", "fichier", "projet", "jeu"},
+    {"mise", "à", "en", "du"}, {"à", "jour", "la", "partir"}, {"mot", "de", "suivant", "précédent"},
+    {"mot-de-passe", "est", "wifi", "oublié"}, {"écriture", "prédictive", "rapide", "fluide"},
+    {"écran", "tactile", "d'accueil", "de"}, {"clavier", "virtuel", "tactile", "français"},
+    {"note", "suivante", "existante", "rapide"}, {"notes", "existantes", "personnelles", "rapides"},
+    {"build", "réussie", "suivante", "actuelle"}, {"compilation", "réussie", "terminée", "en"},
+    {"firmware", "CrossInk", "actuel", "installé"}, {"démineur", "fonctionne", "tactile", "rapide"},
+    {"score", "maximum", "actuel", "final"}, {"partie", "en", "terminée", "suivante"},
+    {"rendez-vous", "demain", "à", "avec"}, {"aujourd'hui", "je", "nous", "c'est"}, {"demain", "je", "nous", "matin"},
+    {"bonjour", "je", "à", "tout"}, {"bonsoir", "je", "à", "tout"}, {"salut", "ça", "je", "comment"},
+    {"comment", "faire", "ça", "est"}, {"pourquoi", "le", "ça", "ne"}, {"parce", "que", "qu'il", "qu'elle"},
+    {"peut-être", "que", "demain", "plus"}, {"d'accord", "avec", "pour", "merci"}
+};
+constexpr size_t kContextCount = sizeof(kContexts) / sizeof(kContexts[0]);
+
 bool asciiUpper(const unsigned char c) { return c >= 'A' && c <= 'Z'; }
+bool asciiLetterOrDigit(const unsigned char c) {
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+bool wordByte(const unsigned char c) { return c >= 0x80 || asciiLetterOrDigit(c) || c == '\'' || c == '-'; }
+bool coreWordByte(const unsigned char c) { return c >= 0x80 || asciiLetterOrDigit(c); }
 
 char foldedInitial(const char* word) {
   if (!word || !*word) return '\0';
@@ -89,6 +226,42 @@ char foldedInitial(const char* word) {
   return '\0';
 }
 
+std::string previousWordBefore(const std::string& text, size_t pos) {
+  pos = std::min(pos, text.size());
+  while (pos > 0 && !wordByte(static_cast<unsigned char>(text[pos - 1]))) --pos;
+  const size_t end = pos;
+  while (pos > 0 && wordByte(static_cast<unsigned char>(text[pos - 1]))) --pos;
+  size_t start = pos;
+  while (start < end && !coreWordByte(static_cast<unsigned char>(text[start]))) ++start;
+  size_t cleanEnd = end;
+  while (cleanEnd > start && !coreWordByte(static_cast<unsigned char>(text[cleanEnd - 1]))) --cleanEnd;
+  return text.substr(start, cleanEnd - start);
+}
+
+bool isSentenceStart(const std::string& text, size_t wordStart) {
+  size_t pos = std::min(wordStart, text.size());
+  while (pos > 0) {
+    const unsigned char c = static_cast<unsigned char>(text[pos - 1]);
+    if (c == ' ' || c == '\t' || c == '\r' || c == '"' || c == '\'' || c == '(' || c == '[') {
+      --pos;
+      continue;
+    }
+    return c == '\n' || c == '.' || c == '!' || c == '?';
+  }
+  return true;
+}
+
+void capitalizeFirstAscii(std::string& word) {
+  for (char& c : word) {
+    if (c >= 'a' && c <= 'z') {
+      c = static_cast<char>(c - 'a' + 'A');
+      return;
+    }
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (uc >= 0x80) return;
+  }
+}
+
 }  // namespace
 
 void PredictiveText::invalidateSuggestionCache() {
@@ -99,15 +272,13 @@ void PredictiveText::invalidateSuggestionCache() {
   cachedSuggestions_ = {};
 }
 
-bool PredictiveText::isWordByte(const unsigned char c) {
-  return c >= 0x80 || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-}
+bool PredictiveText::isWordByte(const unsigned char c) { return wordByte(c); }
 
 std::string PredictiveText::normalizeWord(std::string word) {
   size_t start = 0;
-  while (start < word.size() && !isWordByte(static_cast<unsigned char>(word[start]))) ++start;
+  while (start < word.size() && !coreWordByte(static_cast<unsigned char>(word[start]))) ++start;
   size_t end = word.size();
-  while (end > start && !isWordByte(static_cast<unsigned char>(word[end - 1]))) --end;
+  while (end > start && !coreWordByte(static_cast<unsigned char>(word[end - 1]))) --end;
   word = word.substr(start, end - start);
   for (char& c : word) {
     const unsigned char uc = static_cast<unsigned char>(c);
@@ -151,12 +322,8 @@ std::string PredictiveText::foldForMatch(const std::string& word) {
     }
     if (c == 0xC5 && i + 1 < word.size()) {
       const unsigned char n = static_cast<unsigned char>(word[i + 1]);
-      if (n == 0x92 || n == 0x93) {
-        out += "oe";
-      } else {
-        out.push_back(static_cast<char>(c));
-        out.push_back(static_cast<char>(n));
-      }
+      if (n == 0x92 || n == 0x93) out += "oe";
+      else { out.push_back(static_cast<char>(c)); out.push_back(static_cast<char>(n)); }
       i += 2;
       continue;
     }
@@ -172,6 +339,8 @@ void PredictiveText::currentWordRange(const std::string& text, size_t cursorPos,
   while (start > 0 && isWordByte(static_cast<unsigned char>(text[start - 1]))) --start;
   end = cursorPos;
   while (end < text.size() && isWordByte(static_cast<unsigned char>(text[end]))) ++end;
+  while (start < end && !coreWordByte(static_cast<unsigned char>(text[start]))) ++start;
+  while (end > start && !coreWordByte(static_cast<unsigned char>(text[end - 1]))) --end;
 }
 
 bool PredictiveText::startsWithFolded(const std::string& word, const std::string& foldedPrefix) {
@@ -189,13 +358,10 @@ bool PredictiveText::isBuiltinWord(const std::string& normalizedWord) {
 
 void PredictiveText::addPersonalWord(const std::string& word, const uint16_t increment, const bool allowBuiltin) {
   const std::string normalized = normalizeWord(word);
-  if (normalized.size() < 3 || normalized.size() > 40) return;
+  if (normalized.size() < 2 || normalized.size() > 40) return;
   bool hasLetter = false;
   for (const unsigned char c : normalized) {
-    if (c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-      hasLetter = true;
-      break;
-    }
+    if (c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { hasLetter = true; break; }
   }
   if (!hasLetter || (!allowBuiltin && isBuiltinWord(normalized))) return;
 
@@ -211,8 +377,17 @@ void PredictiveText::addPersonalWord(const std::string& word, const uint16_t inc
       return;
     }
   }
-  if (personal_.size() >= kMaxPersonalWords) return;
-  personal_.push_back(PersonalWord{normalized, static_cast<uint16_t>(std::max<uint16_t>(1, increment))});
+
+  if (personal_.size() >= kMaxPersonalWords) {
+    if (increment == 0) return;
+    auto victim = std::min_element(personal_.begin(), personal_.end(), [](const PersonalWord& a, const PersonalWord& b) {
+      return a.count < b.count;
+    });
+    if (victim == personal_.end() || victim->count > std::max<uint16_t>(1, increment)) return;
+    *victim = PersonalWord{normalized, static_cast<uint16_t>(std::max<uint16_t>(1, increment))};
+  } else {
+    personal_.push_back(PersonalWord{normalized, static_cast<uint16_t>(std::max<uint16_t>(1, increment))});
+  }
   dirty_ = true;
   invalidateSuggestionCache();
 }
@@ -222,32 +397,25 @@ void PredictiveText::load() {
   dirty_ = false;
   invalidateSuggestionCache();
   if (!Storage.exists(kPersonalPath)) return;
-
   FsFile file;
   if (!Storage.openFileForRead("PRED", std::string(kPersonalPath), file)) return;
   const uint32_t size = file.size();
-  if (size == 0 || size > kMaxPersonalFileBytes) {
-    file.close();
-    return;
-  }
+  if (size == 0 || size > kMaxPersonalFileBytes) { file.close(); return; }
   std::string data(size, '\0');
-  if (file.read(data.data(), size) != static_cast<int>(size)) {
-    file.close();
-    return;
-  }
+  if (file.read(data.data(), size) != static_cast<int>(size)) { file.close(); return; }
   file.close();
 
   size_t pos = 0;
   while (pos < data.size() && personal_.size() < kMaxPersonalWords) {
-    const size_t end = data.find('\n', pos);
-    const std::string line = data.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+    const size_t lineEnd = data.find('\n', pos);
+    const std::string line = data.substr(pos, lineEnd == std::string::npos ? std::string::npos : lineEnd - pos);
     const size_t tab = line.find('\t');
     if (tab != std::string::npos && tab + 1 < line.size()) {
       const unsigned long parsed = std::strtoul(line.substr(0, tab).c_str(), nullptr, 10);
       addPersonalWord(line.substr(tab + 1), static_cast<uint16_t>(std::min<unsigned long>(65535, std::max<unsigned long>(1, parsed))), true);
     }
-    if (end == std::string::npos) break;
-    pos = end + 1;
+    if (lineEnd == std::string::npos) break;
+    pos = lineEnd + 1;
   }
   dirty_ = false;
 }
@@ -257,14 +425,13 @@ void PredictiveText::save() {
   Storage.mkdir(kPersonalDir);
   FsFile file = Storage.open(kPersonalPath, O_WRONLY | O_CREAT | O_TRUNC);
   if (!file) return;
-
   std::vector<PersonalWord> rows = personal_;
   std::sort(rows.begin(), rows.end(), [](const PersonalWord& a, const PersonalWord& b) {
     if (a.count != b.count) return a.count > b.count;
     return a.word < b.word;
   });
   std::string data;
-  data.reserve(rows.size() * 18);
+  data.reserve(rows.size() * 20);
   for (const auto& item : rows) {
     data += std::to_string(item.count);
     data.push_back('\t');
@@ -297,68 +464,92 @@ void PredictiveText::learnWordBefore(const std::string& text, size_t endPos) {
 }
 
 void PredictiveText::learnCurrentWord(const std::string& text, const size_t cursorPos) {
-  size_t start = 0;
-  size_t end = 0;
+  size_t start = 0, end = 0;
   currentWordRange(text, cursorPos, start, end);
   if (end > start) addPersonalWord(text.substr(start, end - start), 1, true);
 }
 
 std::array<std::string, 3> PredictiveText::suggestions(const std::string& text, const size_t cursorPos) const {
   std::array<std::string, 3> result{};
-  size_t start = 0;
-  size_t end = 0;
+  size_t start = 0, end = 0;
   currentWordRange(text, cursorPos, start, end);
-  if (cursorPos <= start) return result;
-
-  const std::string typed = normalizeWord(text.substr(start, cursorPos - start));
+  const bool hasPrefix = cursorPos > start;
+  const std::string typed = hasPrefix ? normalizeWord(text.substr(start, cursorPos - start)) : std::string();
   const std::string foldedPrefix = foldForMatch(typed);
-  if (foldedPrefix.size() < 2) return result;
+  const std::string previous = normalizeWord(previousWordBefore(text, start));
+  const std::string foldedPrevious = foldForMatch(previous);
 
-  std::string cacheKey = foldedPrefix;
-  cacheKey.push_back(!typed.empty() && asciiUpper(static_cast<unsigned char>(text[start])) ? 'U' : 'L');
+  // One character is enough for personal/context matches; the large builtin
+  // dictionary starts at two characters to avoid noisy suggestions.
+  if (foldedPrefix.empty() && foldedPrevious.empty()) return result;
+
+  std::string cacheKey = foldedPrevious + "|" + foldedPrefix;
+  cacheKey.push_back(isSentenceStart(text, start) ? 'S' : 'N');
   if (cachedRevision_ == revision_ && cachedKey_ == cacheKey) return cachedSuggestions_;
 
-  std::vector<const PersonalWord*> matches;
-  matches.reserve(personal_.size());
-  for (const auto& item : personal_) {
-    if (foldedInitial(item.word.c_str()) != foldedPrefix[0]) continue;
-    const std::string foldedWord = foldForMatch(item.word);
-    if (foldedWord.size() >= foldedPrefix.size() &&
-        foldedWord.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && foldedWord != foldedPrefix) {
-      matches.push_back(&item);
+  struct Candidate { std::string word; int score; };
+  std::vector<Candidate> candidates;
+  candidates.reserve(48);
+  auto addCandidate = [&](const std::string& word, int score) {
+    if (word.empty()) return;
+    const std::string folded = foldForMatch(word);
+    if (!foldedPrefix.empty() && (folded.size() < foldedPrefix.size() || folded.compare(0, foldedPrefix.size(), foldedPrefix) != 0 || folded == foldedPrefix)) return;
+    for (auto& candidate : candidates) {
+      if (foldForMatch(candidate.word) == folded) {
+        candidate.score = std::max(candidate.score, score);
+        return;
+      }
     }
-  }
-  std::sort(matches.begin(), matches.end(), [](const PersonalWord* a, const PersonalWord* b) {
-    if (a->count != b->count) return a->count > b->count;
-    return a->word < b->word;
-  });
-
-  size_t slot = 0;
-  auto add = [&](std::string candidate) {
-    if (slot >= result.size()) return;
-    const std::string foldedCandidate = foldForMatch(candidate);
-    for (size_t i = 0; i < slot; ++i) {
-      if (foldForMatch(result[i]) == foldedCandidate) return;
-    }
-    if (!typed.empty() && asciiUpper(static_cast<unsigned char>(text[start])) && !candidate.empty() &&
-        candidate[0] >= 'a' && candidate[0] <= 'z') {
-      candidate[0] = static_cast<char>(candidate[0] - 'a' + 'A');
-    }
-    result[slot++] = std::move(candidate);
+    candidates.push_back(Candidate{word, score});
   };
 
-  for (const PersonalWord* item : matches) {
-    add(item->word);
-    if (slot >= result.size()) break;
-  }
-  for (size_t i = 0; i < kFrenchWordCount && slot < result.size(); ++i) {
-    if (foldedInitial(kFrenchWords[i]) != foldedPrefix[0]) continue;
-    const std::string word = kFrenchWords[i];
-    const std::string foldedWord = foldForMatch(word);
-    if (foldedWord.size() >= foldedPrefix.size() &&
-        foldedWord.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && foldedWord != foldedPrefix) {
-      add(word);
+  if (!foldedPrevious.empty()) {
+    for (size_t i = 0; i < kContextCount; ++i) {
+      if (foldForMatch(kContexts[i].previous) != foldedPrevious) continue;
+      addCandidate(kContexts[i].next1, 9000);
+      addCandidate(kContexts[i].next2, 8600);
+      addCandidate(kContexts[i].next3, 8200);
+      break;
     }
+  }
+
+  if (!foldedPrefix.empty()) {
+    for (const auto& item : personal_) {
+      if (foldedInitial(item.word.c_str()) != foldedPrefix[0]) continue;
+      const std::string folded = foldForMatch(item.word);
+      if (folded.size() >= foldedPrefix.size() && folded.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && folded != foldedPrefix) {
+        const int completionPenalty = static_cast<int>(folded.size() - foldedPrefix.size());
+        addCandidate(item.word, 5000 + std::min<int>(2500, item.count * 40) - completionPenalty * 4);
+      }
+    }
+
+    if (foldedPrefix.size() >= 2) {
+      for (size_t i = 0; i < kFrenchWordCount; ++i) {
+        if (foldedInitial(kFrenchWords[i]) != foldedPrefix[0]) continue;
+        const std::string word = kFrenchWords[i];
+        const std::string folded = foldForMatch(word);
+        if (folded.size() >= foldedPrefix.size() && folded.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && folded != foldedPrefix) {
+          const int completionPenalty = static_cast<int>(folded.size() - foldedPrefix.size());
+          const int frequencyScore = std::max(0, 3000 - static_cast<int>(i / 2));
+          addCandidate(word, frequencyScore - completionPenalty * 3);
+        }
+      }
+    }
+  }
+
+  std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+    if (a.score != b.score) return a.score > b.score;
+    if (a.word.size() != b.word.size()) return a.word.size() < b.word.size();
+    return a.word < b.word;
+  });
+
+  const bool capitalize = isSentenceStart(text, start) || (!typed.empty() && asciiUpper(static_cast<unsigned char>(text[start])));
+  size_t slot = 0;
+  for (const auto& candidate : candidates) {
+    if (slot >= result.size()) break;
+    std::string word = candidate.word;
+    if (capitalize) capitalizeFirstAscii(word);
+    result[slot++] = std::move(word);
   }
 
   cachedKey_ = std::move(cacheKey);
@@ -370,12 +561,19 @@ std::array<std::string, 3> PredictiveText::suggestions(const std::string& text, 
 bool PredictiveText::applySuggestion(std::string& text, size_t& cursorPos, const size_t maxLength,
                                      const std::string& suggestion) {
   if (suggestion.empty()) return false;
-  size_t start = 0;
-  size_t end = 0;
+  cursorPos = std::min(cursorPos, text.size());
+  size_t start = 0, end = 0;
   currentWordRange(text, cursorPos, start, end);
-  if (cursorPos <= start) return false;
 
-  const bool addSpace = end >= text.size();
+  // If the cursor is between words (typically just after a space), insert a
+  // contextual next-word suggestion instead of requiring a typed prefix.
+  if (cursorPos <= start) {
+    start = end = cursorPos;
+  }
+
+  const bool nextIsPunctuation = end < text.size() && (text[end] == '.' || text[end] == ',' || text[end] == ';' ||
+                                                        text[end] == ':' || text[end] == '!' || text[end] == '?');
+  const bool addSpace = end >= text.size() || (!nextIsPunctuation && text[end] != ' ' && text[end] != '\n' && text[end] != '\t');
   const size_t replacementSize = suggestion.size() + (addSpace ? 1 : 0);
   const size_t newSize = text.size() - (end - start) + replacementSize;
   if (maxLength != 0 && newSize > maxLength) return false;
