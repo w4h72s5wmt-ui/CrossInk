@@ -31,8 +31,8 @@ jobs:
           git apply crossink-notes-alpha5.patch
           git apply --check crossink-notes-alpha6-trash.patch
           git apply crossink-notes-alpha6-trash.patch
-          git apply --check crossink-notes-alpha7-native-ui.patch
-          git apply crossink-notes-alpha7-native-ui.patch
+          git apply --recount --check crossink-notes-alpha7-native-ui.patch
+          git apply --recount crossink-notes-alpha7-native-ui.patch
           git apply --check crossink-minesweeper-hello-alpha1.patch
           git apply crossink-minesweeper-hello-alpha1.patch
           git apply --check crossink-minesweeper-home-alpha2.patch
