@@ -24,11 +24,11 @@ jobs:
           if [ -f .github/workflows/optimize-predictive-once.yml ]; then
             python3 - <<'PY'
           from pathlib import Path
-          import textwrap
           workflow = Path('.github/workflows/optimize-predictive-once.yml').read_text()
           marker = "python3 - <<'PY'\n"
-          code = workflow.split(marker, 1)[1].split("\n          PY", 1)[0]
-          exec(textwrap.dedent(code), {})
+          raw = workflow.split(marker, 1)[1].split("\n          PY", 1)[0]
+          code = "\n".join(line[10:] if line.startswith("          ") else line for line in raw.splitlines())
+          exec(code, {})
           PY
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
