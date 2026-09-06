@@ -1,0 +1,152 @@
+diff --git a/src/activities/home/NotesActivity.h b/src/activities/home/NotesActivity.h
+--- a/src/activities/home/NotesActivity.h
++++ b/src/activities/home/NotesActivity.h
+@@ -29,6 +29,7 @@ class NotesActivity final : public Activity {
+   void reloadNotes();
+   void applyFilter();
+   void createNote();
++  void renameNote(const std::string& filename);
+   void editSearch();
+   void openSelectedNote();
+   void openNoteAt(int index);
+diff --git a/src/activities/home/NotesActivity.cpp b/src/activities/home/NotesActivity.cpp
+--- a/src/activities/home/NotesActivity.cpp
++++ b/src/activities/home/NotesActivity.cpp
+@@ -21,6 +21,7 @@ constexpr int kControlGap = 8;
+ constexpr int kSideButtonWidth = 52;
+ constexpr int kSearchClearWidth = 44;
+ constexpr int kDeleteButtonWidth = 48;
++constexpr int kRenameButtonWidth = 44;
+ constexpr int kRowHeight = 58;
+ constexpr int kRowSidePadding = 16;
+ constexpr int kCornerRadius = 6;
+@@ -62,6 +63,18 @@ void drawClearIcon(GfxRenderer& renderer, const Rect& rect) {
+   renderer.drawLine(cx + half, cy - half, cx - half, cy + half, 2, true);
+ }
+ 
++void drawRenameIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
++  const int cx = rect.x + rect.width / 2;
++  const int cy = rect.y + rect.height / 2;
++  renderer.drawLine(cx - 8, cy + 8, cx + 8, cy - 8, 3, black);
++  renderer.drawLine(cx - 10, cy + 10, cx - 5, cy + 9, 2, black);
++  renderer.drawLine(cx + 6, cy - 10, cx + 10, cy - 6, 2, black);
++  renderer.drawLine(cx - 11, cy + 11, cx - 7, cy + 7, 1, black);
++}
++
+ void drawTrashIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
+   const int iconWidth = 18;
+   const int iconHeight = 22;
+@@ -245,6 +258,51 @@ void NotesActivity::createNote() {
+       });
+ }
+ 
++void NotesActivity::renameNote(const std::string& filename) {
++  const std::string oldTitle = displayName(filename);
++  const std::string oldPath = std::string(kNotesDir) + "/" + filename;
++  startActivityForResult(
++      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_TITLE), oldTitle, 48,
++                                              InputType::Text, 1),
++      [this, filename, oldPath](const ActivityResult& result) {
++        if (result.isCancelled) {
++          requestUpdate();
++          return;
++        }
++        const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
++        if (!keyboard || keyboard->text.empty()) {
++          requestUpdate();
++          return;
++        }
++
++        const std::string sanitized = sanitizeFilename(keyboard->text);
++        const std::string requestedFilename = sanitized + ".txt";
++        if (requestedFilename == filename) {
++          requestUpdate();
++          return;
++        }
++
++        std::string content;
++        if (!loadNote(oldPath, content)) {
++          LOG_ERR("NOTES", "Failed to read note for rename: %s", oldPath.c_str());
++          requestUpdate();
++          return;
++        }
++        const std::string newPath = uniquePathForTitle(keyboard->text);
++        if (!saveNote(newPath, content)) {
++          LOG_ERR("NOTES", "Failed to write renamed note: %s", newPath.c_str());
++          requestUpdate();
++          return;
++        }
++        if (!Storage.remove(oldPath.c_str())) {
++          Storage.remove(newPath.c_str());
++          LOG_ERR("NOTES", "Failed to remove old note after rename: %s", oldPath.c_str());
++          requestUpdate();
++          return;
++        }
++        reloadNotes();
++        applyFilter();
++        requestUpdate();
++      });
++}
++
+ void NotesActivity::editSearch() {
+   startActivityForResult(
+       std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH_NOTES), searchQuery, 80,
+@@ -293,10 +351,15 @@ void NotesActivity::loop() {
+   const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+   const auto backLayout = TouchHeaderBackButton::layout(header);
+   const Rect backRect = backLayout.touchRect;
+-  const Rect addRect{width - kSideButtonWidth, header.y, kSideButtonWidth, header.height};
++  const int controlOffset = std::min(TouchHeaderBackButton::TITLE_VERTICAL_OFFSET,
++                                     std::max(0, header.y + header.height -
++                                                     (backLayout.iconRect.y +
++                                                      (backLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2)));
++  const Rect addRect{width - kSideButtonWidth, header.y + controlOffset, kSideButtonWidth, header.height};
+   const int searchLeft = backLayout.iconRect.x + backLayout.iconRect.width + kControlGap;
+   const int searchRight = addRect.x - kControlGap;
+-  const Rect searchRect{searchLeft, header.y, std::max(1, searchRight - searchLeft), header.height};
++  const Rect searchRect{searchLeft, header.y + controlOffset, std::max(1, searchRight - searchLeft), header.height};
+   const int listTop = header.y + header.height + metrics.verticalSpacing;
+   const int listBottom = height - metrics.buttonHintsHeight - kTopMargin;
+   const int visibleRows = std::max(1, (listBottom - listTop) / kRowHeight);
+@@ -337,6 +400,8 @@ void NotesActivity::loop() {
+         const Rect rowRect{kTopMargin, listTop + row * kRowHeight, width - kTopMargin * 2, kRowHeight - 2};
+         const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
+                               rowRect.height};
++        const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+         if (pointInRect(deleteRect, tx, ty)) {
+           const std::string filename = filteredNotes[static_cast<size_t>(index)];
+           const std::string path = std::string(kNotesDir) + "/" + filename;
+@@ -360,6 +425,11 @@ void NotesActivity::loop() {
+               });
+           return;
+         }
++        if (pointInRect(renameRect, tx, ty)) {
++          const std::string filename = filteredNotes[static_cast<size_t>(index)];
++          renameNote(filename);
++          return;
++        }
+         openNoteAt(index);
+         return;
+       }
+@@ -451,16 +521,19 @@ void NotesActivity::render(RenderLock&&) {
+       const Rect rowRect{kTopMargin, rowY, width - kTopMargin * 2, kRowHeight - 2};
+       const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
+                             rowRect.height};
++      const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+       const bool selected = index == selectorIndex;
+       if (selected) {
+         auto target = makeUiTarget(renderer);
+@@ -469,10 +542,11 @@ void NotesActivity::render(RenderLock&&) {
+                     freeink::ui::Paint::dither(freeink::ui::Color::LightGray));
+       }
+       const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(filteredNotes[index]).c_str(),
+-                                                       rowRect.width - kRowSidePadding * 2 - kDeleteButtonWidth);
++                                                       rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -
++                                                           kDeleteButtonWidth);
+       const int textH = renderer.getLineHeight(UI_12_FONT_ID);
+       renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, rowRect.y + (rowRect.height - textH) / 2,
+                         title.c_str(), true);
++      drawRenameIcon(renderer, renameRect, true);
+       drawTrashIcon(renderer, deleteRect, true);
+     }
+   }
