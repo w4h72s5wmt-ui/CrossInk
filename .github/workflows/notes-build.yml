@@ -1,4 +1,4 @@
-name: CrossInk Notes + Demineur Readability X4 Pro
+name: CrossInk X4 Pro source migration
 
 on:
   push:
@@ -6,18 +6,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-x4-pro-notes:
+  migrate-sources:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout CrossInk
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: Materialize legacy feature stack
+      - name: Materialize all features into real source files
         run: |
           set -euo pipefail
           git apply crossink-notes-alpha4-i18n.patch
@@ -36,75 +37,92 @@ jobs:
           git apply --recount crossink-minesweeper-ui-alpha4.patch
           git apply --recount crossink-minesweeper-confirm-alpha5.patch
 
-          # Fix the predictive-bar type at source level before materializing.
+          # Predictive text header must expose the same FreeInkUI Rect type everywhere.
           sed -i 's/^  Rect predictiveBarRect() const;/  freeink::ui::Rect predictiveBarRect() const;/' src/activities/util/KeyboardEntryActivity.h
           sed -i 's/^Rect KeyboardEntryActivity::predictiveBarRect() const {/fui::Rect KeyboardEntryActivity::predictiveBarRect() const {/' src/activities/util/KeyboardEntryActivity.cpp
           sed -i 's/^  return Rect{kb.x, y, kb.width, height};/  return fui::Rect{kb.x, static_cast<int16_t>(y), kb.width, static_cast<int16_t>(height)};/' src/activities/util/KeyboardEntryActivity.cpp
           sed -i 's/const Rect bar = predictiveBarRect()/const fui::Rect bar = predictiveBarRect()/g' src/activities/util/KeyboardEntryActivity.cpp
 
-          git status --porcelain
-          git status --porcelain | sed 's/^.. //' > materialized-files.txt
-          tar -czf materialized-sources.tar.gz -T materialized-files.txt
+          # Patch files are migration history only; sources are now authoritative.
+          rm -f crossink-notes-*.patch crossink-minesweeper-*.patch
 
-      - name: Upload materialized sources
-        uses: actions/upload-artifact@v7
-        with:
-          name: materialized-sources-${{ github.run_number }}
-          path: |
-            materialized-sources.tar.gz
-            materialized-files.txt
-          if-no-files-found: error
+          cat > .github/workflows/notes-build.yml <<'YAML'
+          name: CrossInk Notes + Demineur X4 Pro
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
+          on:
+            push:
+              branches: [x4-pro-notes]
+            workflow_dispatch:
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-          enable-cache: true
+          permissions:
+            contents: read
 
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.platformio/packages
-            ~/.platformio/platforms
-          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+          jobs:
+            build-x4-pro-notes:
+              runs-on: ubuntu-latest
+              steps:
+                - name: Checkout CrossInk sources
+                  uses: actions/checkout@v6
+                  with:
+                    submodules: recursive
 
-      - name: Cache incremental X4 Pro build
-        uses: actions/cache@v4
-        with:
-          path: |
-            .pio/build/x4-pro
-            .pio/libdeps/x4-pro
-          key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-x4-pro-pio6.1.19-
+                - uses: actions/setup-python@v6
+                  with:
+                    python-version: "3.14"
 
-      - name: Install PlatformIO Core
-        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+                - name: Install uv
+                  uses: astral-sh/setup-uv@v7
+                  with:
+                    version: "latest"
+                    enable-cache: true
 
-      - name: Clean X4 Pro build output
-        run: pio run -e x4-pro -t clean
+                - name: Cache PlatformIO packages
+                  uses: actions/cache@v4
+                  with:
+                    path: |
+                      ~/.platformio/packages
+                      ~/.platformio/platforms
+                    key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
 
-      - name: Build X4 Pro Notes + Demineur firmware
-        run: |
-          set -euo pipefail
-          pio run -e x4-pro | tee pio-x4-pro-notes.log
+                - name: Cache incremental X4 Pro build
+                  uses: actions/cache@v4
+                  with:
+                    path: |
+                      .pio/build/x4-pro
+                      .pio/libdeps/x4-pro
+                    key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
+                    restore-keys: |
+                      ${{ runner.os }}-x4-pro-pio6.1.19-
 
-      - name: Upload X4 Pro firmware
-        uses: actions/upload-artifact@v7
-        with:
-          name: firmware-x4-pro-build-${{ github.run_number }}
-          path: .pio/build/x4-pro/firmware-x4-pro.bin
-          if-no-files-found: error
+                - name: Install PlatformIO Core
+                  run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: x4-pro-build-${{ github.run_number }}-log
-          path: pio-x4-pro-notes.log
-          if-no-files-found: ignore
+                - name: Clean X4 Pro build output
+                  run: pio run -e x4-pro -t clean
+
+                - name: Build X4 Pro firmware directly from sources
+                  run: |
+                    set -euo pipefail
+                    pio run -e x4-pro | tee pio-x4-pro-notes.log
+
+                - name: Upload X4 Pro firmware
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: firmware-x4-pro-build-${{ github.run_number }}
+                    path: .pio/build/x4-pro/firmware-x4-pro.bin
+                    if-no-files-found: error
+
+                - name: Upload build log
+                  if: always()
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: x4-pro-build-${{ github.run_number }}-log
+                    path: pio-x4-pro-notes.log
+                    if-no-files-found: ignore
+          YAML
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: materialize Notes and Minesweeper sources"
+          git push origin HEAD:x4-pro-notes
