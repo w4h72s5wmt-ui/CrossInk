@@ -67,6 +67,9 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
       - name: Build X4 Pro Notes + Demineur Readability firmware
         run: |
           set -euo pipefail
@@ -75,7 +78,7 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-notes-demineur-readability-alpha6
+          name: firmware-x4-pro-build-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -83,6 +86,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-notes-demineur-readability-alpha6-build-log
+          name: x4-pro-build-${{ github.run_number }}-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
