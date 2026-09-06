@@ -840,14 +840,14 @@ void MinesweeperActivity::buildMenuScreen(UiApp::ScreenType& screen) {
   for (int i = 0; i < kGridOptionCount; ++i) {
     fui::ListItem item;
     item.label = GRID_LABELS[i];
-    item.value = i == gridSizeIndex_ ? "Choisie" : nullptr;
+    item.value = nullptr;
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);
   }
 
   fui::ListItem assistItem;
   assistItem.label = "Aide compteur de mines";
-  assistItem.value = assistedCounterChoice ? "[X]" : "[ ]";
+  assistItem.value = nullptr;
   assistItem.actionValue = 4;
   items.push_back(assistItem);
 
@@ -905,16 +905,38 @@ void MinesweeperActivity::renderMenu() {
   app_.render();
   uiReady_ = true;
 
+  // Draw option states as real e-ink checkboxes: white square with a black
+  // inset square when enabled. This avoids font-dependent checkbox glyphs.
+  const Rect listBounds = menuListRect(renderer, mappedInput);
+  const int drawnRows = std::max(1, visibleRows_);
+  const int boxSize = 22;
+  const int innerSize = 10;
+  const int boxX = renderer.getScreenWidth() - UITheme::getInstance().getMetrics().contentSidePadding - boxSize - 10;
+  for (int visible = 0; visible < drawnRows; ++visible) {
+    const int itemIndex = topIndex_ + visible;
+    if (itemIndex < 0 || itemIndex > 4) continue;
+    const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;
+    const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;
+    const int boxY = rowTop + std::max(0, (rowBottom - rowTop - boxSize) / 2);
+    renderer.fillRect(boxX, boxY, boxSize, boxSize, false);
+    renderer.drawRect(boxX, boxY, boxSize, boxSize, 2, true);
+    const bool checked = itemIndex < kGridOptionCount ? itemIndex == gridSizeIndex_ : assistedCounterChoice;
+    if (checked) {
+      const int inset = (boxSize - innerSize) / 2;
+      renderer.fillRect(boxX + inset, boxY + inset, innerSize, innerSize, true);
+    }
+  }
+
   const Rect scorePanel = scoreTableRect(renderer, mappedInput);
   renderer.fillRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, false);
   renderer.drawRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, 1, true);
-  const int headerRowHeight = 28;
+  const int headerRowHeight = 30;
   const int dataTop = scorePanel.y + headerRowHeight;
   const int dataHeight = scorePanel.height - headerRowHeight;
   const int splitX = scorePanel.x + scorePanel.width * 2 / 5;
 
   renderer.drawLine(scorePanel.x, dataTop, scorePanel.x + scorePanel.width, dataTop, 1, true);
-  renderer.drawLine(splitX, scorePanel.y, splitX, scorePanel.y + scorePanel.height, 1, true);
+  renderer.drawLine(splitX, dataTop, splitX, scorePanel.y + scorePanel.height, 1, true);
 
   auto drawCenteredCellText = [this](const int fontId, const Rect& cell, const char* text) {
     const int textWidth = renderer.getTextWidth(fontId, text);
@@ -923,10 +945,8 @@ void MinesweeperActivity::renderMenu() {
                       cell.y + std::max(0, (cell.height - textHeight) / 2) + 1, text);
   };
 
-  const Rect gridHeader{scorePanel.x, scorePanel.y, splitX - scorePanel.x, headerRowHeight};
-  const Rect bestHeader{splitX, scorePanel.y, scorePanel.x + scorePanel.width - splitX, headerRowHeight};
-  drawCenteredCellText(UI_10_FONT_ID, gridHeader, "GRILLE");
-  drawCenteredCellText(UI_10_FONT_ID, bestHeader, "MEILLEUR SCORE");
+  const Rect scoreHeader{scorePanel.x, scorePanel.y, scorePanel.width, headerRowHeight};
+  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "SCORES");
 
   constexpr const char* SCORE_GRID_LABELS[SCORE_GRID_COUNT] = {"5 x 5", "9 x 9", "12 x 12", "16 x 16"};
   for (int row = 0; row < SCORE_GRID_COUNT; ++row) {
