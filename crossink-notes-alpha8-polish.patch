@@ -1,0 +1,62 @@
+diff --git a/src/activities/home/NotesActivity.cpp b/src/activities/home/NotesActivity.cpp
+--- a/src/activities/home/NotesActivity.cpp
++++ b/src/activities/home/NotesActivity.cpp
+@@ -15,6 +15,7 @@
+ #include "activities/util/KeyboardEntryActivity.h"
+ #include "components/TouchHeaderBackButton.h"
+ #include "components/UITheme.h"
++#include "components/UiAppHelpers.h"
+ #include "fontIds.h"
+ 
+ namespace {
+@@ -38,12 +39,12 @@ void drawCenteredLabel(GfxRenderer& renderer, const Rect& rect, const char* labe
+ void drawPlusIcon(GfxRenderer& renderer, const Rect& rect) {
+   const int cx = rect.x + rect.width / 2;
+   const int cy = rect.y + rect.height / 2;
+-  const int half = 11;
+-  renderer.drawLine(cx - half, cy, cx + half, cy, 2, true);
+-  renderer.drawLine(cx, cy - half, cx, cy + half, 2, true);
++  const int half = 10;
++  renderer.fillRect(cx - half, cy - 1, half * 2 + 1, 3, true);
++  renderer.fillRect(cx - 1, cy - half, 3, half * 2 + 1, true);
+ }
+ 
+ void drawSearchIcon(GfxRenderer& renderer, const Rect& rect) {
+@@ -370,15 +371,19 @@ void NotesActivity::render(RenderLock&&) {
+   const int height = renderer.getScreenHeight();
+   const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+   const auto backLayout = TouchHeaderBackButton::layout(header);
+-  const Rect addRect{width - kSideButtonWidth, header.y, kSideButtonWidth, header.height};
++  const int controlOffset = std::min(TouchHeaderBackButton::TITLE_VERTICAL_OFFSET,
++                                     std::max(0, header.y + header.height -
++                                                     (backLayout.iconRect.y +
++                                                      (backLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2)));
++  const Rect addRect{width - kSideButtonWidth, header.y + controlOffset, kSideButtonWidth, header.height};
+   const int searchLeft = backLayout.iconRect.x + backLayout.iconRect.width + kControlGap;
+   const int searchRight = addRect.x - kControlGap;
+-  const Rect searchRect{searchLeft, header.y, std::max(1, searchRight - searchLeft), header.height};
++  const Rect searchRect{searchLeft, header.y + controlOffset, std::max(1, searchRight - searchLeft), header.height};
+ 
+   TouchHeaderBackButton::draw(renderer, header, "", false, kSideButtonWidth + kControlGap);
+   drawPlusIcon(renderer, addRect);
+@@ -442,16 +447,22 @@ void NotesActivity::render(RenderLock&&) {
+       const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
+                             rowRect.height};
+       const bool selected = index == selectorIndex;
+-      if (selected) renderer.fillRect(rowRect.x, rowRect.y, rowRect.width, rowRect.height, true);
++      if (selected) {
++        auto target = makeUiTarget(renderer);
++        target.fill(freeink::ui::Rect{static_cast<int16_t>(rowRect.x), static_cast<int16_t>(rowRect.y),
++                                      static_cast<int16_t>(rowRect.width), static_cast<int16_t>(rowRect.height)},
++                    freeink::ui::Paint::dither(freeink::ui::Color::LightGray));
++      }
+       const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(filteredNotes[index]).c_str(),
+                                                        rowRect.width - kRowSidePadding * 2 - kDeleteButtonWidth);
+       const int textH = renderer.getLineHeight(UI_12_FONT_ID);
+       renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, rowRect.y + (rowRect.height - textH) / 2,
+-                        title.c_str(), !selected);
+-      drawTrashIcon(renderer, deleteRect, !selected);
++                        title.c_str(), true);
++      drawTrashIcon(renderer, deleteRect, true);
+     }
+   }
