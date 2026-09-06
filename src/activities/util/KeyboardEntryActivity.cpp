@@ -25,7 +25,8 @@ bool outputEndsWord(const char* out) {
   const size_t len = strlen(out);
   const unsigned char c = static_cast<unsigned char>(out[len - 1]);
   if (c >= 0x80) return false;
-  return !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+  return c != '\'' && c != '-' &&
+         !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
 }
 
 // ---------------------------------------------------------------------------

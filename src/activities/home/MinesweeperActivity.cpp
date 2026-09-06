@@ -28,7 +28,7 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/minesweeper.bin";
 constexpr const char SCORE_PATH[] = "/.crosspoint/minesweeper-scores.bin";
-constexpr uint32_t SAVE_MAGIC = 0x4D535734;  // MSW4: packed, intentionally incompatible with old saves.
+constexpr uint32_t SAVE_MAGIC = 0x4D535735;  // MSW5: packed + CRC16, intentionally incompatible with old saves.
 constexpr uint32_t SCORE_MAGIC = 0x4D534353;
 constexpr uint8_t SCORE_VERSION = 1;
 constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
@@ -142,6 +142,23 @@ bool writeValue(FsFile& file, const T& value) {
 template <typename T>
 bool readValue(FsFile& file, T& value) {
   return file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T)) == static_cast<int>(sizeof(T));
+}
+
+uint16_t crc16Update(uint16_t crc, const uint8_t* data, const size_t length) {
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= static_cast<uint16_t>(data[i]) << 8;
+    for (int bit = 0; bit < 8; ++bit) {
+      crc = (crc & 0x8000) != 0
+                ? static_cast<uint16_t>((static_cast<uint16_t>(crc << 1)) ^ 0x1021)
+                : static_cast<uint16_t>(crc << 1);
+    }
+  }
+  return crc;
+}
+
+template <typename T>
+uint16_t crc16Value(const uint16_t crc, const T& value) {
+  return crc16Update(crc, reinterpret_cast<const uint8_t*>(&value), sizeof(T));
 }
 
 bool loadBestScores() {
@@ -626,18 +643,21 @@ void MinesweeperActivity::revealCell(const int index) {
 }
 
 void MinesweeperActivity::revealFlood(const int startIndex) {
-  std::array<uint8_t, kMaxCells> queue{};
   const int dimension = gridDimension();
   const int cellCount = dimension * dimension;
+  if (startIndex < 0 || startIndex >= cellCount || revealed_[startIndex] || flagged_[startIndex] || mines_[startIndex]) {
+    return;
+  }
+
+  std::array<uint8_t, kMaxCells> queue{};
   int head = 0;
   int tail = 0;
+  revealed_[startIndex] = 1;
+  ++revealedSafeCells_;
   queue[tail++] = static_cast<uint8_t>(startIndex);
 
   while (head < tail) {
     const int index = queue[head++];
-    if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
-    revealed_[index] = 1;
-    ++revealedSafeCells_;
     if (adjacentMineCount(index) != 0) continue;
 
     const int row = index / dimension;
@@ -649,9 +669,12 @@ void MinesweeperActivity::revealFlood(const int startIndex) {
         const int nc = col + dc;
         if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
         const int next = nr * dimension + nc;
-        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
-          queue[tail++] = static_cast<uint8_t>(next);
-        }
+        if (revealed_[next] || flagged_[next] || mines_[next] || tail >= cellCount) continue;
+        // Mark on enqueue: every cell can enter the queue only once, so a large
+        // empty area cannot consume the 256-entry queue with duplicates.
+        revealed_[next] = 1;
+        ++revealedSafeCells_;
+        queue[tail++] = static_cast<uint8_t>(next);
       }
     }
   }
@@ -704,11 +727,22 @@ bool MinesweeperActivity::saveGame() {
   const uint8_t selected = static_cast<uint8_t>(std::clamp(selectedCellIndex_, 0, cellCount - 1));
   const uint8_t savedOfficialScore = static_cast<uint8_t>(std::clamp(officialScore, 0, 255));
 
+  uint16_t crc = 0xFFFF;
+  crc = crc16Value(crc, SAVE_MAGIC);
+  crc = crc16Value(crc, grid);
+  crc = crc16Value(crc, stateFlags);
+  crc = crc16Value(crc, selected);
+  crc = crc16Value(crc, savedOfficialScore);
+  crc = crc16Update(crc, mines_.data(), packedBytes);
+  crc = crc16Update(crc, revealed_.data(), packedBytes);
+  crc = crc16Update(crc, flagged_.data(), packedBytes);
+
   bool ok = writeValue(file, SAVE_MAGIC) && writeValue(file, grid) && writeValue(file, stateFlags) &&
             writeValue(file, selected) && writeValue(file, savedOfficialScore);
   if (ok) ok = file.write(mines_.data(), packedBytes) == packedBytes;
   if (ok) ok = file.write(revealed_.data(), packedBytes) == packedBytes;
   if (ok) ok = file.write(flagged_.data(), packedBytes) == packedBytes;
+  if (ok) ok = writeValue(file, crc);
   file.close();
 
   if (!ok) {
@@ -749,7 +783,7 @@ bool MinesweeperActivity::loadSavedGame() {
   const int cellCount = totalCells();
   const size_t packedBytes = static_cast<size_t>((cellCount + 7) / 8);
   constexpr size_t headerBytes = sizeof(uint32_t) + 4 * sizeof(uint8_t);
-  const size_t expectedSize = headerBytes + 3 * packedBytes;
+  const size_t expectedSize = headerBytes + 3 * packedBytes + sizeof(uint16_t);
   if (file.size() != expectedSize || selected >= cellCount) {
     file.close();
     clearSavedGame();
@@ -760,12 +794,24 @@ bool MinesweeperActivity::loadSavedGame() {
   mines_.fill(0);
   revealed_.fill(0);
   flagged_.fill(0);
+  uint16_t savedCrc = 0;
   ok = file.read(mines_.data(), packedBytes) == static_cast<int>(packedBytes);
   if (ok) ok = file.read(revealed_.data(), packedBytes) == static_cast<int>(packedBytes);
   if (ok) ok = file.read(flagged_.data(), packedBytes) == static_cast<int>(packedBytes);
+  if (ok) ok = readValue(file, savedCrc);
   file.close();
 
-  if (!ok) {
+  uint16_t calculatedCrc = 0xFFFF;
+  calculatedCrc = crc16Value(calculatedCrc, magic);
+  calculatedCrc = crc16Value(calculatedCrc, grid);
+  calculatedCrc = crc16Value(calculatedCrc, stateFlags);
+  calculatedCrc = crc16Value(calculatedCrc, selected);
+  calculatedCrc = crc16Value(calculatedCrc, savedOfficialScore);
+  calculatedCrc = crc16Update(calculatedCrc, mines_.data(), packedBytes);
+  calculatedCrc = crc16Update(calculatedCrc, revealed_.data(), packedBytes);
+  calculatedCrc = crc16Update(calculatedCrc, flagged_.data(), packedBytes);
+
+  if (!ok || savedCrc != calculatedCrc) {
     clearSavedGame();
     resetGame();
     return false;
