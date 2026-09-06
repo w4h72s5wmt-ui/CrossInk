@@ -11,7 +11,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <vector>
 
 #include "AlertActivity.h"
 #include "CrossPointState.h"
@@ -35,7 +34,6 @@ constexpr uint8_t PREVIOUS_SAVE_VERSION = 2;
 constexpr uint8_t LEGACY_SAVE_VERSION = 1;
 constexpr uint32_t SCORE_MAGIC = 0x4D534353;
 constexpr uint8_t SCORE_VERSION = 1;
-constexpr int UNDO_MAX_CELLS = 16 * 16;
 constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
 constexpr int SCORE_TABLE_HEIGHT = 152;
 constexpr int SCORE_RESET_GAP = 8;
@@ -43,13 +41,8 @@ constexpr int SCORE_RESET_BUTTON_HEIGHT = 44;
 constexpr int SCORE_AREA_HEIGHT = SCORE_TABLE_HEIGHT + SCORE_RESET_GAP + SCORE_RESET_BUTTON_HEIGHT;
 constexpr int SCORE_GRID_COUNT = 4;
 
-std::array<uint8_t, UNDO_MAX_CELLS> undoMines{};
-std::array<uint8_t, UNDO_MAX_CELLS> undoRevealed{};
-std::array<uint8_t, UNDO_MAX_CELLS> undoFlagged{};
 bool undoAvailable = false;
-bool undoMinesPlaced = false;
-int undoRevealedSafeCells = 0;
-int undoSelectedCellIndex = 0;
+int undoMineIndex = -1;
 int64_t lossUndoDeadlineUs = 0;
 
 // The menu choice applies to newly-created games. The active value is saved
@@ -59,6 +52,7 @@ bool assistedCounterActive = false;
 bool scoreFrozen = false;
 int officialScore = 0;
 std::array<uint16_t, SCORE_GRID_COUNT> bestScores{};
+bool scoresDirty = false;
 
 constexpr const char* GRID_LABELS[] = {
     "Enfant - 5 x 5 - 3 Mines",
@@ -155,6 +149,7 @@ bool readValue(FsFile& file, T& value) {
 
 bool loadBestScores() {
   bestScores.fill(0);
+  scoresDirty = false;
   if (!Storage.exists(SCORE_PATH)) return false;
 
   FsFile file;
@@ -182,7 +177,13 @@ bool saveBestScores() {
   bool ok = writeValue(file, SCORE_MAGIC) && writeValue(file, SCORE_VERSION) && writeValue(file, count);
   for (int i = 0; i < SCORE_GRID_COUNT && ok; ++i) ok = writeValue(file, bestScores[i]);
   file.close();
+  if (ok) scoresDirty = false;
   return ok;
+}
+
+void flushBestScores() {
+  if (!scoresDirty) return;
+  if (!saveBestScores()) LOG_ERR("MINE", "Failed to save best scores");
 }
 
 void updateBestScore(const int gridIndex, const int score) {
@@ -190,9 +191,7 @@ void updateBestScore(const int gridIndex, const int score) {
   const uint16_t bounded = static_cast<uint16_t>(std::min(score, 0xFFFF));
   if (bounded <= bestScores[gridIndex]) return;
   bestScores[gridIndex] = bounded;
-  if (!saveBestScores()) {
-    LOG_ERR("MINE", "Failed to save best scores");
-  }
+  scoresDirty = true;
 }
 
 void drawHiddenCellPattern(GfxRenderer& renderer, const int x, const int y, const int size) {
@@ -227,6 +226,7 @@ void MinesweeperActivity::onEnter() {
   uiReady_ = false;
   confirmHoldHandled_ = false;
   undoAvailable = false;
+  undoMineIndex = -1;
   lossUndoDeadlineUs = 0;
   assistedCounterChoice = false;
   assistedCounterActive = false;
@@ -248,6 +248,7 @@ void MinesweeperActivity::onEnter() {
 
 void MinesweeperActivity::onExit() {
   if (viewMode_ == ViewMode::Grid && !gameOver_) saveGame();
+  flushBestScores();
   Activity::onExit();
 }
 
@@ -280,6 +281,7 @@ void MinesweeperActivity::loopMenu() {
         [this](const ActivityResult& result) {
           if (!result.isCancelled) {
             bestScores.fill(0);
+            scoresDirty = false;
             if (Storage.exists(SCORE_PATH)) Storage.remove(SCORE_PATH);
           }
           requestUpdate();
@@ -414,6 +416,7 @@ void MinesweeperActivity::loopResult() {
 
   if (!won_ && undoAvailable && lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) {
     undoAvailable = false;
+    undoMineIndex = -1;
     lossUndoDeadlineUs = 0;
     for (int i = 0; i < totalCells(); ++i) revealed_[i] = 1;
     requestUpdate();
@@ -424,19 +427,15 @@ void MinesweeperActivity::loopResult() {
     if (lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) return;
     if (!scoreFrozen) {
       scoreFrozen = true;
-      officialScore = undoRevealedSafeCells;
+      officialScore = revealedSafeCells_;
       updateBestScore(gridSizeIndex_, officialScore);
     }
-    mines_ = undoMines;
-    revealed_ = undoRevealed;
-    flagged_ = undoFlagged;
-    minesPlaced_ = undoMinesPlaced;
-    revealedSafeCells_ = undoRevealedSafeCells;
-    selectedCellIndex_ = undoSelectedCellIndex;
+    if (undoMineIndex >= 0 && undoMineIndex < totalCells()) revealed_[undoMineIndex] = 0;
     gameOver_ = false;
     won_ = false;
     viewMode_ = ViewMode::Grid;
     undoAvailable = false;
+    undoMineIndex = -1;
     lossUndoDeadlineUs = 0;
     saveGame();
     requestUpdate();
@@ -531,12 +530,14 @@ void MinesweeperActivity::enterGrid() {
 
 void MinesweeperActivity::returnToMenu() {
   if (!gameOver_) saveGame();
+  flushBestScores();
   viewMode_ = ViewMode::Menu;
   selectedIndex_ = gridSizeIndex_;
   topIndex_ = 0;
   initialViewportPending_ = true;
   confirmHoldHandled_ = false;
   undoAvailable = false;
+  undoMineIndex = -1;
   lossUndoDeadlineUs = 0;
   requestUpdate();
 }
@@ -554,11 +555,6 @@ int MinesweeperActivity::totalCells() const {
   return dimension * dimension;
 }
 
-bool MinesweeperActivity::isValidCell(const int row, const int col) const {
-  const int dimension = gridDimension();
-  return row >= 0 && row < dimension && col >= 0 && col < dimension;
-}
-
 int MinesweeperActivity::adjacentMineCount(const int index) const {
   const int dimension = gridDimension();
   const int row = index / dimension;
@@ -569,7 +565,7 @@ int MinesweeperActivity::adjacentMineCount(const int index) const {
       if (dr == 0 && dc == 0) continue;
       const int nr = row + dr;
       const int nc = col + dc;
-      if (isValidCell(nr, nc) && mines_[nr * dimension + nc]) ++count;
+      if (nr >= 0 && nr < dimension && nc >= 0 && nc < dimension && mines_[nr * dimension + nc]) ++count;
     }
   }
   return count;
@@ -588,19 +584,21 @@ void MinesweeperActivity::resetGame() {
   selectedCellIndex_ = 0;
   confirmHoldHandled_ = false;
   undoAvailable = false;
+  undoMineIndex = -1;
   lossUndoDeadlineUs = 0;
 }
 
 void MinesweeperActivity::placeMines(const int firstIndex) {
   mines_.fill(0);
   const int dimension = gridDimension();
+  const int cellCount = dimension * dimension;
   const int firstRow = firstIndex / dimension;
   const int firstCol = firstIndex % dimension;
   const int wanted = mineCount();
   int placed = 0;
 
   while (placed < wanted) {
-    const int index = static_cast<int>(esp_random() % static_cast<uint32_t>(totalCells()));
+    const int index = static_cast<int>(esp_random() % static_cast<uint32_t>(cellCount));
     if (mines_[index]) continue;
     const int row = index / dimension;
     const int col = index % dimension;
@@ -614,16 +612,10 @@ void MinesweeperActivity::placeMines(const int firstIndex) {
 void MinesweeperActivity::revealCell(const int index) {
   if (gameOver_ || index < 0 || index >= totalCells() || flagged_[index] || revealed_[index]) return;
 
-  undoMines = mines_;
-  undoRevealed = revealed_;
-  undoFlagged = flagged_;
-  undoMinesPlaced = minesPlaced_;
-  undoRevealedSafeCells = revealedSafeCells_;
-  undoSelectedCellIndex = selectedCellIndex_;
-  undoAvailable = true;
-
   if (!minesPlaced_) placeMines(index);
   if (mines_[index]) {
+    undoAvailable = true;
+    undoMineIndex = index;
     revealed_[index] = 1;
     finishGame(false);
     return;
@@ -638,18 +630,19 @@ void MinesweeperActivity::revealCell(const int index) {
 
 void MinesweeperActivity::revealFlood(const int startIndex) {
   std::array<int16_t, kMaxCells> queue{};
+  const int dimension = gridDimension();
+  const int cellCount = dimension * dimension;
   int head = 0;
   int tail = 0;
   queue[tail++] = static_cast<int16_t>(startIndex);
 
   while (head < tail) {
     const int index = queue[head++];
-    if (index < 0 || index >= totalCells() || revealed_[index] || flagged_[index] || mines_[index]) continue;
+    if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
     revealed_[index] = 1;
     ++revealedSafeCells_;
     if (adjacentMineCount(index) != 0) continue;
 
-    const int dimension = gridDimension();
     const int row = index / dimension;
     const int col = index % dimension;
     for (int dr = -1; dr <= 1; ++dr) {
@@ -657,11 +650,9 @@ void MinesweeperActivity::revealFlood(const int startIndex) {
         if (dr == 0 && dc == 0) continue;
         const int nr = row + dr;
         const int nc = col + dc;
-        if (!isValidCell(nr, nc)) continue;
+        if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
         const int next = nr * dimension + nc;
-        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
-          queue[tail++] = static_cast<int16_t>(next);
-        }
+        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) queue[tail++] = static_cast<int16_t>(next);
       }
     }
   }
@@ -671,6 +662,7 @@ void MinesweeperActivity::toggleFlag(const int index) {
   if (gameOver_ || index < 0 || index >= totalCells() || revealed_[index]) return;
   flagged_[index] = flagged_[index] ? 0 : 1;
   saveGame();
+  flushBestScores();
 }
 
 void MinesweeperActivity::checkWin() {
@@ -683,6 +675,7 @@ void MinesweeperActivity::finishGame(const bool won) {
 
   if (won) {
     undoAvailable = false;
+    undoMineIndex = -1;
     lossUndoDeadlineUs = 0;
     for (int i = 0; i < totalCells(); ++i) {
       revealed_[i] = 1;
@@ -692,6 +685,7 @@ void MinesweeperActivity::finishGame(const bool won) {
     lossUndoDeadlineUs = 0;
   }
 
+  flushBestScores();
   clearSavedGame();
   viewMode_ = ViewMode::Result;
   requestUpdate();
@@ -732,6 +726,7 @@ bool MinesweeperActivity::saveGame() {
 
 bool MinesweeperActivity::loadSavedGame() {
   undoAvailable = false;
+  undoMineIndex = -1;
   lossUndoDeadlineUs = 0;
   assistedCounterActive = false;
   assistedCounterChoice = false;
@@ -835,33 +830,20 @@ void MinesweeperActivity::buildMenuScreen(UiApp::ScreenType& screen) {
       static_cast<int16_t>(bounds.y), 0,
       static_cast<int16_t>(renderer.getScreenHeight() - bounds.y - bounds.height), 0});
 
-  std::vector<fui::ListItem> items;
-  items.reserve(kMenuRowCount);
+  std::array<fui::ListItem, kMenuRowCount> items{};
   for (int i = 0; i < kGridOptionCount; ++i) {
-    fui::ListItem item;
-    item.label = GRID_LABELS[i];
-    item.value = nullptr;
-    item.actionValue = static_cast<int16_t>(i);
-    items.push_back(item);
+    items[static_cast<size_t>(i)].label = GRID_LABELS[i];
+    items[static_cast<size_t>(i)].value = nullptr;
+    items[static_cast<size_t>(i)].actionValue = static_cast<int16_t>(i);
   }
-
-  fui::ListItem assistItem;
-  assistItem.label = "Aide compteur de mines";
-  assistItem.value = nullptr;
-  assistItem.actionValue = 4;
-  items.push_back(assistItem);
-
-  fui::ListItem continueItem;
-  continueItem.label = "Continuer";
-  continueItem.value = hasSavedGame_ ? "Partie sauvegardee" : "Aucune partie";
-  continueItem.actionValue = 5;
-  items.push_back(continueItem);
-
-  fui::ListItem newGameItem;
-  newGameItem.label = "Nouvelle partie";
-  newGameItem.value = GRID_DIMS[gridSizeIndex_];
-  newGameItem.actionValue = 6;
-  items.push_back(newGameItem);
+  items[4].label = "Aide compteur de mines";
+  items[4].actionValue = 4;
+  items[5].label = "Continuer";
+  items[5].value = hasSavedGame_ ? "Partie sauvegardee" : "Aucune partie";
+  items[5].actionValue = 5;
+  items[6].label = "Nouvelle partie";
+  items[6].value = GRID_DIMS[gridSizeIndex_];
+  items[6].actionValue = 6;
 
   fui::ListProps props;
   props.items = items.data();

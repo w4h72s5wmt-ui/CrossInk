@@ -77,7 +77,6 @@ class MinesweeperActivity final : public Activity {
   int mineCount() const;
   int totalCells() const;
   int adjacentMineCount(int index) const;
-  bool isValidCell(int row, int col) const;
   void resetGame();
   void placeMines(int firstIndex);
   void revealCell(int index);

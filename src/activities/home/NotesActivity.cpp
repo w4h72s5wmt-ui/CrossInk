@@ -5,6 +5,7 @@
 #include <I18n.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <memory>
 
@@ -137,19 +138,16 @@ void NotesActivity::reloadNotes() {
 
 void NotesActivity::applyFilter() {
   filteredNotes.clear();
+  filteredNotes.reserve(notes.size());
   if (searchQuery.empty()) {
-    filteredNotes = notes;
+    for (size_t i = 0; i < notes.size(); ++i) filteredNotes.push_back(i);
   } else {
     const std::string needle = lowerAscii(searchQuery);
-    for (const auto& filename : notes) {
+    for (size_t i = 0; i < notes.size(); ++i) {
+      const auto& filename = notes[i];
       bool matches = lowerAscii(displayName(filename)).find(needle) != std::string::npos;
-      if (!matches) {
-        std::string content;
-        if (loadNote(std::string(kNotesDir) + "/" + filename, content)) {
-          matches = lowerAscii(std::move(content)).find(needle) != std::string::npos;
-        }
-      }
-      if (matches) filteredNotes.push_back(filename);
+      if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle);
+      if (matches) filteredNotes.push_back(i);
     }
   }
 
@@ -217,6 +215,50 @@ bool NotesActivity::loadNote(const std::string& path, std::string& text) const {
   }
   file.close();
   return true;
+}
+
+bool NotesActivity::noteContains(const std::string& path, const std::string& needle) const {
+  if (needle.empty()) return true;
+  constexpr size_t kSearchBufferSize = 512;
+  constexpr size_t kMaxSearchBytes = 80;
+  if (needle.size() > kMaxSearchBytes) return false;
+
+  FsFile file;
+  if (!Storage.openFileForRead("NOTES", path, file)) return false;
+  if (file.size() > kMaxNoteBytes) {
+    file.close();
+    return false;
+  }
+
+  const auto foldByte = [](const unsigned char c) {
+    return static_cast<unsigned char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+  };
+
+  std::array<uint8_t, kMaxSearchBytes> prefix{};
+  for (size_t i = 1, matched = 0; i < needle.size(); ++i) {
+    const unsigned char current = foldByte(static_cast<unsigned char>(needle[i]));
+    while (matched > 0 && current != foldByte(static_cast<unsigned char>(needle[matched]))) matched = prefix[matched - 1];
+    if (current == foldByte(static_cast<unsigned char>(needle[matched]))) ++matched;
+    prefix[i] = static_cast<uint8_t>(matched);
+  }
+
+  std::array<uint8_t, kSearchBufferSize> buffer{};
+  size_t matched = 0;
+  while (true) {
+    const int count = file.read(buffer.data(), buffer.size());
+    if (count <= 0) break;
+    for (int i = 0; i < count; ++i) {
+      const unsigned char current = foldByte(buffer[static_cast<size_t>(i)]);
+      while (matched > 0 && current != foldByte(static_cast<unsigned char>(needle[matched]))) matched = prefix[matched - 1];
+      if (current == foldByte(static_cast<unsigned char>(needle[matched]))) ++matched;
+      if (matched == needle.size()) {
+        file.close();
+        return true;
+      }
+    }
+  }
+  file.close();
+  return false;
 }
 
 bool NotesActivity::saveNote(const std::string& path, const std::string& text) const {
@@ -340,7 +382,7 @@ void NotesActivity::editSearch() {
 void NotesActivity::openNoteAt(const int index) {
   if (index < 0 || index >= static_cast<int>(filteredNotes.size())) return;
   selectorIndex = index;
-  const std::string filename = filteredNotes[static_cast<size_t>(index)];
+  const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
   editNote(std::string(kNotesDir) + "/" + filename, displayName(filename));
 }
 
@@ -400,7 +442,7 @@ void NotesActivity::loop() {
                               rowRect.height};
         const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
         if (pointInRect(deleteRect, tx, ty)) {
-          const std::string filename = filteredNotes[static_cast<size_t>(index)];
+          const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           const std::string path = std::string(kNotesDir) + "/" + filename;
           const std::string heading = std::string(tr(STR_DELETE)) + "?";
           startActivityForResult(
@@ -420,7 +462,7 @@ void NotesActivity::loop() {
           return;
         }
         if (pointInRect(renameRect, tx, ty)) {
-          const std::string filename = filteredNotes[static_cast<size_t>(index)];
+          const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           renameNote(filename);
           return;
         }
@@ -531,7 +573,7 @@ void NotesActivity::render(RenderLock&&) {
                                       static_cast<int16_t>(rowRect.width), static_cast<int16_t>(rowRect.height)},
                     freeink::ui::Paint::dither(freeink::ui::Color::LightGray));
       }
-      const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(filteredNotes[index]).c_str(),
+      const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(notes[filteredNotes[static_cast<size_t>(index)]]).c_str(),
                                                        rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -
                                                            kDeleteButtonWidth);
       const int textH = renderer.getLineHeight(UI_12_FONT_ID);

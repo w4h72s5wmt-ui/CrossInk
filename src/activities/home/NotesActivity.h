@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -21,7 +22,7 @@ class NotesActivity final : public Activity {
 
   ButtonNavigator buttonNavigator;
   std::vector<std::string> notes;
-  std::vector<std::string> filteredNotes;
+  std::vector<size_t> filteredNotes;
   std::string searchQuery;
   int selectorIndex = 0;
   int topIndex = 0;
@@ -35,6 +36,7 @@ class NotesActivity final : public Activity {
   void openNoteAt(int index);
   void editNote(const std::string& path, const std::string& title);
   bool loadNote(const std::string& path, std::string& text) const;
+  bool noteContains(const std::string& path, const std::string& needle) const;
   bool saveNote(const std::string& path, const std::string& text) const;
   std::string uniquePathForTitle(const std::string& title) const;
   static std::string displayName(const std::string& filename);
