@@ -17,7 +17,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply Notes alpha 6 and Demineur home patches
+      - name: Apply Notes alpha 6 and Demineur patches
         run: |
           git apply --check crossink-notes-alpha4-i18n.patch
           git apply crossink-notes-alpha4-i18n.patch
@@ -35,6 +35,8 @@ jobs:
           git apply crossink-minesweeper-hello-alpha1.patch
           git apply --check crossink-minesweeper-home-alpha2.patch
           git apply crossink-minesweeper-home-alpha2.patch
+          git apply --check crossink-minesweeper-score-alpha3.patch
+          git apply crossink-minesweeper-score-alpha3.patch
 
       - uses: actions/setup-python@v6
         with:
