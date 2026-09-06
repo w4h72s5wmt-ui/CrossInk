@@ -37,7 +37,10 @@ constexpr uint32_t SCORE_MAGIC = 0x4D534353;
 constexpr uint8_t SCORE_VERSION = 1;
 constexpr int UNDO_MAX_CELLS = 16 * 16;
 constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
-constexpr int BEST_SCORE_PANEL_HEIGHT = 184;
+constexpr int SCORE_TABLE_HEIGHT = 152;
+constexpr int SCORE_RESET_GAP = 8;
+constexpr int SCORE_RESET_BUTTON_HEIGHT = 44;
+constexpr int SCORE_AREA_HEIGHT = SCORE_TABLE_HEIGHT + SCORE_RESET_GAP + SCORE_RESET_BUTTON_HEIGHT;
 constexpr int SCORE_GRID_COUNT = 4;
 
 std::array<uint8_t, UNDO_MAX_CELLS> undoMines{};
@@ -80,7 +83,19 @@ Rect menuListRect(const GfxRenderer& renderer, const MappedInputManager& mappedI
       metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
   return Rect{0, contentTop, renderer.getScreenWidth(),
               renderer.getScreenHeight() - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing -
-                  BEST_SCORE_PANEL_HEIGHT};
+                  SCORE_AREA_HEIGHT};
+}
+
+Rect scoreTableRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect list = menuListRect(renderer, mappedInput);
+  return Rect{metrics.contentSidePadding, list.y + list.height,
+              renderer.getScreenWidth() - 2 * metrics.contentSidePadding, SCORE_TABLE_HEIGHT};
+}
+
+Rect scoreResetButtonRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
+  const Rect table = scoreTableRect(renderer, mappedInput);
+  return Rect{table.x, table.y + table.height + SCORE_RESET_GAP, table.width, SCORE_RESET_BUTTON_HEIGHT};
 }
 
 Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
@@ -252,6 +267,23 @@ void MinesweeperActivity::loopMenu() {
       mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
     finish();
+    return;
+  }
+
+  int resetTapX = 0;
+  int resetTapY = 0;
+  if (mappedInput.hasTouchHardware() && mappedInput.wasScreenTapped(resetTapX, resetTapY) &&
+      pointInRect(scoreResetButtonRect(renderer, mappedInput), resetTapX, resetTapY)) {
+    startActivityForResult(
+        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Reinitialiser les scores",
+                                               "Effacer tous les meilleurs scores ?"),
+        [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            bestScores.fill(0);
+            if (Storage.exists(SCORE_PATH)) Storage.remove(SCORE_PATH);
+          }
+          requestUpdate();
+        });
     return;
   }
 
@@ -873,22 +905,16 @@ void MinesweeperActivity::renderMenu() {
   app_.render();
   uiReady_ = true;
 
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect listBounds = menuListRect(renderer, mappedInput);
-  const Rect scorePanel{metrics.contentSidePadding, listBounds.y + listBounds.height,
-                        renderer.getScreenWidth() - 2 * metrics.contentSidePadding, BEST_SCORE_PANEL_HEIGHT};
+  const Rect scorePanel = scoreTableRect(renderer, mappedInput);
   renderer.fillRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, false);
   renderer.drawRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, 1, true);
-  const int titleRowHeight = 32;
   const int headerRowHeight = 28;
-  const int dataTop = scorePanel.y + titleRowHeight + headerRowHeight;
-  const int dataHeight = scorePanel.height - titleRowHeight - headerRowHeight;
+  const int dataTop = scorePanel.y + headerRowHeight;
+  const int dataHeight = scorePanel.height - headerRowHeight;
   const int splitX = scorePanel.x + scorePanel.width * 2 / 5;
 
-  renderer.drawLine(scorePanel.x, scorePanel.y + titleRowHeight, scorePanel.x + scorePanel.width,
-                    scorePanel.y + titleRowHeight, 1, true);
   renderer.drawLine(scorePanel.x, dataTop, scorePanel.x + scorePanel.width, dataTop, 1, true);
-  renderer.drawLine(splitX, scorePanel.y + titleRowHeight, splitX, scorePanel.y + scorePanel.height, 1, true);
+  renderer.drawLine(splitX, scorePanel.y, splitX, scorePanel.y + scorePanel.height, 1, true);
 
   auto drawCenteredCellText = [this](const int fontId, const Rect& cell, const char* text) {
     const int textWidth = renderer.getTextWidth(fontId, text);
@@ -897,11 +923,8 @@ void MinesweeperActivity::renderMenu() {
                       cell.y + std::max(0, (cell.height - textHeight) / 2) + 1, text);
   };
 
-  const Rect titleCell{scorePanel.x, scorePanel.y, scorePanel.width, titleRowHeight};
-  drawCenteredCellText(UI_12_FONT_ID, titleCell, "SCORES");
-  const Rect gridHeader{scorePanel.x, scorePanel.y + titleRowHeight, splitX - scorePanel.x, headerRowHeight};
-  const Rect bestHeader{splitX, scorePanel.y + titleRowHeight, scorePanel.x + scorePanel.width - splitX,
-                        headerRowHeight};
+  const Rect gridHeader{scorePanel.x, scorePanel.y, splitX - scorePanel.x, headerRowHeight};
+  const Rect bestHeader{splitX, scorePanel.y, scorePanel.x + scorePanel.width - splitX, headerRowHeight};
   drawCenteredCellText(UI_10_FONT_ID, gridHeader, "GRILLE");
   drawCenteredCellText(UI_10_FONT_ID, bestHeader, "MEILLEUR SCORE");
 
@@ -919,6 +942,11 @@ void MinesweeperActivity::renderMenu() {
     drawCenteredCellText(UI_10_FONT_ID, gridCell, SCORE_GRID_LABELS[row]);
     drawCenteredCellText(UI_10_FONT_ID, bestCell, scoreValue);
   }
+
+  const Rect resetButton = scoreResetButtonRect(renderer, mappedInput);
+  renderer.fillRect(resetButton.x, resetButton.y, resetButton.width, resetButton.height, false);
+  renderer.drawRoundedRect(resetButton.x, resetButton.y, resetButton.width, resetButton.height, 1, 6, true);
+  drawCenteredCellText(UI_10_FONT_ID, resetButton, "Reinitialiser les scores");
 
   const auto labels =
       mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));

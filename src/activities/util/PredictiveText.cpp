@@ -61,7 +61,43 @@ constexpr size_t kFrenchWordCount = sizeof(kFrenchWords) / sizeof(kFrenchWords[0
 
 bool asciiUpper(const unsigned char c) { return c >= 'A' && c <= 'Z'; }
 
+char foldedInitial(const char* word) {
+  if (!word || !*word) return '\0';
+  const unsigned char c = static_cast<unsigned char>(word[0]);
+  if (c < 0x80) {
+    char ch = static_cast<char>(c);
+    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    return ch;
+  }
+  if (c == 0xC3 && word[1]) {
+    switch (static_cast<unsigned char>(word[1])) {
+      case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85:
+      case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: return 'a';
+      case 0x87: case 0xA7: return 'c';
+      case 0x88: case 0x89: case 0x8A: case 0x8B:
+      case 0xA8: case 0xA9: case 0xAA: case 0xAB: return 'e';
+      case 0x8C: case 0x8D: case 0x8E: case 0x8F:
+      case 0xAC: case 0xAD: case 0xAE: case 0xAF: return 'i';
+      case 0x92: case 0x93: case 0x94: case 0x95: case 0x96:
+      case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: return 'o';
+      case 0x99: case 0x9A: case 0x9B: case 0x9C:
+      case 0xB9: case 0xBA: case 0xBB: case 0xBC: return 'u';
+      case 0x9D: case 0xBD: case 0xBF: return 'y';
+      default: break;
+    }
+  }
+  return '\0';
+}
+
 }  // namespace
+
+void PredictiveText::invalidateSuggestionCache() {
+  ++revision_;
+  if (revision_ == 0) revision_ = 1;
+  cachedRevision_ = 0;
+  cachedKey_.clear();
+  cachedSuggestions_ = {};
+}
 
 bool PredictiveText::isWordByte(const unsigned char c) {
   return c >= 0x80 || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
@@ -170,6 +206,7 @@ void PredictiveText::addPersonalWord(const std::string& word, const uint16_t inc
         const uint32_t next = static_cast<uint32_t>(item.count) + increment;
         item.count = static_cast<uint16_t>(std::min<uint32_t>(next, 65535));
         dirty_ = true;
+        invalidateSuggestionCache();
       }
       return;
     }
@@ -177,11 +214,13 @@ void PredictiveText::addPersonalWord(const std::string& word, const uint16_t inc
   if (personal_.size() >= kMaxPersonalWords) return;
   personal_.push_back(PersonalWord{normalized, static_cast<uint16_t>(std::max<uint16_t>(1, increment))});
   dirty_ = true;
+  invalidateSuggestionCache();
 }
 
 void PredictiveText::load() {
   personal_.clear();
   dirty_ = false;
+  invalidateSuggestionCache();
   if (!Storage.exists(kPersonalPath)) return;
 
   FsFile file;
@@ -275,10 +314,19 @@ std::array<std::string, 3> PredictiveText::suggestions(const std::string& text, 
   const std::string foldedPrefix = foldForMatch(typed);
   if (foldedPrefix.size() < 2) return result;
 
+  std::string cacheKey = foldedPrefix;
+  cacheKey.push_back(!typed.empty() && asciiUpper(static_cast<unsigned char>(text[start])) ? 'U' : 'L');
+  if (cachedRevision_ == revision_ && cachedKey_ == cacheKey) return cachedSuggestions_;
+
   std::vector<const PersonalWord*> matches;
   matches.reserve(personal_.size());
   for (const auto& item : personal_) {
-    if (startsWithFolded(item.word, foldedPrefix) && foldForMatch(item.word) != foldedPrefix) matches.push_back(&item);
+    if (foldedInitial(item.word.c_str()) != foldedPrefix[0]) continue;
+    const std::string foldedWord = foldForMatch(item.word);
+    if (foldedWord.size() >= foldedPrefix.size() &&
+        foldedWord.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && foldedWord != foldedPrefix) {
+      matches.push_back(&item);
+    }
   }
   std::sort(matches.begin(), matches.end(), [](const PersonalWord* a, const PersonalWord* b) {
     if (a->count != b->count) return a->count > b->count;
@@ -304,10 +352,19 @@ std::array<std::string, 3> PredictiveText::suggestions(const std::string& text, 
     if (slot >= result.size()) break;
   }
   for (size_t i = 0; i < kFrenchWordCount && slot < result.size(); ++i) {
+    if (foldedInitial(kFrenchWords[i]) != foldedPrefix[0]) continue;
     const std::string word = kFrenchWords[i];
-    if (startsWithFolded(word, foldedPrefix) && foldForMatch(word) != foldedPrefix) add(word);
+    const std::string foldedWord = foldForMatch(word);
+    if (foldedWord.size() >= foldedPrefix.size() &&
+        foldedWord.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && foldedWord != foldedPrefix) {
+      add(word);
+    }
   }
-  return result;
+
+  cachedKey_ = std::move(cacheKey);
+  cachedSuggestions_ = result;
+  cachedRevision_ = revision_;
+  return cachedSuggestions_;
 }
 
 bool PredictiveText::applySuggestion(std::string& text, size_t& cursorPos, const size_t maxLength,

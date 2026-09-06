@@ -636,9 +636,8 @@ void KeyboardEntryActivity::loop() {
       }
       return;
     }
-    if (result.activeChanged) {
-      requestUpdate();
-    }
+    // Do not refresh e-ink only for transient touch highlighting.
+    // The key event below performs the single useful redraw after text changes.
     if (tapCandidate || tapped) {
       return;
     }

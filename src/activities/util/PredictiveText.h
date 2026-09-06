@@ -27,6 +27,10 @@ class PredictiveText {
 
   std::vector<PersonalWord> personal_;
   bool dirty_ = false;
+  uint32_t revision_ = 1;
+  mutable uint32_t cachedRevision_ = 0;
+  mutable std::string cachedKey_;
+  mutable std::array<std::string, 3> cachedSuggestions_{};
 
   static bool isWordByte(unsigned char c);
   static std::string normalizeWord(std::string word);
@@ -36,4 +40,5 @@ class PredictiveText {
   static bool isBuiltinWord(const std::string& normalizedWord);
 
   void addPersonalWord(const std::string& word, uint16_t increment, bool allowBuiltin);
+  void invalidateSuggestionCache();
 };
