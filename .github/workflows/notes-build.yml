@@ -2,7 +2,7 @@ name: CrossInk Notes + Demineur X4 Pro
 
 on:
   push:
-    branches: [x4-pro-notes]
+    branches: [measure-111-opt12]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +16,68 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+
+      - name: Apply measurement-only optimizations 1 and 2
+        run: |
+          cat > /tmp/measure-opt12.patch <<'PATCH'
+          diff --git a/src/activities/home/MinesweeperActivity.cpp b/src/activities/home/MinesweeperActivity.cpp
+          --- a/src/activities/home/MinesweeperActivity.cpp
+          +++ b/src/activities/home/MinesweeperActivity.cpp
+          @@ -1,16 +1,19 @@
+           void MinesweeperActivity::revealFlood(const int startIndex) {
+          -  std::array<uint8_t, kMaxCells> queue{};
+             const int dimension = gridDimension();
+             const int cellCount = dimension * dimension;
+          +  if (startIndex < 0 || startIndex >= cellCount || revealed_[startIndex] || flagged_[startIndex] || mines_[startIndex]) {
+          +    return;
+          +  }
+          +
+          +  std::array<uint8_t, kMaxCells> queue{};
+             int head = 0;
+             int tail = 0;
+          +  revealed_[startIndex] = 1;
+          +  ++revealedSafeCells_;
+             queue[tail++] = static_cast<uint8_t>(startIndex);
+           
+             while (head < tail) {
+               const int index = queue[head++];
+          -    if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
+          -    revealed_[index] = 1;
+          -    ++revealedSafeCells_;
+               if (adjacentMineCount(index) != 0) continue;
+           
+               const int row = index / dimension;
+          @@ -22,9 +25,12 @@
+                   const int nc = col + dc;
+                   if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
+                   const int next = nr * dimension + nc;
+          -        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+          -          queue[tail++] = static_cast<uint8_t>(next);
+          -        }
+          +        if (revealed_[next] || flagged_[next] || mines_[next] || tail >= cellCount) continue;
+          +        // Mark on enqueue: every cell can enter the queue only once, so a large
+          +        // empty area cannot consume the 256-entry queue with duplicates.
+          +        revealed_[next] = 1;
+          +        ++revealedSafeCells_;
+          +        queue[tail++] = static_cast<uint8_t>(next);
+                 }
+               }
+             }
+          diff --git a/src/activities/util/KeyboardEntryActivity.cpp b/src/activities/util/KeyboardEntryActivity.cpp
+          --- a/src/activities/util/KeyboardEntryActivity.cpp
+          +++ b/src/activities/util/KeyboardEntryActivity.cpp
+          @@ -3,5 +3,6 @@
+             const size_t len = strlen(out);
+             const unsigned char c = static_cast<unsigned char>(out[len - 1]);
+             if (c >= 0x80) return false;
+          -  return !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+          +  return c != '\'' && c != '-' &&
+          +         !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+           }
+          PATCH
+          git apply --check /tmp/measure-opt12.patch
+          git apply /tmp/measure-opt12.patch
+          git diff --check
 
       - uses: actions/setup-python@v6
         with:
