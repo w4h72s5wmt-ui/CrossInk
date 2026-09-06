@@ -927,6 +927,21 @@ void MinesweeperActivity::renderMenu() {
     }
   }
 
+  // Make Continue and New Game visually read as action buttons.
+  const auto& menuMetrics = UITheme::getInstance().getMetrics();
+  constexpr int actionInsetY = 4;
+  const int actionX = menuMetrics.contentSidePadding;
+  const int actionWidth = renderer.getScreenWidth() - 2 * menuMetrics.contentSidePadding;
+  for (int visible = 0; visible < drawnRows; ++visible) {
+    const int itemIndex = topIndex_ + visible;
+    if (itemIndex != 5 && itemIndex != 6) continue;
+    const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;
+    const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;
+    const int actionY = rowTop + actionInsetY;
+    const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);
+    renderer.drawRoundedRect(actionX, actionY, actionWidth, actionHeight, 1, 6, true);
+  }
+
   const Rect scorePanel = scoreTableRect(renderer, mappedInput);
   renderer.fillRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, false);
   renderer.drawRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, 1, true);
