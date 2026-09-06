@@ -22,8 +22,8 @@ class MinesweeperActivity final : public Activity {
  private:
   using UiApp = freeink::ui::FreeInkApp<20, 4>;
 
-  static constexpr int kGridOptionCount = 3;
-  static constexpr int kMenuRowCount = 6;
+  static constexpr int kGridOptionCount = 4;
+  static constexpr int kMenuRowCount = 7;
   static constexpr int kMaxCells = 16 * 16;
   static constexpr unsigned long kFlagHoldMs = 700;
 

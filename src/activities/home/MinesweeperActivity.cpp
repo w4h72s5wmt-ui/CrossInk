@@ -16,6 +16,7 @@
 #include "AlertActivity.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
@@ -27,11 +28,17 @@ namespace {
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/minesweeper.bin";
+constexpr const char SCORE_PATH[] = "/.crosspoint/minesweeper-scores.bin";
 constexpr uint32_t SAVE_MAGIC = 0x4D535731;
-constexpr uint8_t SAVE_VERSION = 2;
-constexpr uint8_t PREVIOUS_SAVE_VERSION = 1;
+constexpr uint8_t SAVE_VERSION = 3;
+constexpr uint8_t PREVIOUS_SAVE_VERSION = 2;
+constexpr uint8_t LEGACY_SAVE_VERSION = 1;
+constexpr uint32_t SCORE_MAGIC = 0x4D534353;
+constexpr uint8_t SCORE_VERSION = 1;
 constexpr int UNDO_MAX_CELLS = 16 * 16;
 constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
+constexpr int BEST_SCORE_PANEL_HEIGHT = 184;
+constexpr int SCORE_GRID_COUNT = 4;
 
 std::array<uint8_t, UNDO_MAX_CELLS> undoMines{};
 std::array<uint8_t, UNDO_MAX_CELLS> undoRevealed{};
@@ -46,28 +53,34 @@ int64_t lossUndoDeadlineUs = 0;
 // with the game so Continue always keeps the same counter behaviour.
 bool assistedCounterChoice = false;
 bool assistedCounterActive = false;
+bool scoreFrozen = false;
+int officialScore = 0;
+std::array<uint16_t, SCORE_GRID_COUNT> bestScores{};
 
 constexpr const char* GRID_LABELS[] = {
+    "Enfant - 5 x 5 - 3 Mines",
     "Petite - 9 x 9 - 10 Mines",
     "Moyenne - 12 x 12 - 24 Mines",
     "Grande - 16 x 16 - 40 Mines",
 };
 
 constexpr const char* GRID_DIMS[] = {
+    "5 x 5",
     "9 x 9",
     "12 x 12",
     "16 x 16",
 };
 
-constexpr int GRID_SIZES[] = {9, 12, 16};
-constexpr int MINE_COUNTS[] = {10, 24, 40};
+constexpr int GRID_SIZES[] = {5, 9, 12, 16};
+constexpr int MINE_COUNTS[] = {3, 10, 24, 40};
 
 Rect menuListRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int contentTop =
       metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) + metrics.verticalSpacing;
   return Rect{0, contentTop, renderer.getScreenWidth(),
-              renderer.getScreenHeight() - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing};
+              renderer.getScreenHeight() - contentTop - metrics.buttonHintsHeight - metrics.verticalSpacing -
+                  BEST_SCORE_PANEL_HEIGHT};
 }
 
 Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
@@ -84,6 +97,7 @@ bool pointInRect(const Rect& rect, const int x, const int y) {
 struct GridGeometry {
   Rect header;
   Rect counterBar;
+  Rect scoreMessage;
   Rect grid;
   int cellSize = 1;
 };
@@ -97,7 +111,12 @@ GridGeometry gridGeometry(const GfxRenderer& renderer, const MappedInputManager&
   const int counterHeight = std::max(40, renderer.getLineHeight(UI_12_FONT_ID) + 14);
   const int counterWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
   const Rect counterBar{metrics.contentSidePadding, contentTop, counterWidth, counterHeight};
-  const int gridTop = counterBar.y + counterBar.height + metrics.verticalSpacing;
+  const int scoreMessageHeight = scoreFrozen ? renderer.getLineHeight(UI_10_FONT_ID) * 2 + 8 : 0;
+  const Rect scoreMessage{metrics.contentSidePadding, counterBar.y + counterBar.height + metrics.verticalSpacing,
+                          counterWidth, scoreMessageHeight};
+  const int gridTop = scoreMessageHeight > 0
+                          ? scoreMessage.y + scoreMessage.height + metrics.verticalSpacing
+                          : counterBar.y + counterBar.height + metrics.verticalSpacing;
   const int footerTop = screenHeight - metrics.buttonHintsHeight;
   const int availableHeight = std::max(1, footerTop - gridTop - metrics.verticalSpacing);
   const int availableWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
@@ -106,7 +125,7 @@ GridGeometry gridGeometry(const GfxRenderer& renderer, const MappedInputManager&
   const int gridHeight = cellSize * dimension;
   const int gridX = (screenWidth - gridWidth) / 2;
   const int gridY = gridTop + std::max(0, (availableHeight - gridHeight) / 2);
-  return GridGeometry{header, counterBar, Rect{gridX, gridY, gridWidth, gridHeight}, cellSize};
+  return GridGeometry{header, counterBar, scoreMessage, Rect{gridX, gridY, gridWidth, gridHeight}, cellSize};
 }
 
 template <typename T>
@@ -117,6 +136,48 @@ bool writeValue(FsFile& file, const T& value) {
 template <typename T>
 bool readValue(FsFile& file, T& value) {
   return file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T)) == static_cast<int>(sizeof(T));
+}
+
+bool loadBestScores() {
+  bestScores.fill(0);
+  if (!Storage.exists(SCORE_PATH)) return false;
+
+  FsFile file;
+  if (!Storage.openFileForRead("MINE", SCORE_PATH, file)) return false;
+  uint32_t magic = 0;
+  uint8_t version = 0;
+  uint8_t count = 0;
+  bool ok = readValue(file, magic) && readValue(file, version) && readValue(file, count);
+  if (!ok || magic != SCORE_MAGIC || version != SCORE_VERSION || count != SCORE_GRID_COUNT) {
+    file.close();
+    bestScores.fill(0);
+    return false;
+  }
+  for (int i = 0; i < SCORE_GRID_COUNT && ok; ++i) ok = readValue(file, bestScores[i]);
+  file.close();
+  if (!ok) bestScores.fill(0);
+  return ok;
+}
+
+bool saveBestScores() {
+  Storage.mkdir(SAVE_DIR);
+  FsFile file;
+  if (!Storage.openFileForWrite("MINE", SCORE_PATH, file)) return false;
+  const uint8_t count = SCORE_GRID_COUNT;
+  bool ok = writeValue(file, SCORE_MAGIC) && writeValue(file, SCORE_VERSION) && writeValue(file, count);
+  for (int i = 0; i < SCORE_GRID_COUNT && ok; ++i) ok = writeValue(file, bestScores[i]);
+  file.close();
+  return ok;
+}
+
+void updateBestScore(const int gridIndex, const int score) {
+  if (gridIndex < 0 || gridIndex >= SCORE_GRID_COUNT || score < 0) return;
+  const uint16_t bounded = static_cast<uint16_t>(std::min(score, 0xFFFF));
+  if (bounded <= bestScores[gridIndex]) return;
+  bestScores[gridIndex] = bounded;
+  if (!saveBestScores()) {
+    LOG_ERR("MINE", "Failed to save best scores");
+  }
 }
 
 void drawHiddenCellPattern(GfxRenderer& renderer, const int x, const int y, const int size) {
@@ -154,6 +215,9 @@ void MinesweeperActivity::onEnter() {
   lossUndoDeadlineUs = 0;
   assistedCounterChoice = false;
   assistedCounterActive = false;
+  scoreFrozen = false;
+  officialScore = 0;
+  loadBestScores();
 
   mines_.fill(0);
   revealed_.fill(0);
@@ -326,6 +390,11 @@ void MinesweeperActivity::loopResult() {
   const auto undoLoss = [this]() {
     if (won_ || !undoAvailable) return;
     if (lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) return;
+    if (!scoreFrozen) {
+      scoreFrozen = true;
+      officialScore = undoRevealedSafeCells;
+      updateBestScore(gridSizeIndex_, officialScore);
+    }
     mines_ = undoMines;
     revealed_ = undoRevealed;
     flagged_ = undoFlagged;
@@ -374,17 +443,32 @@ void MinesweeperActivity::activateRow(const int row) {
     requestUpdate();
     return;
   }
-  if (row == 3) {
+  if (row == 4) {
     assistedCounterChoice = !assistedCounterChoice;
     selectedIndex_ = row;
     requestUpdate();
     return;
   }
-  if (row == 4) {
+  if (row == 5) {
     continueGame();
     return;
   }
-  if (row == 5) newGame();
+  if (row == 6) {
+    if (!hasSavedGame_) {
+      newGame();
+      return;
+    }
+    startActivityForResult(
+        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Nouvelle partie",
+                                               "Ecraser la partie en cours ?"),
+        [this](const ActivityResult& result) {
+          if (result.isCancelled) {
+            requestUpdate();
+            return;
+          }
+          newGame();
+        });
+  }
 }
 
 void MinesweeperActivity::continueGame() {
@@ -467,6 +551,8 @@ void MinesweeperActivity::resetGame() {
   gameOver_ = false;
   won_ = false;
   revealedSafeCells_ = 0;
+  scoreFrozen = false;
+  officialScore = 0;
   selectedCellIndex_ = 0;
   confirmHoldHandled_ = false;
   undoAvailable = false;
@@ -511,6 +597,10 @@ void MinesweeperActivity::revealCell(const int index) {
     return;
   }
   revealFlood(index);
+  if (!scoreFrozen) {
+    officialScore = revealedSafeCells_;
+    updateBestScore(gridSizeIndex_, officialScore);
+  }
   checkWin();
 }
 
@@ -586,11 +676,14 @@ bool MinesweeperActivity::saveGame() {
   const uint8_t assistedCounter = assistedCounterActive ? 1 : 0;
   const uint16_t selected = static_cast<uint16_t>(std::clamp(selectedCellIndex_, 0, totalCells() - 1));
   const uint16_t revealedCount = static_cast<uint16_t>(revealedSafeCells_);
+  const uint8_t savedScoreFrozen = scoreFrozen ? 1 : 0;
+  const uint16_t savedOfficialScore = static_cast<uint16_t>(std::max(0, officialScore));
   const uint16_t cellCount = static_cast<uint16_t>(totalCells());
 
   bool ok = writeValue(file, SAVE_MAGIC) && writeValue(file, SAVE_VERSION) && writeValue(file, grid) &&
             writeValue(file, minesPlaced) && writeValue(file, assistedCounter) && writeValue(file, selected) &&
-            writeValue(file, revealedCount) && writeValue(file, cellCount);
+            writeValue(file, revealedCount) && writeValue(file, savedScoreFrozen) &&
+            writeValue(file, savedOfficialScore) && writeValue(file, cellCount);
   if (ok) ok = file.write(mines_.data(), cellCount) == cellCount;
   if (ok) ok = file.write(revealed_.data(), cellCount) == cellCount;
   if (ok) ok = file.write(flagged_.data(), cellCount) == cellCount;
@@ -621,20 +714,29 @@ bool MinesweeperActivity::loadSavedGame() {
   uint8_t assistedCounter = 0;
   uint16_t selected = 0;
   uint16_t revealedCount = 0;
+  uint8_t savedScoreFrozen = 0;
+  uint16_t savedOfficialScore = 0;
   uint16_t cellCount = 0;
 
   bool ok = readValue(file, magic) && readValue(file, version) && readValue(file, grid) &&
             readValue(file, minesPlaced);
-  if (ok && version == SAVE_VERSION) ok = readValue(file, assistedCounter);
-  if (ok) ok = readValue(file, selected) && readValue(file, revealedCount) && readValue(file, cellCount);
+  if (ok && version >= PREVIOUS_SAVE_VERSION) ok = readValue(file, assistedCounter);
+  if (ok) ok = readValue(file, selected) && readValue(file, revealedCount);
+  if (ok && version == SAVE_VERSION) {
+    ok = readValue(file, savedScoreFrozen) && readValue(file, savedOfficialScore);
+  }
+  if (ok) ok = readValue(file, cellCount);
 
-  if (!ok || magic != SAVE_MAGIC ||
-      (version != SAVE_VERSION && version != PREVIOUS_SAVE_VERSION) || grid >= kGridOptionCount) {
+  const bool supportedVersion = version == SAVE_VERSION || version == PREVIOUS_SAVE_VERSION ||
+                                version == LEGACY_SAVE_VERSION;
+  const int gridLimit = version == SAVE_VERSION ? kGridOptionCount : kGridOptionCount - 1;
+  if (!ok || magic != SAVE_MAGIC || !supportedVersion || grid >= gridLimit) {
     file.close();
     clearSavedGame();
     return false;
   }
 
+  if (version != SAVE_VERSION) ++grid;
   gridSizeIndex_ = grid;
   const int expectedCells = totalCells();
   if (cellCount != expectedCells || cellCount > kMaxCells) {
@@ -651,17 +753,21 @@ bool MinesweeperActivity::loadSavedGame() {
   if (ok) ok = file.read(flagged_.data(), cellCount) == cellCount;
   file.close();
 
-  if (!ok || selected >= cellCount || revealedCount > cellCount) {
+  if (!ok || selected >= cellCount || revealedCount > cellCount ||
+      (version == SAVE_VERSION && savedOfficialScore > revealedCount)) {
     clearSavedGame();
     resetGame();
     return false;
   }
 
   minesPlaced_ = minesPlaced != 0;
-  assistedCounterActive = version == SAVE_VERSION && assistedCounter != 0;
+  assistedCounterActive = version >= PREVIOUS_SAVE_VERSION && assistedCounter != 0;
   assistedCounterChoice = assistedCounterActive;
   selectedCellIndex_ = selected;
   revealedSafeCells_ = revealedCount;
+  scoreFrozen = version == SAVE_VERSION && savedScoreFrozen != 0;
+  officialScore = scoreFrozen ? savedOfficialScore : revealedCount;
+  updateBestScore(gridSizeIndex_, officialScore);
   gameOver_ = false;
   won_ = false;
   return true;
@@ -710,19 +816,19 @@ void MinesweeperActivity::buildMenuScreen(UiApp::ScreenType& screen) {
   fui::ListItem assistItem;
   assistItem.label = "Aide compteur de mines";
   assistItem.value = assistedCounterChoice ? "[X]" : "[ ]";
-  assistItem.actionValue = 3;
+  assistItem.actionValue = 4;
   items.push_back(assistItem);
 
   fui::ListItem continueItem;
   continueItem.label = "Continuer";
   continueItem.value = hasSavedGame_ ? "Partie sauvegardee" : "Aucune partie";
-  continueItem.actionValue = 4;
+  continueItem.actionValue = 5;
   items.push_back(continueItem);
 
   fui::ListItem newGameItem;
   newGameItem.label = "Nouvelle partie";
   newGameItem.value = GRID_DIMS[gridSizeIndex_];
-  newGameItem.actionValue = 5;
+  newGameItem.actionValue = 6;
   items.push_back(newGameItem);
 
   fui::ListProps props;
@@ -766,6 +872,53 @@ void MinesweeperActivity::renderMenu() {
   uiReady_ = false;
   app_.render();
   uiReady_ = true;
+
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect listBounds = menuListRect(renderer, mappedInput);
+  const Rect scorePanel{metrics.contentSidePadding, listBounds.y + listBounds.height,
+                        renderer.getScreenWidth() - 2 * metrics.contentSidePadding, BEST_SCORE_PANEL_HEIGHT};
+  renderer.fillRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, false);
+  renderer.drawRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, 1, true);
+  const int titleRowHeight = 32;
+  const int headerRowHeight = 28;
+  const int dataTop = scorePanel.y + titleRowHeight + headerRowHeight;
+  const int dataHeight = scorePanel.height - titleRowHeight - headerRowHeight;
+  const int splitX = scorePanel.x + scorePanel.width * 2 / 5;
+
+  renderer.drawLine(scorePanel.x, scorePanel.y + titleRowHeight, scorePanel.x + scorePanel.width,
+                    scorePanel.y + titleRowHeight, 1, true);
+  renderer.drawLine(scorePanel.x, dataTop, scorePanel.x + scorePanel.width, dataTop, 1, true);
+  renderer.drawLine(splitX, scorePanel.y + titleRowHeight, splitX, scorePanel.y + scorePanel.height, 1, true);
+
+  auto drawCenteredCellText = [this](const int fontId, const Rect& cell, const char* text) {
+    const int textWidth = renderer.getTextWidth(fontId, text);
+    const int textHeight = renderer.getLineHeight(fontId);
+    renderer.drawText(fontId, cell.x + std::max(0, (cell.width - textWidth) / 2),
+                      cell.y + std::max(0, (cell.height - textHeight) / 2) + 1, text);
+  };
+
+  const Rect titleCell{scorePanel.x, scorePanel.y, scorePanel.width, titleRowHeight};
+  drawCenteredCellText(UI_12_FONT_ID, titleCell, "SCORES");
+  const Rect gridHeader{scorePanel.x, scorePanel.y + titleRowHeight, splitX - scorePanel.x, headerRowHeight};
+  const Rect bestHeader{splitX, scorePanel.y + titleRowHeight, scorePanel.x + scorePanel.width - splitX,
+                        headerRowHeight};
+  drawCenteredCellText(UI_10_FONT_ID, gridHeader, "GRILLE");
+  drawCenteredCellText(UI_10_FONT_ID, bestHeader, "MEILLEUR SCORE");
+
+  constexpr const char* SCORE_GRID_LABELS[SCORE_GRID_COUNT] = {"5 x 5", "9 x 9", "12 x 12", "16 x 16"};
+  for (int row = 0; row < SCORE_GRID_COUNT; ++row) {
+    const int rowY = dataTop + dataHeight * row / SCORE_GRID_COUNT;
+    const int nextRowY = dataTop + dataHeight * (row + 1) / SCORE_GRID_COUNT;
+    const int rowHeight = nextRowY - rowY;
+    if (row > 0) renderer.drawLine(scorePanel.x, rowY, scorePanel.x + scorePanel.width, rowY, 1, true);
+
+    const Rect gridCell{scorePanel.x, rowY, splitX - scorePanel.x, rowHeight};
+    const Rect bestCell{splitX, rowY, scorePanel.x + scorePanel.width - splitX, rowHeight};
+    char scoreValue[16];
+    std::snprintf(scoreValue, sizeof(scoreValue), "%03u", static_cast<unsigned>(bestScores[row]));
+    drawCenteredCellText(UI_10_FONT_ID, gridCell, SCORE_GRID_LABELS[row]);
+    drawCenteredCellText(UI_10_FONT_ID, bestCell, scoreValue);
+  }
 
   const auto labels =
       mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -816,15 +969,32 @@ void MinesweeperActivity::renderGrid() {
   char leftText[32];
   std::snprintf(leftText, sizeof(leftText), "%s %03d", assistedCounterActive ? "Mines" : "Drapeaux", leftValue);
   char pointsText[32];
-  std::snprintf(pointsText, sizeof(pointsText), "Points %03d", std::max(0, revealedSafeCells_));
+  std::snprintf(pointsText, sizeof(pointsText), "Points %03d", std::max(0, scoreFrozen ? officialScore : revealedSafeCells_));
   const int counterFont = UI_12_FONT_ID;
-  const int counterTextHeight = renderer.getLineHeight(counterFont);
-  const int leftTextWidth = renderer.getTextWidth(counterFont, leftText);
-  const int pointsTextWidth = renderer.getTextWidth(counterFont, pointsText);
-  renderer.drawText(counterFont, leftPanel.x + std::max(2, (leftPanel.width - leftTextWidth) / 2),
-                    leftPanel.y + std::max(1, (leftPanel.height - counterTextHeight) / 2), leftText);
-  renderer.drawText(counterFont, rightPanel.x + std::max(2, (rightPanel.width - pointsTextWidth) / 2),
-                    rightPanel.y + std::max(1, (rightPanel.height - counterTextHeight) / 2), pointsText);
+  auto drawCenteredCounter = [this, counterFont](const Rect& panel, const char* text) {
+    const int textWidth = renderer.getTextWidth(counterFont, text);
+    const int textHeight = renderer.getLineHeight(counterFont);
+    const int textX = panel.x + (panel.width - textWidth) / 2;
+    const int textY = panel.y + (panel.height - textHeight) / 2 + 2;
+    renderer.drawText(counterFont, textX, textY, text);
+  };
+  drawCenteredCounter(leftPanel, leftText);
+  drawCenteredCounter(rightPanel, pointsText);
+
+  if (scoreFrozen && geometry.scoreMessage.height > 0) {
+    char scoreMessage[96];
+    std::snprintf(scoreMessage, sizeof(scoreMessage),
+                  "Vous etes tombe sur une mine, votre score aurait ete de : %03d", revealedSafeCells_);
+    const auto lines = renderer.wrappedText(UI_10_FONT_ID, scoreMessage, geometry.scoreMessage.width, 2);
+    int textY = geometry.scoreMessage.y + 2;
+    for (const auto& line : lines) {
+      const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, line.c_str());
+      renderer.drawText(UI_10_FONT_ID,
+                        geometry.scoreMessage.x + std::max(0, (geometry.scoreMessage.width - textWidth) / 2), textY,
+                        line.c_str());
+      textY += renderer.getLineHeight(UI_10_FONT_ID);
+    }
+  }
 
   renderer.drawRect(geometry.grid.x, geometry.grid.y, geometry.grid.width + 1, geometry.grid.height + 1, 1, true);
 

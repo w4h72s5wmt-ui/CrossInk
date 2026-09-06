@@ -20,6 +20,14 @@ namespace {
 
 constexpr fui::ActionId ACTION_KEY = 1;
 
+bool outputEndsWord(const char* out) {
+  if (!out || !*out) return false;
+  const size_t len = strlen(out);
+  const unsigned char c = static_cast<unsigned char>(out[len - 1]);
+  if (c >= 0x80) return false;
+  return !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+}
+
 // ---------------------------------------------------------------------------
 // URL layers. The SDK builtin layouts have no URL variant (":", "/", ".", the
 // snippet panel), so these are app-defined tables over the same public
@@ -140,10 +148,19 @@ void KeyboardEntryActivity::onEnter() {
   touchRouter.holdMs = TOUCH_LONG_PRESS_MS;
   touchRouter.overrideHoldMs = TOUCH_DEL_LONG_PRESS_MS;
   interactionsReady = false;
+  if (predictiveEnabled()) {
+    predictiveText.load();
+    predictiveText.seedFromText(text);
+  }
   requestUpdate();
 }
 
-void KeyboardEntryActivity::onExit() { Activity::onExit(); }
+void KeyboardEntryActivity::onExit() {
+  if (predictiveEnabled()) predictiveText.save();
+  Activity::onExit();
+}
+
+bool KeyboardEntryActivity::predictiveEnabled() const { return inputType == InputType::Multiline; }
 
 const fui::KeyboardLayout& KeyboardEntryActivity::currentLayout() const {
   if (symbols) return fui::builtinKeyboardLayout(layoutId, shifted, true);
@@ -291,6 +308,11 @@ bool KeyboardEntryActivity::activateValue(const int16_t value, const bool longPr
       clampSelection();
       return true;
     case fui::QWERTY_KEY_ENTER:
+      if (inputType == InputType::Multiline) {
+        predictiveText.learnWordBefore(text, cursorPos);
+        insertUtf8("\n");
+        return true;
+      }
       if (text.length() < minLength) return true;
       onComplete(text);
       return false;
@@ -315,6 +337,7 @@ bool KeyboardEntryActivity::activateValue(const int16_t value, const bool longPr
       const char* out = longPress ? fui::keyboardAltOutputFor(layer, value) : nullptr;
       if (!out) out = fui::keyboardOutputFor(layer, value);
       if (!out) return false;
+      if (predictiveEnabled() && outputEndsWord(out)) predictiveText.learnWordBefore(text, cursorPos);
       insertUtf8(out);
       if (shifted && !symbols) {
         shifted = false;  // shift auto-releases after one character
@@ -384,9 +407,11 @@ bool KeyboardEntryActivity::rangeIsRtl(std::string& s, const int start, const in
 
 int KeyboardEntryActivity::lineBreakEnd(std::string& s, const int start, const int maxWidth) const {
   const int len = static_cast<int>(s.length());
-  if (measureRange(s, start, len) <= maxWidth) return len;
+  const size_t newlinePos = s.find('\n', static_cast<size_t>(start));
+  const int hardEnd = newlinePos == std::string::npos ? len : static_cast<int>(newlinePos);
+  if (measureRange(s, start, hardEnd) <= maxWidth) return hardEnd;
   int lo = start + 1;
-  int hi = len - 1;
+  int hi = hardEnd - 1;
   int best = start + 1;
   while (lo <= hi) {
     const int mid = lo + (hi - lo) / 2;
@@ -447,6 +472,7 @@ KeyboardEntryActivity::InputFieldTouchTarget KeyboardEntryActivity::inputFieldTo
 
   while (true) {
     const int lineEndIdx = lineBreakEnd(displayText, lineStartIdx, maxLineWidth);
+    const bool forcedBreak = lineEndIdx < static_cast<int>(displayText.length()) && displayText[lineEndIdx] == '\n';
     const int textWidth = measureRange(displayText, lineStartIdx, lineEndIdx);
     const bool isLastLine = lineEndIdx == static_cast<int>(displayText.length());
     if (isLastLine && inputType == InputType::Password && x >= effectiveMargin + maxLineWidth &&
@@ -495,7 +521,7 @@ KeyboardEntryActivity::InputFieldTouchTarget KeyboardEntryActivity::inputFieldTo
     }
 
     lineY += lineHeight;
-    lineStartIdx = lineEndIdx;
+    lineStartIdx = forcedBreak ? lineEndIdx + 1 : lineEndIdx;
   }
 
   const int underlineBottom = lineY + lineHeight + metrics.verticalSpacing + 8;
@@ -525,10 +551,22 @@ fui::Rect KeyboardEntryActivity::keyboardRect() const {
                    static_cast<int16_t>(height)};
 }
 
+fui::Rect KeyboardEntryActivity::predictiveBarRect() const {
+  const fui::Rect kb = keyboardRect();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int height = std::max(38, renderer.getLineHeight(UI_10_FONT_ID) + 16);
+  const int y = std::max(0, static_cast<int>(kb.y) - metrics.verticalSpacing - height);
+  return fui::Rect{kb.x, static_cast<int16_t>(y), kb.width, static_cast<int16_t>(height)};
+}
+
 void KeyboardEntryActivity::loop() {
 #if CROSSINK_APP_CAP_TOUCH
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
-    onCancel();
+    if (inputType == InputType::Multiline) {
+      onComplete(text);
+    } else {
+      onCancel();
+    }
     return;
   }
 
@@ -536,6 +574,23 @@ void KeyboardEntryActivity::loop() {
   int ty = 0;
 
   if (mappedInput.wasScreenTapped(tx, ty)) {
+    if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
+      const fui::Rect bar = predictiveBarRect();
+      if (tx >= bar.x && tx < bar.x + bar.width && ty >= bar.y && ty < bar.y + bar.height) {
+        const auto options = predictiveText.suggestions(text, cursorPos);
+        int index = bar.width > 0 ? (tx - bar.x) * 3 / bar.width : 0;
+        index = std::clamp(index, 0, 2);
+        if (!options[index].empty() && predictiveText.applySuggestion(text, cursorPos, maxLength, options[index])) {
+          delPressCount = 0;
+          hintVisible = false;
+          shifted = false;
+          touchRouter.reset();
+          requestUpdate();
+        }
+        return;
+      }
+    }
+
     size_t touchedCursorPos = 0;
     const InputFieldTouchTarget inputTarget = inputFieldTouchTargetFromPoint(tx, ty, touchedCursorPos);
     if (inputTarget == InputFieldTouchTarget::PasswordToggle) {
@@ -731,7 +786,11 @@ void KeyboardEntryActivity::loop() {
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
-    onCancel();
+    if (inputType == InputType::Multiline) {
+      onComplete(text);
+    } else {
+      onCancel();
+    }
   }
 
   if (hintVisible && !cursorMode && millis() - hintShowTime > 4000) {
@@ -801,6 +860,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 
   while (true) {
     const int lineEndIdx = lineBreakEnd(displayText, lineStartIdx, maxLineWidth);
+    const bool forcedBreak = lineEndIdx < static_cast<int>(displayText.length()) && displayText[lineEndIdx] == '\n';
     const std::string lineText = displayText.substr(lineStartIdx, lineEndIdx - lineStartIdx);
     textWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, lineText.c_str(), EpdFontFamily::REGULAR);
     {
@@ -858,7 +918,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
       }
 
       inputHeight += lineHeight;
-      lineStartIdx = lineEndIdx;
+      lineStartIdx = forcedBreak ? lineEndIdx + 1 : lineEndIdx;
     }
   }
 
@@ -927,6 +987,28 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 
   const fui::Rect kbRect = keyboardRect();
 
+  if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
+    const auto options = predictiveText.suggestions(text, cursorPos);
+    if (!options[0].empty() || !options[1].empty() || !options[2].empty()) {
+      const fui::Rect bar = predictiveBarRect();
+      renderer.fillRect(bar.x, bar.y, bar.width, bar.height, false);
+      renderer.drawLine(bar.x, bar.y, bar.x + bar.width, bar.y, 1, true);
+      renderer.drawLine(bar.x, bar.y + bar.height - 1, bar.x + bar.width, bar.y + bar.height - 1, 1, true);
+      for (int i = 0; i < 3; ++i) {
+        const int cellX = bar.x + bar.width * i / 3;
+        const int nextX = bar.x + bar.width * (i + 1) / 3;
+        if (i > 0) renderer.drawLine(cellX, bar.y + 5, cellX, bar.y + bar.height - 6, 1, true);
+        if (options[i].empty()) continue;
+        const int cellWidth = std::max(1, nextX - cellX);
+        const std::string label = renderer.truncatedText(UI_10_FONT_ID, options[i].c_str(), std::max(1, cellWidth - 10));
+        const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, label.c_str());
+        const int textHeight = renderer.getLineHeight(UI_10_FONT_ID);
+        renderer.drawText(UI_10_FONT_ID, cellX + std::max(3, (cellWidth - textWidth) / 2),
+                          bar.y + std::max(1, (bar.height - textHeight) / 2), label.c_str(), true);
+      }
+    }
+  }
+
   const int tipsLh = renderer.getLineHeight(SMALL_FONT_ID);
   const int underlineBottom = inputStartY + inputHeight + lineHeight + metrics.verticalSpacing + 4;
   auto drawTip = [&](const char* tip, int y) { renderer.drawCenteredText(SMALL_FONT_ID, y, tip, true); };
@@ -942,7 +1024,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
     tipCount = 1 + (inputType == InputType::Url ? 1 : 0) + (!text.empty() ? 1 : 0);
   }
 
-  if (tipCount > 0) {
+  if (tipCount > 0 && !(predictiveEnabled() && !cursorMode)) {
     int y = (underlineBottom + kbRect.y) / 2 - (tipCount + 1) * tipsLh / 2;
     drawTip(tr(STR_KB_TIPS), y);
     y += tipsLh;
@@ -994,7 +1076,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   const fui::KeyboardLayout& layout = currentLayout();
   props.layout = &layout;
   props.keyAction = ACTION_KEY;  // one action id; loop() dispatches on key value
-  props.okLabel = tr(STR_OK_BUTTON);
+  props.okLabel = inputType == InputType::Multiline ? "↵" : tr(STR_OK_BUTTON);
   props.shiftLabel = tr(STR_KEY_SHIFT);
   // Match the label to the layer the mode key leads back from: the symbols
   // layer and the URL snippet panel both label it "abc" in the static tables.
@@ -1024,6 +1106,10 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 }
 
 void KeyboardEntryActivity::onComplete(std::string text) {
+  if (predictiveEnabled()) {
+    predictiveText.learnCurrentWord(text, cursorPos);
+    predictiveText.save();
+  }
   setResult(KeyboardResult{std::move(text)});
   finish();
 }

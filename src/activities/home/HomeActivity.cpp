@@ -24,6 +24,7 @@
 #include "../reader/BookReadingStats.h"
 #include "../reader/BookStatsActivity.h"
 #include "../reader/EpubReaderUtils.h"
+#include "MinesweeperActivity.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -35,6 +36,7 @@
 #include "RecentBookProgress.h"
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
+#include "NotesActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -60,6 +62,8 @@ enum class HomeMenuAction {
   OpdsBrowser,
   ReadingStats,
   Bookmarks,
+  Notes,
+  Minesweeper,
   FileTransfer,
   Settings,
 };
@@ -71,7 +75,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 8;
+  static constexpr int kCapacity = 10;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -277,6 +281,8 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
     items.push({savedItemsLabel(hasBookmarks, hasClippings), BookmarkIcon, HomeMenuAction::Bookmarks});
   }
 
+  items.push({tr(STR_NOTES), BookmarkIcon, HomeMenuAction::Notes});
+  items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
@@ -301,6 +307,8 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
     items.push({tr(STR_READING_STATS), Chart, HomeMenuAction::ReadingStats});
   }
 
+  items.push({tr(STR_NOTES), BookmarkIcon, HomeMenuAction::Notes});
+  items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   return items;
 }
@@ -596,7 +604,7 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
 
 int HomeActivity::getMenuItemCount() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  int count = 4;  // File Browser, Recents, File transfer, Settings
+  int count = 6;  // File Browser, Recents, Notes, Demineur, File transfer, Settings
   if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     count += getVisibleRecentBookCount();
   } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -1545,6 +1553,12 @@ void HomeActivity::loop() {
           case HomeMenuAction::Bookmarks:
             onSavedItemsOpen();
             break;
+          case HomeMenuAction::Notes:
+            onNotesOpen();
+            break;
+          case HomeMenuAction::Minesweeper:
+            onMinesweeperOpen();
+            break;
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
@@ -1553,6 +1567,21 @@ void HomeActivity::loop() {
             break;
         }
       };
+
+      int menuTapX = 0;
+      int menuTapY = 0;
+      if (mappedInput.wasScreenTapped(menuTapX, menuTapY)) {
+        const Rect panel = MinimalTheme::buttonMenuPanelRect(renderer, menuCount);
+        if (containsPoint(panel, menuTapX, menuTapY)) {
+          const int rowHeight = menuCount > 0 ? std::max(1, (panel.height - 2) / menuCount) : 1;
+          const int tappedRow = (menuTapY - panel.y - 1) / rowHeight;
+          if (tappedRow >= 0 && tappedRow < menuCount) {
+            minimalMenuIndex = tappedRow;
+            activateMinimalMenuAction();
+            return;
+          }
+        }
+      }
 
       int touchedMenuIndex = -1;
       if (mappedInput.wasItemTouchedDown(touchedMenuIndex) && touchedMenuIndex >= 0 && touchedMenuIndex < menuCount) {
@@ -1785,6 +1814,12 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Bookmarks:
         onSavedItemsOpen();
+        break;
+      case HomeMenuAction::Notes:
+        onNotesOpen();
+        break;
+      case HomeMenuAction::Minesweeper:
+        onMinesweeperOpen();
         break;
       case HomeMenuAction::FileTransfer:
         onFileTransferOpen();
@@ -2315,6 +2350,14 @@ void HomeActivity::onRecentsOpen() { activityManager.goToRecentBooks(); }
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+
+void HomeActivity::onNotesOpen() {
+  startActivityForResult(std::make_unique<NotesActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+
+void HomeActivity::onMinesweeperOpen() {
+  startActivityForResult(std::make_unique<MinesweeperActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 

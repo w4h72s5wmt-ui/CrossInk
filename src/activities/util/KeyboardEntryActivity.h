@@ -9,8 +9,9 @@
 
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
+#include "PredictiveText.h"
 
-enum class InputType { Text, Password, Url };
+enum class InputType { Text, Password, Url, Multiline };
 
 // Text entry on the FreeInkUI keyboard component: the SDK layout tables and
 // keyboard() do the key rendering and hit-rect registration, InteractionBuffer
@@ -41,6 +42,7 @@ class KeyboardEntryActivity : public Activity {
   InputType inputType;
   size_t minLength;
   bool passwordVisible = false;
+  PredictiveText predictiveText;
 
   ButtonNavigator buttonNavigator;
 
@@ -124,6 +126,8 @@ class KeyboardEntryActivity : public Activity {
   bool backspaceUtf8();
   static size_t utf8Prev(const std::string& s, size_t pos);
   static size_t utf8Next(const std::string& s, size_t pos);
+  bool predictiveEnabled() const;
+  freeink::ui::Rect predictiveBarRect() const;
 
   freeink::ui::Rect keyboardRect() const;
 

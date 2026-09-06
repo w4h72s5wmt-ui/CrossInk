@@ -2,6 +2,7 @@
 
 ### Added
 
+- Added a standalone Notes screen for creating and editing UTF-8 `.txt` notes stored in `/Notes`.
 - Keyboard layouts can now be enabled in Settings and switched from the keyboard's language key.
 - Xteink X4 Classic support, including its six buttons, SD card, USB Drive, display profile, and board-specific firmware builds.
 - Full Xteink X4 Pro support, including USB Drive access to its SD card and direct USB file transfers.
