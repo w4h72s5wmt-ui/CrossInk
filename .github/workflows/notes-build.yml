@@ -1,4 +1,4 @@
-name: CrossInk direct source update
+name: CrossInk Notes + Demineur X4 Pro
 
 on:
   push:
@@ -6,27 +6,67 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  update-sources:
-    if: github.actor != 'github-actions[bot]'
+  build-x4-pro-notes:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout CrossInk sources
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          submodules: recursive
 
-      - name: Update real source files
-        run: python .github/source_update.py
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
 
-      - name: Commit direct source changes
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Cache incremental X4 Pro build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pio/build/x4-pro
+            .pio/libdeps/x4-pro
+          key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-x4-pro-pio6.1.19-
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
+      - name: Build X4 Pro firmware directly from sources
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/activities/util/KeyboardEntryActivity.cpp src/activities/util/PredictiveText.h src/activities/util/PredictiveText.cpp src/activities/home/MinesweeperActivity.cpp
-          git diff --cached --check
-          git commit -m "feat: speed up Notes keyboard and reset minesweeper scores"
-          git push origin HEAD:x4-pro-notes
+          pio run -e x4-pro | tee pio-x4-pro-notes.log
+
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-build-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-build-${{ github.run_number }}-log
+          path: pio-x4-pro-notes.log
+          if-no-files-found: ignore
