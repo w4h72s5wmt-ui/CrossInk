@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <limits>
+#include <cstring>
 
 namespace {
 constexpr const char kPersonalDir[] = "/.crosspoint";
@@ -198,32 +198,103 @@ bool asciiLetterOrDigit(const unsigned char c) {
 bool wordByte(const unsigned char c) { return c >= 0x80 || asciiLetterOrDigit(c) || c == '\'' || c == '-'; }
 bool coreWordByte(const unsigned char c) { return c >= 0x80 || asciiLetterOrDigit(c); }
 
-char foldedInitial(const char* word) {
-  if (!word || !*word) return '\0';
-  const unsigned char c = static_cast<unsigned char>(word[0]);
-  if (c < 0x80) {
-    char ch = static_cast<char>(c);
-    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-    return ch;
+struct FoldStream {
+  const unsigned char* cursor;
+  unsigned char pending = 0;
+};
+
+bool nextFolded(FoldStream& stream, char& out) {
+  if (stream.pending != 0) {
+    out = static_cast<char>(stream.pending);
+    stream.pending = 0;
+    return true;
   }
-  if (c == 0xC3 && word[1]) {
-    switch (static_cast<unsigned char>(word[1])) {
+
+  const unsigned char c = *stream.cursor;
+  if (c == 0) return false;
+  if (c < 0x80) {
+    ++stream.cursor;
+    out = static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+    return true;
+  }
+
+  const unsigned char n = stream.cursor[1];
+  if (c == 0xC3 && n != 0) {
+    stream.cursor += 2;
+    switch (n) {
       case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85:
-      case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: return 'a';
-      case 0x87: case 0xA7: return 'c';
+      case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: out = 'a'; return true;
+      case 0x87: case 0xA7: out = 'c'; return true;
       case 0x88: case 0x89: case 0x8A: case 0x8B:
-      case 0xA8: case 0xA9: case 0xAA: case 0xAB: return 'e';
+      case 0xA8: case 0xA9: case 0xAA: case 0xAB: out = 'e'; return true;
       case 0x8C: case 0x8D: case 0x8E: case 0x8F:
-      case 0xAC: case 0xAD: case 0xAE: case 0xAF: return 'i';
+      case 0xAC: case 0xAD: case 0xAE: case 0xAF: out = 'i'; return true;
       case 0x92: case 0x93: case 0x94: case 0x95: case 0x96:
-      case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: return 'o';
+      case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: out = 'o'; return true;
       case 0x99: case 0x9A: case 0x9B: case 0x9C:
-      case 0xB9: case 0xBA: case 0xBB: case 0xBC: return 'u';
-      case 0x9D: case 0xBD: case 0xBF: return 'y';
-      default: break;
+      case 0xB9: case 0xBA: case 0xBB: case 0xBC: out = 'u'; return true;
+      case 0x9D: case 0xBD: case 0xBF: out = 'y'; return true;
+      default:
+        out = static_cast<char>(c);
+        stream.pending = n;
+        return true;
     }
   }
-  return '\0';
+
+  if (c == 0xC5 && n != 0) {
+    stream.cursor += 2;
+    if (n == 0x92 || n == 0x93) {
+      out = 'o';
+      stream.pending = 'e';
+      return true;
+    }
+    out = static_cast<char>(c);
+    stream.pending = n;
+    return true;
+  }
+
+  ++stream.cursor;
+  out = static_cast<char>(c);
+  return true;
+}
+
+char foldedInitial(const char* word) {
+  if (!word || !*word) return '\0';
+  FoldStream stream{reinterpret_cast<const unsigned char*>(word)};
+  char out = '\0';
+  return nextFolded(stream, out) ? out : '\0';
+}
+
+bool foldedMatchesPrefix(const char* word, const std::string& prefix, size_t& foldedLength) {
+  foldedLength = 0;
+  if (!word) return prefix.empty();
+  FoldStream stream{reinterpret_cast<const unsigned char*>(word)};
+  char c = '\0';
+  while (nextFolded(stream, c)) {
+    if (foldedLength < prefix.size() && c != prefix[foldedLength]) return false;
+    ++foldedLength;
+  }
+  return foldedLength >= prefix.size();
+}
+
+bool foldedEqualsTarget(const char* word, const std::string& folded) {
+  size_t length = 0;
+  return foldedMatchesPrefix(word, folded, length) && length == folded.size();
+}
+
+bool foldedEquivalent(const char* a, const char* b) {
+  if (!a || !b) return a == b;
+  FoldStream left{reinterpret_cast<const unsigned char*>(a)};
+  FoldStream right{reinterpret_cast<const unsigned char*>(b)};
+  char lc = '\0';
+  char rc = '\0';
+  while (true) {
+    const bool hasLeft = nextFolded(left, lc);
+    const bool hasRight = nextFolded(right, rc);
+    if (hasLeft != hasRight) return false;
+    if (!hasLeft) return true;
+    if (lc != rc) return false;
+  }
 }
 
 std::string previousWordBefore(const std::string& text, size_t pos) {
@@ -291,45 +362,9 @@ std::string PredictiveText::normalizeWord(std::string word) {
 std::string PredictiveText::foldForMatch(const std::string& word) {
   std::string out;
   out.reserve(word.size());
-  for (size_t i = 0; i < word.size();) {
-    const unsigned char c = static_cast<unsigned char>(word[i]);
-    if (c < 0x80) {
-      char ch = static_cast<char>(c);
-      if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-      out.push_back(ch);
-      ++i;
-      continue;
-    }
-    if (c == 0xC3 && i + 1 < word.size()) {
-      const unsigned char n = static_cast<unsigned char>(word[i + 1]);
-      switch (n) {
-        case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85:
-        case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: out.push_back('a'); break;
-        case 0x87: case 0xA7: out.push_back('c'); break;
-        case 0x88: case 0x89: case 0x8A: case 0x8B:
-        case 0xA8: case 0xA9: case 0xAA: case 0xAB: out.push_back('e'); break;
-        case 0x8C: case 0x8D: case 0x8E: case 0x8F:
-        case 0xAC: case 0xAD: case 0xAE: case 0xAF: out.push_back('i'); break;
-        case 0x92: case 0x93: case 0x94: case 0x95: case 0x96:
-        case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: out.push_back('o'); break;
-        case 0x99: case 0x9A: case 0x9B: case 0x9C:
-        case 0xB9: case 0xBA: case 0xBB: case 0xBC: out.push_back('u'); break;
-        case 0x9D: case 0xBD: case 0xBF: out.push_back('y'); break;
-        default: out.push_back(static_cast<char>(c)); out.push_back(static_cast<char>(n)); break;
-      }
-      i += 2;
-      continue;
-    }
-    if (c == 0xC5 && i + 1 < word.size()) {
-      const unsigned char n = static_cast<unsigned char>(word[i + 1]);
-      if (n == 0x92 || n == 0x93) out += "oe";
-      else { out.push_back(static_cast<char>(c)); out.push_back(static_cast<char>(n)); }
-      i += 2;
-      continue;
-    }
-    out.push_back(static_cast<char>(c));
-    ++i;
-  }
+  FoldStream stream{reinterpret_cast<const unsigned char*>(word.c_str())};
+  char c = '\0';
+  while (nextFolded(stream, c)) out.push_back(c);
   return out;
 }
 
@@ -344,14 +379,15 @@ void PredictiveText::currentWordRange(const std::string& text, size_t cursorPos,
 }
 
 bool PredictiveText::startsWithFolded(const std::string& word, const std::string& foldedPrefix) {
-  const std::string folded = foldForMatch(word);
-  return folded.size() >= foldedPrefix.size() && folded.compare(0, foldedPrefix.size(), foldedPrefix) == 0;
+  size_t foldedLength = 0;
+  return foldedMatchesPrefix(word.c_str(), foldedPrefix, foldedLength);
 }
 
 bool PredictiveText::isBuiltinWord(const std::string& normalizedWord) {
   const std::string folded = foldForMatch(normalizedWord);
   for (size_t i = 0; i < kFrenchWordCount; ++i) {
-    if (foldForMatch(kFrenchWords[i]) == folded) return true;
+    if (foldedInitial(kFrenchWords[i]) != foldedInitial(normalizedWord.c_str())) continue;
+    if (foldedEqualsTarget(kFrenchWords[i], folded)) return true;
   }
   return false;
 }
@@ -367,7 +403,8 @@ void PredictiveText::addPersonalWord(const std::string& word, const uint16_t inc
 
   const std::string folded = foldForMatch(normalized);
   for (auto& item : personal_) {
-    if (foldForMatch(item.word) == folded) {
+    if (foldedInitial(item.word.c_str()) == foldedInitial(normalized.c_str()) &&
+        foldedEqualsTarget(item.word.c_str(), folded)) {
       if (increment > 0) {
         const uint32_t next = static_cast<uint32_t>(item.count) + increment;
         item.count = static_cast<uint16_t>(std::min<uint32_t>(next, 65535));
@@ -479,36 +516,73 @@ std::array<std::string, 3> PredictiveText::suggestions(const std::string& text, 
   const std::string previous = normalizeWord(previousWordBefore(text, start));
   const std::string foldedPrevious = foldForMatch(previous);
 
-  // One character is enough for personal/context matches; the large builtin
-  // dictionary starts at two characters to avoid noisy suggestions.
   if (foldedPrefix.empty() && foldedPrevious.empty()) return result;
 
+  const bool sentenceStart = isSentenceStart(text, start);
   std::string cacheKey = foldedPrevious + "|" + foldedPrefix;
-  cacheKey.push_back(isSentenceStart(text, start) ? 'S' : 'N');
+  cacheKey.push_back(sentenceStart ? 'S' : 'N');
   if (cachedRevision_ == revision_ && cachedKey_ == cacheKey) return cachedSuggestions_;
 
-  struct Candidate { std::string word; int score; };
-  std::vector<Candidate> candidates;
-  candidates.reserve(48);
-  auto addCandidate = [&](const std::string& word, int score) {
-    if (word.empty()) return;
-    const std::string folded = foldForMatch(word);
-    if (!foldedPrefix.empty() && (folded.size() < foldedPrefix.size() || folded.compare(0, foldedPrefix.size(), foldedPrefix) != 0 || folded == foldedPrefix)) return;
-    for (auto& candidate : candidates) {
-      if (foldForMatch(candidate.word) == folded) {
-        candidate.score = std::max(candidate.score, score);
-        return;
-      }
+  struct RankedCandidate {
+    const char* word = nullptr;
+    int score = 0;
+  };
+  std::array<RankedCandidate, 3> best{};
+  size_t bestCount = 0;
+
+  auto better = [](const RankedCandidate& a, const RankedCandidate& b) {
+    if (a.score != b.score) return a.score > b.score;
+    const size_t aLength = std::strlen(a.word);
+    const size_t bLength = std::strlen(b.word);
+    if (aLength != bLength) return aLength < bLength;
+    return std::strcmp(a.word, b.word) < 0;
+  };
+
+  auto bubbleUp = [&](size_t index) {
+    while (index > 0 && better(best[index], best[index - 1])) {
+      std::swap(best[index], best[index - 1]);
+      --index;
     }
-    candidates.push_back(Candidate{word, score});
+  };
+
+  auto addRanked = [&](const char* word, const int score) {
+    if (!word || !*word) return;
+    for (size_t i = 0; i < bestCount; ++i) {
+      if (!foldedEquivalent(best[i].word, word)) continue;
+      if (score > best[i].score) {
+        best[i].score = score;
+        bubbleUp(i);
+      }
+      return;
+    }
+
+    RankedCandidate candidate{word, score};
+    if (bestCount < best.size()) {
+      const size_t index = bestCount++;
+      best[index] = candidate;
+      bubbleUp(index);
+    } else if (better(candidate, best.back())) {
+      best.back() = candidate;
+      bubbleUp(best.size() - 1);
+    }
+  };
+
+  auto addFiltered = [&](const char* word, const int score) {
+    size_t foldedLength = 0;
+    if (!foldedPrefix.empty() &&
+        (!foldedMatchesPrefix(word, foldedPrefix, foldedLength) || foldedLength == foldedPrefix.size())) {
+      return;
+    }
+    addRanked(word, score);
   };
 
   if (!foldedPrevious.empty()) {
     for (size_t i = 0; i < kContextCount; ++i) {
-      if (foldForMatch(kContexts[i].previous) != foldedPrevious) continue;
-      addCandidate(kContexts[i].next1, 9000);
-      addCandidate(kContexts[i].next2, 8600);
-      addCandidate(kContexts[i].next3, 8200);
+      if (foldedInitial(kContexts[i].previous) != foldedPrevious[0]) continue;
+      if (!foldedEqualsTarget(kContexts[i].previous, foldedPrevious)) continue;
+      addFiltered(kContexts[i].next1, 9000);
+      addFiltered(kContexts[i].next2, 8600);
+      addFiltered(kContexts[i].next3, 8200);
       break;
     }
   }
@@ -516,40 +590,28 @@ std::array<std::string, 3> PredictiveText::suggestions(const std::string& text, 
   if (!foldedPrefix.empty()) {
     for (const auto& item : personal_) {
       if (foldedInitial(item.word.c_str()) != foldedPrefix[0]) continue;
-      const std::string folded = foldForMatch(item.word);
-      if (folded.size() >= foldedPrefix.size() && folded.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && folded != foldedPrefix) {
-        const int completionPenalty = static_cast<int>(folded.size() - foldedPrefix.size());
-        addCandidate(item.word, 5000 + std::min<int>(2500, item.count * 40) - completionPenalty * 4);
-      }
+      size_t foldedLength = 0;
+      if (!foldedMatchesPrefix(item.word.c_str(), foldedPrefix, foldedLength) || foldedLength == foldedPrefix.size()) continue;
+      const int completionPenalty = static_cast<int>(foldedLength - foldedPrefix.size());
+      addRanked(item.word.c_str(), 5000 + std::min<int>(2500, item.count * 40) - completionPenalty * 4);
     }
 
     if (foldedPrefix.size() >= 2) {
       for (size_t i = 0; i < kFrenchWordCount; ++i) {
         if (foldedInitial(kFrenchWords[i]) != foldedPrefix[0]) continue;
-        const std::string word = kFrenchWords[i];
-        const std::string folded = foldForMatch(word);
-        if (folded.size() >= foldedPrefix.size() && folded.compare(0, foldedPrefix.size(), foldedPrefix) == 0 && folded != foldedPrefix) {
-          const int completionPenalty = static_cast<int>(folded.size() - foldedPrefix.size());
-          const int frequencyScore = std::max(0, 3000 - static_cast<int>(i / 2));
-          addCandidate(word, frequencyScore - completionPenalty * 3);
-        }
+        size_t foldedLength = 0;
+        if (!foldedMatchesPrefix(kFrenchWords[i], foldedPrefix, foldedLength) || foldedLength == foldedPrefix.size()) continue;
+        const int completionPenalty = static_cast<int>(foldedLength - foldedPrefix.size());
+        const int frequencyScore = std::max(0, 3000 - static_cast<int>(i / 2));
+        addRanked(kFrenchWords[i], frequencyScore - completionPenalty * 3);
       }
     }
   }
 
-  std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-    if (a.score != b.score) return a.score > b.score;
-    if (a.word.size() != b.word.size()) return a.word.size() < b.word.size();
-    return a.word < b.word;
-  });
-
-  const bool capitalize = isSentenceStart(text, start) || (!typed.empty() && asciiUpper(static_cast<unsigned char>(text[start])));
-  size_t slot = 0;
-  for (const auto& candidate : candidates) {
-    if (slot >= result.size()) break;
-    std::string word = candidate.word;
-    if (capitalize) capitalizeFirstAscii(word);
-    result[slot++] = std::move(word);
+  const bool capitalize = sentenceStart || (!typed.empty() && asciiUpper(static_cast<unsigned char>(text[start])));
+  for (size_t i = 0; i < bestCount; ++i) {
+    result[i] = best[i].word;
+    if (capitalize) capitalizeFirstAscii(result[i]);
   }
 
   cachedKey_ = std::move(cacheKey);
