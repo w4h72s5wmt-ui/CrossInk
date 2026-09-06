@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -434,26 +435,55 @@ void PredictiveText::load() {
   dirty_ = false;
   invalidateSuggestionCache();
   if (!Storage.exists(kPersonalPath)) return;
+
   FsFile file;
   if (!Storage.openFileForRead("PRED", std::string(kPersonalPath), file)) return;
   const uint32_t size = file.size();
-  if (size == 0 || size > kMaxPersonalFileBytes) { file.close(); return; }
-  std::string data(size, '\0');
-  if (file.read(data.data(), size) != static_cast<int>(size)) { file.close(); return; }
-  file.close();
-
-  size_t pos = 0;
-  while (pos < data.size() && personal_.size() < kMaxPersonalWords) {
-    const size_t lineEnd = data.find('\n', pos);
-    const std::string line = data.substr(pos, lineEnd == std::string::npos ? std::string::npos : lineEnd - pos);
-    const size_t tab = line.find('\t');
-    if (tab != std::string::npos && tab + 1 < line.size()) {
-      const unsigned long parsed = std::strtoul(line.substr(0, tab).c_str(), nullptr, 10);
-      addPersonalWord(line.substr(tab + 1), static_cast<uint16_t>(std::min<unsigned long>(65535, std::max<unsigned long>(1, parsed))), true);
-    }
-    if (lineEnd == std::string::npos) break;
-    pos = lineEnd + 1;
+  if (size == 0 || size > kMaxPersonalFileBytes) {
+    file.close();
+    return;
   }
+
+  std::array<uint8_t, 256> input{};
+  std::array<char, 64> line{};
+  size_t lineLength = 0;
+  bool overflow = false;
+
+  const auto consumeLine = [&]() {
+    if (!overflow && lineLength > 0) {
+      line[lineLength] = '\0';
+      char* tab = std::strchr(line.data(), '\t');
+      if (tab && tab[1] != '\0') {
+        *tab = '\0';
+        const unsigned long parsed = std::strtoul(line.data(), nullptr, 10);
+        addPersonalWord(std::string(tab + 1),
+                        static_cast<uint16_t>(std::min<unsigned long>(65535, std::max<unsigned long>(1, parsed))),
+                        true);
+      }
+    }
+    lineLength = 0;
+    overflow = false;
+  };
+
+  while (personal_.size() < kMaxPersonalWords) {
+    const int count = file.read(input.data(), input.size());
+    if (count <= 0) break;
+    for (int i = 0; i < count; ++i) {
+      const char c = static_cast<char>(input[static_cast<size_t>(i)]);
+      if (c == '\n') {
+        consumeLine();
+        if (personal_.size() >= kMaxPersonalWords) break;
+        continue;
+      }
+      if (lineLength + 1 < line.size()) {
+        line[lineLength++] = c;
+      } else {
+        overflow = true;
+      }
+    }
+  }
+  if (personal_.size() < kMaxPersonalWords && (lineLength > 0 || overflow)) consumeLine();
+  file.close();
   dirty_ = false;
 }
 
@@ -462,22 +492,32 @@ void PredictiveText::save() {
   Storage.mkdir(kPersonalDir);
   FsFile file = Storage.open(kPersonalPath, O_WRONLY | O_CREAT | O_TRUNC);
   if (!file) return;
-  std::vector<PersonalWord> rows = personal_;
-  std::sort(rows.begin(), rows.end(), [](const PersonalWord& a, const PersonalWord& b) {
-    if (a.count != b.count) return a.count > b.count;
-    return a.word < b.word;
+
+  const size_t count = std::min(personal_.size(), kMaxPersonalWords);
+  std::array<uint16_t, kMaxPersonalWords> order{};
+  for (size_t i = 0; i < count; ++i) order[i] = static_cast<uint16_t>(i);
+  std::sort(order.begin(), order.begin() + count, [this](const uint16_t a, const uint16_t b) {
+    const auto& left = personal_[a];
+    const auto& right = personal_[b];
+    if (left.count != right.count) return left.count > right.count;
+    return left.word < right.word;
   });
-  std::string data;
-  data.reserve(rows.size() * 20);
-  for (const auto& item : rows) {
-    data += std::to_string(item.count);
-    data.push_back('\t');
-    data += item.word;
-    data.push_back('\n');
+
+  std::array<char, 64> line{};
+  bool ok = true;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& item = personal_[order[i]];
+    const int lineSize = std::snprintf(line.data(), line.size(), "%u\t%s\n",
+                                       static_cast<unsigned>(item.count), item.word.c_str());
+    if (lineSize <= 0 || static_cast<size_t>(lineSize) >= line.size() ||
+        file.write(reinterpret_cast<const uint8_t*>(line.data()), static_cast<size_t>(lineSize)) !=
+            static_cast<size_t>(lineSize)) {
+      ok = false;
+      break;
+    }
   }
-  const size_t written = data.empty() ? 0 : file.write(reinterpret_cast<const uint8_t*>(data.data()), data.size());
   file.close();
-  if (written == data.size()) dirty_ = false;
+  if (ok) dirty_ = false;
 }
 
 void PredictiveText::seedFromText(const std::string& text) {

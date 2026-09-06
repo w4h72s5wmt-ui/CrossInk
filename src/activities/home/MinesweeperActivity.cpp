@@ -28,10 +28,7 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/minesweeper.bin";
 constexpr const char SCORE_PATH[] = "/.crosspoint/minesweeper-scores.bin";
-constexpr uint32_t SAVE_MAGIC = 0x4D535731;
-constexpr uint8_t SAVE_VERSION = 3;
-constexpr uint8_t PREVIOUS_SAVE_VERSION = 2;
-constexpr uint8_t LEGACY_SAVE_VERSION = 1;
+constexpr uint32_t SAVE_MAGIC = 0x4D535734;  // MSW4: packed, intentionally incompatible with old saves.
 constexpr uint32_t SCORE_MAGIC = 0x4D534353;
 constexpr uint8_t SCORE_VERSION = 1;
 constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
@@ -629,12 +626,12 @@ void MinesweeperActivity::revealCell(const int index) {
 }
 
 void MinesweeperActivity::revealFlood(const int startIndex) {
-  std::array<int16_t, kMaxCells> queue{};
+  std::array<uint8_t, kMaxCells> queue{};
   const int dimension = gridDimension();
   const int cellCount = dimension * dimension;
   int head = 0;
   int tail = 0;
-  queue[tail++] = static_cast<int16_t>(startIndex);
+  queue[tail++] = static_cast<uint8_t>(startIndex);
 
   while (head < tail) {
     const int index = queue[head++];
@@ -652,7 +649,9 @@ void MinesweeperActivity::revealFlood(const int startIndex) {
         const int nc = col + dc;
         if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
         const int next = nr * dimension + nc;
-        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) queue[tail++] = static_cast<int16_t>(next);
+        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+          queue[tail++] = static_cast<uint8_t>(next);
+        }
       }
     }
   }
@@ -697,22 +696,19 @@ bool MinesweeperActivity::saveGame() {
   FsFile file;
   if (!Storage.openFileForWrite("MINE", SAVE_PATH, file)) return false;
 
+  const int cellCount = totalCells();
+  const size_t packedBytes = static_cast<size_t>((cellCount + 7) / 8);
   const uint8_t grid = static_cast<uint8_t>(gridSizeIndex_);
-  const uint8_t minesPlaced = minesPlaced_ ? 1 : 0;
-  const uint8_t assistedCounter = assistedCounterActive ? 1 : 0;
-  const uint16_t selected = static_cast<uint16_t>(std::clamp(selectedCellIndex_, 0, totalCells() - 1));
-  const uint16_t revealedCount = static_cast<uint16_t>(revealedSafeCells_);
-  const uint8_t savedScoreFrozen = scoreFrozen ? 1 : 0;
-  const uint16_t savedOfficialScore = static_cast<uint16_t>(std::max(0, officialScore));
-  const uint16_t cellCount = static_cast<uint16_t>(totalCells());
+  const uint8_t stateFlags = static_cast<uint8_t>((assistedCounterActive ? 0x01 : 0x00) |
+                                                   (scoreFrozen ? 0x02 : 0x00));
+  const uint8_t selected = static_cast<uint8_t>(std::clamp(selectedCellIndex_, 0, cellCount - 1));
+  const uint8_t savedOfficialScore = static_cast<uint8_t>(std::clamp(officialScore, 0, 255));
 
-  bool ok = writeValue(file, SAVE_MAGIC) && writeValue(file, SAVE_VERSION) && writeValue(file, grid) &&
-            writeValue(file, minesPlaced) && writeValue(file, assistedCounter) && writeValue(file, selected) &&
-            writeValue(file, revealedCount) && writeValue(file, savedScoreFrozen) &&
-            writeValue(file, savedOfficialScore) && writeValue(file, cellCount);
-  if (ok) ok = file.write(mines_.data(), cellCount) == cellCount;
-  if (ok) ok = file.write(revealed_.data(), cellCount) == cellCount;
-  if (ok) ok = file.write(flagged_.data(), cellCount) == cellCount;
+  bool ok = writeValue(file, SAVE_MAGIC) && writeValue(file, grid) && writeValue(file, stateFlags) &&
+            writeValue(file, selected) && writeValue(file, savedOfficialScore);
+  if (ok) ok = file.write(mines_.data(), packedBytes) == packedBytes;
+  if (ok) ok = file.write(revealed_.data(), packedBytes) == packedBytes;
+  if (ok) ok = file.write(flagged_.data(), packedBytes) == packedBytes;
   file.close();
 
   if (!ok) {
@@ -731,69 +727,66 @@ bool MinesweeperActivity::loadSavedGame() {
   assistedCounterActive = false;
   assistedCounterChoice = false;
   if (!Storage.exists(SAVE_PATH)) return false;
+
   FsFile file;
   if (!Storage.openFileForRead("MINE", SAVE_PATH, file)) return false;
 
   uint32_t magic = 0;
-  uint8_t version = 0;
   uint8_t grid = 0;
-  uint8_t minesPlaced = 0;
-  uint8_t assistedCounter = 0;
-  uint16_t selected = 0;
-  uint16_t revealedCount = 0;
-  uint8_t savedScoreFrozen = 0;
-  uint16_t savedOfficialScore = 0;
-  uint16_t cellCount = 0;
+  uint8_t stateFlags = 0;
+  uint8_t selected = 0;
+  uint8_t savedOfficialScore = 0;
+  bool ok = readValue(file, magic) && readValue(file, grid) && readValue(file, stateFlags) &&
+            readValue(file, selected) && readValue(file, savedOfficialScore);
 
-  bool ok = readValue(file, magic) && readValue(file, version) && readValue(file, grid) &&
-            readValue(file, minesPlaced);
-  if (ok && version >= PREVIOUS_SAVE_VERSION) ok = readValue(file, assistedCounter);
-  if (ok) ok = readValue(file, selected) && readValue(file, revealedCount);
-  if (ok && version == SAVE_VERSION) {
-    ok = readValue(file, savedScoreFrozen) && readValue(file, savedOfficialScore);
-  }
-  if (ok) ok = readValue(file, cellCount);
-
-  const bool supportedVersion = version == SAVE_VERSION || version == PREVIOUS_SAVE_VERSION ||
-                                version == LEGACY_SAVE_VERSION;
-  const int gridLimit = version == SAVE_VERSION ? kGridOptionCount : kGridOptionCount - 1;
-  if (!ok || magic != SAVE_MAGIC || !supportedVersion || grid >= gridLimit) {
+  if (!ok || magic != SAVE_MAGIC || grid >= kGridOptionCount) {
     file.close();
     clearSavedGame();
     return false;
   }
 
-  if (version != SAVE_VERSION) ++grid;
   gridSizeIndex_ = grid;
-  const int expectedCells = totalCells();
-  if (cellCount != expectedCells || cellCount > kMaxCells) {
+  const int cellCount = totalCells();
+  const size_t packedBytes = static_cast<size_t>((cellCount + 7) / 8);
+  constexpr size_t headerBytes = sizeof(uint32_t) + 4 * sizeof(uint8_t);
+  const size_t expectedSize = headerBytes + 3 * packedBytes;
+  if (file.size() != expectedSize || selected >= cellCount) {
     file.close();
     clearSavedGame();
+    resetGame();
     return false;
   }
 
   mines_.fill(0);
   revealed_.fill(0);
   flagged_.fill(0);
-  ok = file.read(mines_.data(), cellCount) == cellCount;
-  if (ok) ok = file.read(revealed_.data(), cellCount) == cellCount;
-  if (ok) ok = file.read(flagged_.data(), cellCount) == cellCount;
+  ok = file.read(mines_.data(), packedBytes) == static_cast<int>(packedBytes);
+  if (ok) ok = file.read(revealed_.data(), packedBytes) == static_cast<int>(packedBytes);
+  if (ok) ok = file.read(flagged_.data(), packedBytes) == static_cast<int>(packedBytes);
   file.close();
 
-  if (!ok || selected >= cellCount || revealedCount > cellCount ||
-      (version == SAVE_VERSION && savedOfficialScore > revealedCount)) {
+  if (!ok) {
     clearSavedGame();
     resetGame();
     return false;
   }
 
-  minesPlaced_ = minesPlaced != 0;
-  assistedCounterActive = version >= PREVIOUS_SAVE_VERSION && assistedCounter != 0;
+  minesPlaced_ = mines_.any();
+  assistedCounterActive = (stateFlags & 0x01) != 0;
   assistedCounterChoice = assistedCounterActive;
   selectedCellIndex_ = selected;
-  revealedSafeCells_ = revealedCount;
-  scoreFrozen = version == SAVE_VERSION && savedScoreFrozen != 0;
-  officialScore = scoreFrozen ? savedOfficialScore : revealedCount;
+  revealedSafeCells_ = 0;
+  for (int i = 0; i < cellCount; ++i) {
+    if (revealed_[i] && !mines_[i]) ++revealedSafeCells_;
+  }
+
+  scoreFrozen = (stateFlags & 0x02) != 0;
+  if (scoreFrozen && savedOfficialScore > revealedSafeCells_) {
+    clearSavedGame();
+    resetGame();
+    return false;
+  }
+  officialScore = scoreFrozen ? savedOfficialScore : revealedSafeCells_;
   updateBestScore(gridSizeIndex_, officialScore);
   gameOver_ = false;
   won_ = false;
