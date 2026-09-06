@@ -1021,9 +1021,9 @@ void MinesweeperActivity::renderGrid() {
   const int counterFont = UI_12_FONT_ID;
   auto drawCenteredCounter = [this, counterFont](const Rect& panel, const char* text) {
     const int textWidth = renderer.getTextWidth(counterFont, text);
-    const int textHeight = renderer.getLineHeight(counterFont);
+    const int textHeight = renderer.getTextHeight(counterFont);
     const int textX = panel.x + (panel.width - textWidth) / 2;
-    const int textY = panel.y + (panel.height - textHeight) / 2 + 2;
+    const int textY = panel.y + (panel.height - textHeight) / 2;
     renderer.drawText(counterFont, textX, textY, text);
   };
   drawCenteredCounter(leftPanel, leftText);
