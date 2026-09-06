@@ -42,9 +42,8 @@ int undoRevealedSafeCells = 0;
 int undoSelectedCellIndex = 0;
 int64_t lossUndoDeadlineUs = 0;
 
-// New-game counter option. It is configured before starting a new game and
-// the active value is saved with the game so Continue keeps the same mode.
-bool newGameSetupActive = false;
+// The menu choice applies to newly-created games. The active value is saved
+// with the game so Continue always keeps the same counter behaviour.
 bool assistedCounterChoice = false;
 bool assistedCounterActive = false;
 
@@ -84,6 +83,7 @@ bool pointInRect(const Rect& rect, const int x, const int y) {
 
 struct GridGeometry {
   Rect header;
+  Rect counterBar;
   Rect grid;
   int cellSize = 1;
 };
@@ -94,34 +94,19 @@ GridGeometry gridGeometry(const GfxRenderer& renderer, const MappedInputManager&
   const int screenHeight = renderer.getScreenHeight();
   const Rect header = headerRect(renderer, mappedInput);
   const int contentTop = header.y + header.height + metrics.verticalSpacing;
+  const int counterHeight = std::max(40, renderer.getLineHeight(UI_12_FONT_ID) + 14);
+  const int counterWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
+  const Rect counterBar{metrics.contentSidePadding, contentTop, counterWidth, counterHeight};
+  const int gridTop = counterBar.y + counterBar.height + metrics.verticalSpacing;
   const int footerTop = screenHeight - metrics.buttonHintsHeight;
-  const int availableHeight = std::max(1, footerTop - contentTop - metrics.verticalSpacing);
+  const int availableHeight = std::max(1, footerTop - gridTop - metrics.verticalSpacing);
   const int availableWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
   const int cellSize = std::max(1, std::min(availableWidth / dimension, availableHeight / dimension));
   const int gridWidth = cellSize * dimension;
   const int gridHeight = cellSize * dimension;
   const int gridX = (screenWidth - gridWidth) / 2;
-  const int gridY = contentTop + std::max(0, (availableHeight - gridHeight) / 2);
-  return GridGeometry{header, Rect{gridX, gridY, gridWidth, gridHeight}, cellSize};
-}
-
-struct NewGameSetupGeometry {
-  Rect header;
-  Rect assistRow;
-  Rect startButton;
-};
-
-NewGameSetupGeometry newGameSetupGeometry(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect header = headerRect(renderer, mappedInput);
-  const int x = metrics.contentSidePadding;
-  const int width = std::max(1, renderer.getScreenWidth() - 2 * x);
-  const int contentTop = header.y + header.height + metrics.verticalSpacing * 2;
-  const int assistY = contentTop + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing * 2;
-  const Rect assistRow{x, assistY, width, 72};
-  const int footerTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
-  const Rect startButton{x, std::max(assistY + 88, footerTop - 60), width, 48};
-  return NewGameSetupGeometry{header, assistRow, startButton};
+  const int gridY = gridTop + std::max(0, (availableHeight - gridHeight) / 2);
+  return GridGeometry{header, counterBar, Rect{gridX, gridY, gridWidth, gridHeight}, cellSize};
 }
 
 template <typename T>
@@ -137,7 +122,6 @@ bool readValue(FsFile& file, T& value) {
 void drawHiddenCellPattern(GfxRenderer& renderer, const int x, const int y, const int size) {
   if (size <= 4) return;
 
-  // Light Windows-style raised cell: dotted grey face with dark bottom/right bevel.
   renderer.fillRect(x + 1, y + 1, std::max(1, size - 1), std::max(1, size - 1), false);
   for (int py = y + 4; py < y + size - 3; py += 4) {
     const int offset = (((py - y) / 4) & 1) ? 2 : 0;
@@ -168,7 +152,6 @@ void MinesweeperActivity::onEnter() {
   confirmHoldHandled_ = false;
   undoAvailable = false;
   lossUndoDeadlineUs = 0;
-  newGameSetupActive = false;
   assistedCounterChoice = false;
   assistedCounterActive = false;
 
@@ -320,76 +303,6 @@ void MinesweeperActivity::loopGrid() {
 void MinesweeperActivity::loopResult() {
   const Rect header = headerRect(renderer, mappedInput);
 
-  if (!gameOver_ && newGameSetupActive) {
-    const NewGameSetupGeometry setup = newGameSetupGeometry(renderer, mappedInput);
-
-    const auto backToMenu = [this]() {
-      newGameSetupActive = false;
-      viewMode_ = ViewMode::Menu;
-      selectedIndex_ = gridSizeIndex_;
-      topIndex_ = 0;
-      initialViewportPending_ = true;
-      requestUpdate();
-    };
-
-    const auto startConfiguredGame = [this]() {
-      assistedCounterActive = assistedCounterChoice;
-      newGameSetupActive = false;
-      resetGame();
-      clearSavedGame();
-      enterGrid();
-    };
-
-    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, setup.header)) ||
-        mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      mappedInput.suppressNextBackRelease();
-      backToMenu();
-      return;
-    }
-
-    int tx = 0;
-    int ty = 0;
-    if (mappedInput.wasScreenTapped(tx, ty)) {
-      if (pointInRect(setup.assistRow, tx, ty)) {
-        assistedCounterChoice = !assistedCounterChoice;
-        selectedIndex_ = 0;
-        requestUpdate();
-        return;
-      }
-      if (pointInRect(setup.startButton, tx, ty)) {
-        selectedIndex_ = 1;
-        startConfiguredGame();
-        return;
-      }
-    }
-
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (selectedIndex_ == 0) {
-        assistedCounterChoice = !assistedCounterChoice;
-        requestUpdate();
-      } else {
-        startConfiguredGame();
-      }
-      return;
-    }
-
-    const auto moveSetupSelection = [this](const int index) {
-      selectedIndex_ = std::clamp(index, 0, 1);
-      requestUpdate();
-    };
-    buttonNavigator_.onNextRelease(
-        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::nextIndex(selectedIndex_, 2)); });
-    buttonNavigator_.onPreviousRelease(
-        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::previousIndex(selectedIndex_, 2)); });
-    buttonNavigator_.onNextContinuous(
-        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::nextIndex(selectedIndex_, 2)); });
-    buttonNavigator_.onPreviousContinuous(
-        [this, &moveSetupSelection] { moveSetupSelection(ButtonNavigator::previousIndex(selectedIndex_, 2)); });
-    return;
-  }
-
-  // Result is also reused for the no-save information screen. It must return to
-  // the menu without creating a bogus save file.
   if (!gameOver_) {
     if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
         mappedInput.wasPressed(MappedInputManager::Button::Back)) {
@@ -403,9 +316,6 @@ void MinesweeperActivity::loopResult() {
     return;
   }
 
-  // Start the five-second countdown only after the loss screen has actually
-  // been rendered. A zero deadline means the visible undo screen is still
-  // being presented for the first time.
   if (!won_ && undoAvailable && lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) {
     undoAvailable = false;
     lossUndoDeadlineUs = 0;
@@ -465,10 +375,16 @@ void MinesweeperActivity::activateRow(const int row) {
     return;
   }
   if (row == 3) {
+    assistedCounterChoice = !assistedCounterChoice;
+    selectedIndex_ = row;
+    requestUpdate();
+    return;
+  }
+  if (row == 4) {
     continueGame();
     return;
   }
-  if (row == 4) newGame();
+  if (row == 5) newGame();
 }
 
 void MinesweeperActivity::continueGame() {
@@ -478,18 +394,15 @@ void MinesweeperActivity::continueGame() {
     requestUpdate();
     return;
   }
+  assistedCounterChoice = assistedCounterActive;
   enterGrid();
 }
 
 void MinesweeperActivity::newGame() {
-  // Show a real pre-game option screen instead of changing game behaviour
-  // silently from the main menu.
-  newGameSetupActive = true;
-  assistedCounterChoice = false;
-  gameOver_ = false;
-  selectedIndex_ = 0;
-  viewMode_ = ViewMode::Result;
-  requestUpdate();
+  assistedCounterActive = assistedCounterChoice;
+  resetGame();
+  clearSavedGame();
+  enterGrid();
 }
 
 void MinesweeperActivity::enterGrid() {
@@ -502,7 +415,6 @@ void MinesweeperActivity::enterGrid() {
 
 void MinesweeperActivity::returnToMenu() {
   if (!gameOver_) saveGame();
-  newGameSetupActive = false;
   viewMode_ = ViewMode::Menu;
   selectedIndex_ = gridSizeIndex_;
   topIndex_ = 0;
@@ -584,7 +496,6 @@ void MinesweeperActivity::placeMines(const int firstIndex) {
 void MinesweeperActivity::revealCell(const int index) {
   if (gameOver_ || index < 0 || index >= totalCells() || flagged_[index] || revealed_[index]) return;
 
-  // One-level undo snapshot taken immediately before the reveal action.
   undoMines = mines_;
   undoRevealed = revealed_;
   undoFlagged = flagged_;
@@ -656,8 +567,6 @@ void MinesweeperActivity::finishGame(const bool won) {
       if (mines_[i]) flagged_[i] = 1;
     }
   } else {
-    // Keep the solution hidden. The five-second timer is armed only after the
-    // undo button has actually been drawn on the e-ink screen.
     lossUndoDeadlineUs = 0;
   }
 
@@ -798,16 +707,22 @@ void MinesweeperActivity::buildMenuScreen(UiApp::ScreenType& screen) {
     items.push_back(item);
   }
 
+  fui::ListItem assistItem;
+  assistItem.label = "Aide compteur de mines";
+  assistItem.value = assistedCounterChoice ? "[X]" : "[ ]";
+  assistItem.actionValue = 3;
+  items.push_back(assistItem);
+
   fui::ListItem continueItem;
   continueItem.label = "Continuer";
   continueItem.value = hasSavedGame_ ? "Partie sauvegardee" : "Aucune partie";
-  continueItem.actionValue = 3;
+  continueItem.actionValue = 4;
   items.push_back(continueItem);
 
   fui::ListItem newGameItem;
   newGameItem.label = "Nouvelle partie";
   newGameItem.value = GRID_DIMS[gridSizeIndex_];
-  newGameItem.actionValue = 4;
+  newGameItem.actionValue = 5;
   items.push_back(newGameItem);
 
   fui::ListProps props;
@@ -874,17 +789,42 @@ void MinesweeperActivity::renderGrid() {
   char title[64];
   if (gameOver_) {
     std::snprintf(title, sizeof(title), "%s - %s", won_ ? "Victoire !" : "Perdu !", GRID_DIMS[gridSizeIndex_]);
-  } else if (assistedCounterActive) {
-    std::snprintf(title, sizeof(title), "Demineur %s  Mines: %d", GRID_DIMS[gridSizeIndex_],
-                  std::max(0, mineCount() - correctFlags));
   } else {
-    std::snprintf(title, sizeof(title), "Demineur %s  Drapeaux: %d", GRID_DIMS[gridSizeIndex_], flags);
+    std::snprintf(title, sizeof(title), "Demineur - %s", GRID_DIMS[gridSizeIndex_]);
   }
   if (mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::draw(renderer, uiTarget_, geometry.header, title, false);
   } else {
     GUI.drawHeader(renderer, geometry.header, title);
   }
+
+  renderer.fillRect(geometry.counterBar.x, geometry.counterBar.y, geometry.counterBar.width,
+                    geometry.counterBar.height, false);
+  renderer.drawRect(geometry.counterBar.x, geometry.counterBar.y, geometry.counterBar.width,
+                    geometry.counterBar.height, 2, true);
+
+  const int gap = 8;
+  const int panelWidth = std::max(1, (geometry.counterBar.width - 3 * gap) / 2);
+  const int panelHeight = std::max(1, geometry.counterBar.height - 2 * gap);
+  const Rect leftPanel{geometry.counterBar.x + gap, geometry.counterBar.y + gap, panelWidth, panelHeight};
+  const Rect rightPanel{geometry.counterBar.x + 2 * gap + panelWidth, geometry.counterBar.y + gap,
+                        panelWidth, panelHeight};
+  renderer.drawRect(leftPanel.x, leftPanel.y, leftPanel.width, leftPanel.height, 1, true);
+  renderer.drawRect(rightPanel.x, rightPanel.y, rightPanel.width, rightPanel.height, 1, true);
+
+  const int leftValue = assistedCounterActive ? std::max(0, mineCount() - correctFlags) : flags;
+  char leftText[32];
+  std::snprintf(leftText, sizeof(leftText), "%s %03d", assistedCounterActive ? "Mines" : "Drapeaux", leftValue);
+  char pointsText[32];
+  std::snprintf(pointsText, sizeof(pointsText), "Points %03d", std::max(0, revealedSafeCells_));
+  const int counterFont = UI_12_FONT_ID;
+  const int counterTextHeight = renderer.getLineHeight(counterFont);
+  const int leftTextWidth = renderer.getTextWidth(counterFont, leftText);
+  const int pointsTextWidth = renderer.getTextWidth(counterFont, pointsText);
+  renderer.drawText(counterFont, leftPanel.x + std::max(2, (leftPanel.width - leftTextWidth) / 2),
+                    leftPanel.y + std::max(1, (leftPanel.height - counterTextHeight) / 2), leftText);
+  renderer.drawText(counterFont, rightPanel.x + std::max(2, (rightPanel.width - pointsTextWidth) / 2),
+                    rightPanel.y + std::max(1, (rightPanel.height - counterTextHeight) / 2), pointsText);
 
   renderer.drawRect(geometry.grid.x, geometry.grid.y, geometry.grid.width + 1, geometry.grid.height + 1, 1, true);
 
@@ -899,7 +839,6 @@ void MinesweeperActivity::renderGrid() {
       }
 
       if (revealed_[index]) {
-        // Revealed cells are always pure white for maximum e-ink readability.
         renderer.fillRect(x + 1, y + 1, std::max(1, geometry.cellSize - 1),
                           std::max(1, geometry.cellSize - 1), false);
         if (mines_[index]) {
@@ -955,8 +894,6 @@ void MinesweeperActivity::renderGrid() {
 
   const bool showUndoButton = gameOver_ && !won_ && undoAvailable;
   if (showUndoButton) {
-    // Put the undo control directly below the grid. This remains visible on
-    // touch-only layouts where the generic button-hints footer can be absent.
     const int buttonWidth = std::min(260, renderer.getScreenWidth() - 40);
     const int buttonHeight = 48;
     const int buttonX = (renderer.getScreenWidth() - buttonWidth) / 2;
@@ -980,8 +917,6 @@ void MinesweeperActivity::renderGrid() {
   }
   renderer.displayBuffer();
 
-  // Arm the grace-period clock after the frame containing the button has been
-  // sent to the display, so the user gets the full five seconds to react.
   if (showUndoButton && lossUndoDeadlineUs == 0) {
     lossUndoDeadlineUs = esp_timer_get_time() + LOSS_UNDO_WINDOW_US;
   }
@@ -996,54 +931,6 @@ void MinesweeperActivity::renderResult() {
   renderer.clearScreen();
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect header = headerRect(renderer, mappedInput);
-
-  if (newGameSetupActive) {
-    const NewGameSetupGeometry setup = newGameSetupGeometry(renderer, mappedInput);
-    if (mappedInput.hasTouchHardware()) {
-      TouchHeaderBackButton::draw(renderer, uiTarget_, setup.header, "Nouvelle partie", false);
-    } else {
-      GUI.drawHeader(renderer, setup.header, "Nouvelle partie", nullptr, false);
-    }
-
-    const int x = metrics.contentSidePadding;
-    const int y = setup.header.y + setup.header.height + metrics.verticalSpacing * 2;
-    renderer.drawText(UI_12_FONT_ID, x, y, GRID_LABELS[gridSizeIndex_]);
-
-    const int boxSize = 26;
-    const int boxX = setup.assistRow.x + 4;
-    const int boxY = setup.assistRow.y + 8;
-    renderer.drawRect(boxX, boxY, boxSize, boxSize, 2, true);
-    if (assistedCounterChoice) {
-      renderer.drawLine(boxX + 5, boxY + 13, boxX + 11, boxY + 20, 2, true);
-      renderer.drawLine(boxX + 11, boxY + 20, boxX + 22, boxY + 6, 2, true);
-    }
-    renderer.drawText(UI_12_FONT_ID, boxX + boxSize + 12, boxY + 2, "Aide compteur de mines");
-    renderer.drawText(UI_10_FONT_ID, boxX + boxSize + 12,
-                      boxY + renderer.getLineHeight(UI_12_FONT_ID) + 4,
-                      "Baisse seulement si le drapeau est juste.");
-    if (selectedIndex_ == 0) {
-      renderer.drawRect(setup.assistRow.x, setup.assistRow.y, setup.assistRow.width, setup.assistRow.height, 2, true);
-    }
-
-    renderer.fillRect(setup.startButton.x, setup.startButton.y, setup.startButton.width, setup.startButton.height, false);
-    renderer.drawRect(setup.startButton.x, setup.startButton.y, setup.startButton.width, setup.startButton.height,
-                      selectedIndex_ == 1 ? 3 : 1, true);
-    const char* startLabel = "COMMENCER";
-    const int startFont = UI_12_FONT_ID;
-    const int startTextWidth = renderer.getTextWidth(startFont, startLabel);
-    const int startTextHeight = renderer.getLineHeight(startFont);
-    renderer.drawText(startFont,
-                      setup.startButton.x + std::max(2, (setup.startButton.width - startTextWidth) / 2),
-                      setup.startButton.y + std::max(1, (setup.startButton.height - startTextHeight) / 2),
-                      startLabel);
-
-    const auto labels =
-        mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
-    renderer.displayBuffer();
-    return;
-  }
-
   if (mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);
   } else {
