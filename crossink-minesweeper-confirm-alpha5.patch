@@ -1,0 +1,33 @@
+diff --git a/src/activities/home/MinesweeperActivity.cpp b/src/activities/home/MinesweeperActivity.cpp
+--- a/src/activities/home/MinesweeperActivity.cpp
++++ b/src/activities/home/MinesweeperActivity.cpp
+@@ -16,6 +16,7 @@
+ #include "AlertActivity.h"
+ #include "CrossPointState.h"
+ #include "MappedInputManager.h"
++#include "activities/util/ConfirmationActivity.h"
+ #include "components/TouchHeaderBackButton.h"
+ #include "components/UITheme.h"
+ #include "components/UiAppHelpers.h"
+@@ -470,7 +471,23 @@ void MinesweeperActivity::activateRow(const int row) {
+     continueGame();
+     return;
+   }
+-  if (row == 6) newGame();
++  if (row == 6) {
++    if (!hasSavedGame_) {
++      newGame();
++      return;
++    }
++    startActivityForResult(
++        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Nouvelle partie",
++                                               "Ecraser la partie en cours ?"),
++        [this](const ActivityResult& result) {
++          if (result.isCancelled) {
++            requestUpdate();
++            return;
++          }
++          newGame();
++        });
++  }
+ }
