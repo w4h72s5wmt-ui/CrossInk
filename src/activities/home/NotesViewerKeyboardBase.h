@@ -102,12 +102,7 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
     renderer.clearScreen();
     const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
     TouchHeaderBackButton::draw(renderer, header, viewerTitle.c_str(), false, headerActionReserveWidth());
-
-    if (currentNoteLooksLocked()) {
-      drawHeaderAction();
-    } else {
-      drawOpenLockLight(headerActionRect());
-    }
+    drawHeaderAction();
 
     const size_t firstLine = static_cast<size_t>(viewerPage * viewerLinesPerPage);
     const size_t endLine = std::min(viewerLines.size(), firstLine + static_cast<size_t>(viewerLinesPerPage));
@@ -146,6 +141,18 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
 
  protected:
   bool viewerEnabled() const { return viewerInputType == InputType::Multiline && headerActionReserveWidth() > 0; }
+
+  void drawHeaderAction() override {
+    if (currentNoteLooksLocked()) {
+      drawNotesHeaderAction();
+    } else {
+      drawOpenLockLight(headerActionRect());
+    }
+  }
+
+  // NotesActivityCore.inc remaps its historical drawHeaderAction override to
+  // this hook. That keeps the same privacy icon in viewer and editor modes.
+  virtual void drawNotesHeaderAction() {}
 
  private:
   std::string viewerTitle;
@@ -308,7 +315,7 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
     ditherV(bodyX + bodyW - 1, bodyY, bodyY + bodyH - 1);
 
     const int shackleLeft = bodyX + 4;
-    const int shackleTop = bodyY - 12;
+    const int shackleTop = bodyY - 10;
     const int shackleRight = bodyX + 15;
     ditherV(shackleLeft, shackleTop + 4, bodyY);
     ditherH(shackleLeft + 2, shackleRight, shackleTop);

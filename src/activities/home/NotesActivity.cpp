@@ -15,5 +15,7 @@
 }
 
 #define KeyboardEntryActivity NotesViewerKeyboardBase
+#define drawHeaderAction drawNotesHeaderAction
 #include "NotesActivityCore.inc"
+#undef drawHeaderAction
 #undef KeyboardEntryActivity
