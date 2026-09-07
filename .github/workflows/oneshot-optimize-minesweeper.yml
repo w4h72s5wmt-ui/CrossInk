@@ -1,0 +1,136 @@
+name: One-shot Minesweeper consolidation
+
+on:
+  push:
+    branches:
+      - x4-pro-notes
+    paths:
+      - .github/workflows/oneshot-optimize-minesweeper.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-minesweeper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout x4-pro-notes
+        uses: actions/checkout@v4
+        with:
+          ref: x4-pro-notes
+          fetch-depth: 0
+
+      - name: Apply flood-fill and disabled-render optimizations
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/activities/home/MinesweeperActivity.cpp')
+          text = path.read_text()
+
+          old_flood = '''void MinesweeperActivity::revealFlood(const int startIndex) {
+            std::array<uint8_t, kMaxCells> queue{};
+            const int dimension = gridDimension();
+            const int cellCount = dimension * dimension;
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = static_cast<uint8_t>(startIndex);
+
+            while (head < tail) {
+              const int index = queue[head++];
+              if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
+              revealed_[index] = 1;
+              ++revealedSafeCells_;
+              if (adjacentMineCount(index) != 0) continue;
+
+              const int row = index / dimension;
+              const int col = index % dimension;
+              for (int dr = -1; dr <= 1; ++dr) {
+                for (int dc = -1; dc <= 1; ++dc) {
+                  if (dr == 0 && dc == 0) continue;
+                  const int nr = row + dr;
+                  const int nc = col + dc;
+                  if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
+                  const int next = nr * dimension + nc;
+                  if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+                    queue[tail++] = static_cast<uint8_t>(next);
+                  }
+                }
+              }
+            }
+          }
+          '''
+
+          new_flood = '''void MinesweeperActivity::revealFlood(const int startIndex) {
+            std::array<uint8_t, kMaxCells> queue{};
+            CellBits queued{};
+            const int dimension = gridDimension();
+            const int cellCount = dimension * dimension;
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = static_cast<uint8_t>(startIndex);
+            queued[startIndex] = 1;
+
+            while (head < tail) {
+              const int index = queue[head++];
+              if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
+              revealed_[index] = 1;
+              ++revealedSafeCells_;
+              if (adjacentMineCount(index) != 0) continue;
+
+              const int row = index / dimension;
+              const int col = index % dimension;
+              for (int dr = -1; dr <= 1; ++dr) {
+                for (int dc = -1; dc <= 1; ++dc) {
+                  if (dr == 0 && dc == 0) continue;
+                  const int nr = row + dr;
+                  const int nc = col + dc;
+                  if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
+                  const int next = nr * dimension + nc;
+                  if (!revealed_[next] && !queued[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+                    queued[next] = 1;
+                    queue[tail++] = static_cast<uint8_t>(next);
+                  }
+                }
+              }
+            }
+          }
+          '''
+
+          old_render = '''      for (int y = actionY; y < actionY + actionHeight; ++y) {
+                for (int x = actionX; x < actionX + actionWidth; ++x) {
+                  if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);
+                }
+              }
+          '''
+
+          new_render = '''      // One horizontal erase span every other row gives the same
+              // disabled/dithered impression with O(height) draw calls instead of
+              // O(width * height) single-pixel calls.
+              for (int y = actionY; y < actionY + actionHeight; y += 2) {
+                renderer.fillRect(actionX, y, actionWidth, 1, false);
+              }
+          '''
+
+          if old_flood not in text:
+              raise SystemExit('revealFlood block not found')
+          if old_render not in text:
+              raise SystemExit('disabled Continue render block not found')
+
+          text = text.replace(old_flood, new_flood, 1)
+          text = text.replace(old_render, new_render, 1)
+          path.write_text(text)
+          PY
+
+          git diff --check
+          git diff -- src/activities/home/MinesweeperActivity.cpp
+
+      - name: Commit optimized Minesweeper
+        shell: bash
+        run: |
+          git config user.name "w4h72s5wmt-ui"
+          git config user.email "w4h72s5wmt@privaterelay.appleid.com"
+          git add src/activities/home/MinesweeperActivity.cpp
+          git commit -m "fix: consolidate Minesweeper flood fill and render"
+          git push origin HEAD:x4-pro-notes
