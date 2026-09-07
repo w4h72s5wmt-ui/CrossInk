@@ -449,9 +449,9 @@ void NotesActivity::loop() {
         if (pointInRect(deleteRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           const std::string path = std::string(kNotesDir) + "/" + filename;
-          const std::string heading = std::string(tr(STR_DELETE)) + "?";
+          const std::string heading = "Supprimer '" + displayName(filename) + "' ?";
           startActivityForResult(
-              std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, displayName(filename)),
+              std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, ""),
               [this, path](const ActivityResult& result) {
                 if (result.isCancelled) {
                   requestUpdate();

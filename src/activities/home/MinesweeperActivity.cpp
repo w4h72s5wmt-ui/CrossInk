@@ -273,8 +273,8 @@ void MinesweeperActivity::loopMenu() {
   if (mappedInput.hasTouchHardware() && mappedInput.wasScreenTapped(resetTapX, resetTapY) &&
       pointInRect(scoreResetButtonRect(renderer, mappedInput), resetTapX, resetTapY)) {
     startActivityForResult(
-        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Reinitialiser les scores",
-                                               "Effacer tous les meilleurs scores ?"),
+        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Réinitialiser les scores ?",
+                                               ""),
         [this](const ActivityResult& result) {
           if (!result.isCancelled) {
             bestScores.fill(0);
@@ -398,19 +398,6 @@ void MinesweeperActivity::loopGrid() {
 void MinesweeperActivity::loopResult() {
   const Rect header = headerRect(renderer, mappedInput);
 
-  if (!gameOver_) {
-    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
-        mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      mappedInput.suppressNextBackRelease();
-      viewMode_ = ViewMode::Menu;
-      selectedIndex_ = gridSizeIndex_;
-      topIndex_ = 0;
-      initialViewportPending_ = true;
-      requestUpdate();
-    }
-    return;
-  }
-
   if (!won_ && undoAvailable && lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) {
     undoAvailable = false;
     undoMineIndex = -1;
@@ -478,7 +465,7 @@ void MinesweeperActivity::activateRow(const int row) {
     return;
   }
   if (row == 5) {
-    continueGame();
+    if (hasSavedGame_) continueGame();
     return;
   }
   if (row == 6) {
@@ -487,8 +474,8 @@ void MinesweeperActivity::activateRow(const int row) {
       return;
     }
     startActivityForResult(
-        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Nouvelle partie",
-                                               "Ecraser la partie en cours ?"),
+        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Effacer la partie en cours :",
+                                               ""),
         [this](const ActivityResult& result) {
           if (result.isCancelled) {
             requestUpdate();
@@ -500,12 +487,6 @@ void MinesweeperActivity::activateRow(const int row) {
 }
 
 void MinesweeperActivity::continueGame() {
-  if (!hasSavedGame_) {
-    gameOver_ = false;
-    viewMode_ = ViewMode::Result;
-    requestUpdate();
-    return;
-  }
   assistedCounterChoice = assistedCounterActive;
   enterGrid();
 }
@@ -917,13 +898,30 @@ void MinesweeperActivity::renderMenu() {
     renderer.drawRoundedRect(actionX, actionY, actionWidth, actionHeight, 1, 6, true);
   }
 
+  // Disabled Continue: keep the control visible, but dither its label, value
+  // and outline to medium gray when there is no saved game.
+  if (!hasSavedGame_) {
+    for (int visible = 0; visible < drawnRows; ++visible) {
+      if (topIndex_ + visible != 5) continue;
+      const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;
+      const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;
+      const int actionY = rowTop + actionInsetY;
+      const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);
+      for (int y = actionY; y < actionY + actionHeight; ++y) {
+        for (int x = actionX; x < actionX + actionWidth; ++x) {
+          if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);
+        }
+      }
+    }
+  }
+
   const Rect scorePanel = scoreTableRect(renderer, mappedInput);
   renderer.fillRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, false);
   renderer.drawRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, 1, true);
   const int headerRowHeight = 30;
   const int dataTop = scorePanel.y + headerRowHeight;
   const int dataHeight = scorePanel.height - headerRowHeight;
-  const int splitX = scorePanel.x + scorePanel.width * 2 / 5;
+  const int splitX = scorePanel.x + scorePanel.width / 2;
 
   renderer.drawLine(scorePanel.x, dataTop, scorePanel.x + scorePanel.width, dataTop, 1, true);
   renderer.drawLine(splitX, dataTop, splitX, scorePanel.y + scorePanel.height, 1, true);
@@ -936,7 +934,7 @@ void MinesweeperActivity::renderMenu() {
   };
 
   const Rect scoreHeader{scorePanel.x, scorePanel.y, scorePanel.width, headerRowHeight};
-  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "SCORES");
+  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "Meilleurs scores");
 
   constexpr const char* SCORE_GRID_LABELS[SCORE_GRID_COUNT] = {"5 x 5", "9 x 9", "12 x 12", "16 x 16"};
   for (int row = 0; row < SCORE_GRID_COUNT; ++row) {
@@ -1131,27 +1129,5 @@ void MinesweeperActivity::renderGrid() {
 }
 
 void MinesweeperActivity::renderResult() {
-  if (gameOver_) {
-    renderGrid();
-    return;
-  }
-
-  renderer.clearScreen();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect header = headerRect(renderer, mappedInput);
-  if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);
-  } else {
-    GUI.drawHeader(renderer, header, "Continuer", nullptr, false);
-  }
-
-  const int x = metrics.contentSidePadding;
-  const int y = header.y + header.height + metrics.verticalSpacing * 2;
-  renderer.drawText(UI_12_FONT_ID, x, y, "Aucune partie sauvegardee");
-  renderer.drawText(UI_10_FONT_ID, x, y + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing,
-                    "pour le moment.");
-
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
-  renderer.displayBuffer();
+  renderGrid();
 }
