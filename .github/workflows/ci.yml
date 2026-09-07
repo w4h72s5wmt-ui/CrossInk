@@ -4,7 +4,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-x4-pro:
@@ -12,6 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.head.ref }}
           submodules: recursive
 
       - uses: actions/setup-python@v6
@@ -35,59 +36,29 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Apply X4 Pro test changes
+      - name: Apply validated X4 Pro changes to source
         run: |
           python - <<'PY'
           from pathlib import Path
 
           mine_path = Path("src/activities/home/MinesweeperActivity.cpp")
           mine = mine_path.read_text()
-
           mine_replacements = [
-              (
-                  '''  if (row == 5) {\n    continueGame();\n    return;\n  }''',
-                  '''  if (row == 5) {\n    if (hasSavedGame_) continueGame();\n    return;\n  }''',
-              ),
-              (
-                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Reinitialiser les scores",\n                                               "Effacer tous les meilleurs scores ?"),''',
-                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Réinitialiser les scores ?",\n                                               ""),''',
-              ),
-              (
-                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Nouvelle partie",\n                                               "Ecraser la partie en cours ?"),''',
-                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Effacer la partie en cours :",\n                                               ""),''',
-              ),
-              (
-                  '''void MinesweeperActivity::continueGame() {\n  if (!hasSavedGame_) {\n    gameOver_ = false;\n    viewMode_ = ViewMode::Result;\n    requestUpdate();\n    return;\n  }\n  assistedCounterChoice = assistedCounterActive;\n  enterGrid();\n}''',
-                  '''void MinesweeperActivity::continueGame() {\n  assistedCounterChoice = assistedCounterActive;\n  enterGrid();\n}''',
-              ),
-              (
-                  '''void MinesweeperActivity::loopResult() {\n  const Rect header = headerRect(renderer, mappedInput);\n\n  if (!gameOver_) {\n    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||\n        mappedInput.wasPressed(MappedInputManager::Button::Back)) {\n      mappedInput.suppressNextBackRelease();\n      viewMode_ = ViewMode::Menu;\n      selectedIndex_ = gridSizeIndex_;\n      topIndex_ = 0;\n      initialViewportPending_ = true;\n      requestUpdate();\n    }\n    return;\n  }\n''',
-                  '''void MinesweeperActivity::loopResult() {\n  const Rect header = headerRect(renderer, mappedInput);\n''',
-              ),
-              (
-                  '''void MinesweeperActivity::renderResult() {\n  if (gameOver_) {\n    renderGrid();\n    return;\n  }\n\n  renderer.clearScreen();\n  const auto& metrics = UITheme::getInstance().getMetrics();\n  const Rect header = headerRect(renderer, mappedInput);\n  if (mappedInput.hasTouchHardware()) {\n    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);\n  } else {\n    GUI.drawHeader(renderer, header, "Continuer", nullptr, false);\n  }\n\n  const int x = metrics.contentSidePadding;\n  const int y = header.y + header.height + metrics.verticalSpacing * 2;\n  renderer.drawText(UI_12_FONT_ID, x, y, "Aucune partie sauvegardee");\n  renderer.drawText(UI_10_FONT_ID, x, y + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing,\n                    "pour le moment.");\n\n  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");\n  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);\n  renderer.displayBuffer();\n}''',
-                  '''void MinesweeperActivity::renderResult() {\n  renderGrid();\n}''',
-              ),
-              (
-                  '''  const int splitX = scorePanel.x + scorePanel.width * 2 / 5;''',
-                  '''  const int splitX = scorePanel.x + scorePanel.width / 2;''',
-              ),
-              (
-                  '''  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "SCORES");''',
-                  '''  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "Meilleurs scores");''',
-              ),
-              (
-                  '''  }\n\n  const Rect scorePanel = scoreTableRect(renderer, mappedInput);''',
-                  '''  }\n\n  // Disabled Continue: keep the control visible, but dither its label, value\n  // and outline to medium gray when there is no saved game.\n  if (!hasSavedGame_) {\n    for (int visible = 0; visible < drawnRows; ++visible) {\n      if (topIndex_ + visible != 5) continue;\n      const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;\n      const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;\n      const int actionY = rowTop + actionInsetY;\n      const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);\n      for (int y = actionY; y < actionY + actionHeight; ++y) {\n        for (int x = actionX; x < actionX + actionWidth; ++x) {\n          if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);\n        }\n      }\n    }\n  }\n\n  const Rect scorePanel = scoreTableRect(renderer, mappedInput);''',
-              ),
+              ('''  if (row == 5) {\n    continueGame();\n    return;\n  }''', '''  if (row == 5) {\n    if (hasSavedGame_) continueGame();\n    return;\n  }'''),
+              ('''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Reinitialiser les scores",\n                                               "Effacer tous les meilleurs scores ?"),''', '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Réinitialiser les scores ?",\n                                               ""),'''),
+              ('''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Nouvelle partie",\n                                               "Ecraser la partie en cours ?"),''', '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Effacer la partie en cours :",\n                                               ""),'''),
+              ('''void MinesweeperActivity::continueGame() {\n  if (!hasSavedGame_) {\n    gameOver_ = false;\n    viewMode_ = ViewMode::Result;\n    requestUpdate();\n    return;\n  }\n  assistedCounterChoice = assistedCounterActive;\n  enterGrid();\n}''', '''void MinesweeperActivity::continueGame() {\n  assistedCounterChoice = assistedCounterActive;\n  enterGrid();\n}'''),
+              ('''void MinesweeperActivity::loopResult() {\n  const Rect header = headerRect(renderer, mappedInput);\n\n  if (!gameOver_) {\n    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||\n        mappedInput.wasPressed(MappedInputManager::Button::Back)) {\n      mappedInput.suppressNextBackRelease();\n      viewMode_ = ViewMode::Menu;\n      selectedIndex_ = gridSizeIndex_;\n      topIndex_ = 0;\n      initialViewportPending_ = true;\n      requestUpdate();\n    }\n    return;\n  }\n''', '''void MinesweeperActivity::loopResult() {\n  const Rect header = headerRect(renderer, mappedInput);\n'''),
+              ('''void MinesweeperActivity::renderResult() {\n  if (gameOver_) {\n    renderGrid();\n    return;\n  }\n\n  renderer.clearScreen();\n  const auto& metrics = UITheme::getInstance().getMetrics();\n  const Rect header = headerRect(renderer, mappedInput);\n  if (mappedInput.hasTouchHardware()) {\n    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);\n  } else {\n    GUI.drawHeader(renderer, header, "Continuer", nullptr, false);\n  }\n\n  const int x = metrics.contentSidePadding;\n  const int y = header.y + header.height + metrics.verticalSpacing * 2;\n  renderer.drawText(UI_12_FONT_ID, x, y, "Aucune partie sauvegardee");\n  renderer.drawText(UI_10_FONT_ID, x, y + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing,\n                    "pour le moment.");\n\n  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");\n  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);\n  renderer.displayBuffer();\n}''', '''void MinesweeperActivity::renderResult() {\n  renderGrid();\n}'''),
+              ('''  const int splitX = scorePanel.x + scorePanel.width * 2 / 5;''', '''  const int splitX = scorePanel.x + scorePanel.width / 2;'''),
+              ('''  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "SCORES");''', '''  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "Meilleurs scores");'''),
+              ('''  }\n\n  const Rect scorePanel = scoreTableRect(renderer, mappedInput);''', '''  }\n\n  // Disabled Continue: keep the control visible, but dither its label, value\n  // and outline to medium gray when there is no saved game.\n  if (!hasSavedGame_) {\n    for (int visible = 0; visible < drawnRows; ++visible) {\n      if (topIndex_ + visible != 5) continue;\n      const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;\n      const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;\n      const int actionY = rowTop + actionInsetY;\n      const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);\n      for (int y = actionY; y < actionY + actionHeight; ++y) {\n        for (int x = actionX; x < actionX + actionWidth; ++x) {\n          if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);\n        }\n      }\n    }\n  }\n\n  const Rect scorePanel = scoreTableRect(renderer, mappedInput);'''),
           ]
-
           for old, new in mine_replacements:
               count = mine.count(old)
               if count != 1:
                   raise SystemExit(f"Minesweeper: expected exactly one match, got {count}: {old[:60]!r}")
               mine = mine.replace(old, new, 1)
-
           mine_path.write_text(mine)
 
           notes_path = Path("src/activities/home/NotesActivity.cpp")
@@ -97,9 +68,18 @@ jobs:
           count = notes.count(old)
           if count != 1:
               raise SystemExit(f"Notes: expected exactly one delete confirmation match, got {count}")
-          notes = notes.replace(old, new, 1)
-          notes_path.write_text(notes)
+          notes_path.write_text(notes.replace(old, new, 1))
           PY
+
+      - name: Commit consolidated source changes
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/activities/home/MinesweeperActivity.cpp src/activities/home/NotesActivity.cpp
+          git diff --cached --check
+          git commit -m "UI: consolidate validated X4 Pro changes"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
 
       - name: Build X4 Pro firmware
         run: |
