@@ -608,11 +608,13 @@ void MinesweeperActivity::revealCell(const int index) {
 
 void MinesweeperActivity::revealFlood(const int startIndex) {
   std::array<uint8_t, kMaxCells> queue{};
+  CellBits queued{};
   const int dimension = gridDimension();
   const int cellCount = dimension * dimension;
   int head = 0;
   int tail = 0;
   queue[tail++] = static_cast<uint8_t>(startIndex);
+  queued[startIndex] = 1;
 
   while (head < tail) {
     const int index = queue[head++];
@@ -630,7 +632,8 @@ void MinesweeperActivity::revealFlood(const int startIndex) {
         const int nc = col + dc;
         if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
         const int next = nr * dimension + nc;
-        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+        if (!revealed_[next] && !queued[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+          queued[next] = 1;
           queue[tail++] = static_cast<uint8_t>(next);
         }
       }
@@ -907,10 +910,11 @@ void MinesweeperActivity::renderMenu() {
       const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;
       const int actionY = rowTop + actionInsetY;
       const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);
-      for (int y = actionY; y < actionY + actionHeight; ++y) {
-        for (int x = actionX; x < actionX + actionWidth; ++x) {
-          if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);
-        }
+      // One horizontal erase span every other row gives the same
+      // disabled/dithered impression with O(height) draw calls instead of
+      // O(width * height) single-pixel calls.
+      for (int y = actionY; y < actionY + actionHeight; y += 2) {
+        renderer.fillRect(actionX, y, actionWidth, 1, false);
       }
     }
   }
