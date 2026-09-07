@@ -275,8 +275,13 @@ void NotesActivity::editNote(const std::string& path, const std::string& title) 
   if (!loadNote(path, initialText)) initialText.clear();
 
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes,
-                                              InputType::Multiline),
+      std::make_unique<KeyboardEntryActivity>(
+          renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes, InputType::Multiline, 0,
+          [this, path](const std::string& draft) {
+            if (!saveNote(path, draft)) {
+              LOG_ERR("NOTES", "Failed to save note before forced editor exit: %s", path.c_str());
+            }
+          }),
       [this, path](const ActivityResult& result) {
         if (!result.isCancelled) {
           const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
