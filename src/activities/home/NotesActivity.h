@@ -29,6 +29,7 @@ class NotesActivity final : public Activity {
   int topIndex = 0;
   bool vaultMode = false;
   uint8_t vaultSequencePos = 0;
+  std::string vaultPattern;
 
   void reloadNotes();
   void applyFilter();
@@ -40,6 +41,7 @@ class NotesActivity final : public Activity {
   void editNote(const std::string& path, const std::string& title);
   bool handleVaultSequenceStep(bool next);
   void promptVaultAccess();
+  void migrateLockedNotes();
   bool loadNote(const std::string& path, std::string& text) const;
   bool noteContains(const std::string& path, const std::string& needle) const;
   bool saveNote(const std::string& path, const std::string& text) const;
