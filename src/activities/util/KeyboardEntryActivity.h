@@ -35,6 +35,10 @@ class KeyboardEntryActivity : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
 
+  // Exposed for specialized editors that must persist in-progress text when
+  // the activity is torn down by deep sleep rather than completed normally.
+  const std::string& currentText() const { return text; }
+
  private:
   std::string title;
   std::string text;
