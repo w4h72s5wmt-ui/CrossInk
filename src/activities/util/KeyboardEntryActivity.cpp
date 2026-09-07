@@ -575,6 +575,8 @@ void KeyboardEntryActivity::loop() {
   int ty = 0;
 
   if (mappedInput.wasScreenTapped(tx, ty)) {
+    if (handleHeaderActionTap(tx, ty)) return;
+
     if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
       const fui::Rect bar = predictiveBarRect();
       if (tx >= bar.x && tx < bar.x + bar.width && ty >= bar.y && ty < bar.y + bar.height) {
@@ -807,10 +809,11 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 
   const Rect header{0, metrics.topPadding, pageWidth, TouchHeaderBackButton::height(metrics, mappedInput)};
   if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, header, title.c_str(), false);
+    TouchHeaderBackButton::draw(renderer, header, title.c_str(), false, headerActionReserveWidth());
   } else {
     GUI.drawHeader(renderer, header, title.c_str());
   }
+  drawHeaderAction();
 
   const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
   const int inputStartY = metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput) +

@@ -3,11 +3,17 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <esp_random.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/sha256.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <memory>
+#include <vector>
 #include <utility>
 
 #include "MappedInputManager.h"
@@ -26,7 +32,17 @@ constexpr int kSideButtonWidth = 52;
 constexpr int kSearchClearWidth = 44;
 constexpr int kDeleteButtonWidth = 48;
 constexpr int kRenameButtonWidth = 44;
+constexpr int kLockButtonWidth = 48;
 constexpr int kRowHeight = 58;
+constexpr size_t kPatternLength = 6;
+constexpr size_t kLegacyPatternLength = 4;
+constexpr size_t kMaxEncryptedPlaintextBytes = 32 * 1024;
+constexpr const char* kVaultFingerprintPath = "/Notes/.vault";
+constexpr size_t kCryptoMagicBytes = 8;
+constexpr size_t kCryptoNonceBytes = 12;
+constexpr size_t kCryptoTagBytes = 16;
+constexpr size_t kCryptoKeyBytes = 32;
+constexpr uint8_t kCryptoMagic[kCryptoMagicBytes] = {'C', 'R', 'O', 'S', 'S', 'N', 'T', '1'};
 constexpr int kRowSidePadding = 16;
 constexpr int kCornerRadius = 6;
 
@@ -94,6 +110,315 @@ void drawTrashIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
   renderer.drawLine(x + iconWidth - 7, y + 9, x + iconWidth - 7, y + iconHeight - 3, 1, black);
 }
 
+void drawLockIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
+  const int bodyW = 20;
+  const int bodyH = 16;
+  const int bodyX = rect.x + (rect.width - bodyW) / 2;
+  const int bodyY = rect.y + rect.height / 2;
+  const int shackleW = 14;
+  const int shackleH = 12;
+  const int shackleX = rect.x + (rect.width - shackleW) / 2;
+  const int shackleY = bodyY - shackleH + 2;
+  renderer.drawRoundedRect(shackleX, shackleY, shackleW, shackleH, 2, 6, black);
+  renderer.fillRect(bodyX, bodyY, bodyW, bodyH, black);
+  renderer.fillRect(bodyX + bodyW / 2 - 1, bodyY + 5, 3, 7, !black);
+}
+
+std::string lockMarkerPath(const std::string& notePath) { return notePath + ".lock"; }
+
+bool noteLockedByPath(const std::string& notePath) { return Storage.exists(lockMarkerPath(notePath).c_str()); }
+
+bool noteLockedByFilename(const std::string& filename) {
+  return noteLockedByPath(std::string("/Notes") + "/" + filename);
+}
+
+bool createLockMarker(const std::string& notePath) {
+  const std::string marker = lockMarkerPath(notePath);
+  FsFile file = Storage.open(marker.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const uint8_t value = 1;
+  const size_t written = file.write(&value, 1);
+  file.close();
+  return written == 1;
+}
+
+void removeLockMarker(const std::string& notePath) { Storage.remove(lockMarkerPath(notePath).c_str()); }
+
+uint64_t patternFingerprint(const std::string& pattern) {
+  // Salted fingerprint only: this is a privacy gate, not note-content encryption.
+  uint64_t hash = UINT64_C(1469598103934665603);
+  static constexpr char salt[] = "CrossInk-Notes-Vault-v1";
+  for (const unsigned char c : std::string(salt) + pattern) {
+    hash ^= c;
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+bool readVaultFingerprint(uint64_t& fingerprint) {
+  FsFile file = Storage.open(kVaultFingerprintPath, O_RDONLY);
+  if (!file) return false;
+  if (file.size() != sizeof(fingerprint)) {
+    file.close();
+    return false;
+  }
+  const int read = file.read(reinterpret_cast<uint8_t*>(&fingerprint), sizeof(fingerprint));
+  file.close();
+  return read == static_cast<int>(sizeof(fingerprint));
+}
+
+bool writeVaultFingerprint(const uint64_t fingerprint) {
+  FsFile file = Storage.open(kVaultFingerprintPath, O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const size_t written = file.write(reinterpret_cast<const uint8_t*>(&fingerprint), sizeof(fingerprint));
+  file.close();
+  return written == sizeof(fingerprint);
+}
+
+class VaultPatternActivity final : public Activity {
+ public:
+  VaultPatternActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const bool verify,
+                       const uint64_t expectedFingerprint)
+      : Activity("NotesVaultPattern", renderer, mappedInput),
+        verify(verify),
+        expectedFingerprint(expectedFingerprint) {}
+
+  void onEnter() override {
+    Activity::onEnter();
+    requestUpdate();
+  }
+
+  void loop() override {
+    int tx = 0;
+    int ty = 0;
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      for (int i = 0; i < 9; ++i) {
+        if (pointInRect(cellRect(i), tx, ty)) {
+          appendCell(i);
+          return;
+        }
+      }
+    }
+
+    if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+      hardwareSelection = true;
+      selectedCell = (selectedCell + 6) % 9;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+      hardwareSelection = true;
+      selectedCell = (selectedCell + 3) % 9;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+      hardwareSelection = true;
+      selectedCell = selectedCell % 3 == 0 ? selectedCell + 2 : selectedCell - 1;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      hardwareSelection = true;
+      selectedCell = selectedCell % 3 == 2 ? selectedCell - 2 : selectedCell + 1;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      appendCell(selectedCell);
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      ActivityResult cancelled;
+      cancelled.isCancelled = true;
+      setResult(std::move(cancelled));
+      finish();
+    }
+  }
+
+  void render(RenderLock&&) override {
+    renderer.clearScreen();
+    for (int i = 0; i < 9; ++i) {
+      const Rect rect = cellRect(i);
+      renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 8, true);
+      if (hardwareSelection && i == selectedCell) {
+        renderer.drawRoundedRect(rect.x + 4, rect.y + 4, rect.width - 8, rect.height - 8, 2, 6, true);
+      }
+    }
+    if (invalidPattern) renderer.drawCenteredText(UI_12_FONT_ID, 12, "Code incorrect", true);
+    renderer.displayBuffer();
+  }
+
+ private:
+  bool verify = false;
+  uint64_t expectedFingerprint = 0;
+  std::string pattern;
+  int selectedCell = 4;
+  bool hardwareSelection = false;
+  bool invalidPattern = false;
+
+  Rect cellRect(const int index) const {
+    constexpr int gap = 12;
+    const int width = renderer.getScreenWidth();
+    const int height = renderer.getScreenHeight();
+    const int cell = std::max(1, std::min((width - gap * 4) / 3, (height - gap * 4) / 3));
+    const int gridW = cell * 3 + gap * 2;
+    const int gridH = cell * 3 + gap * 2;
+    const int startX = (width - gridW) / 2;
+    const int startY = (height - gridH) / 2;
+    const int row = index / 3;
+    const int col = index % 3;
+    return Rect{startX + col * (cell + gap), startY + row * (cell + gap), cell, cell};
+  }
+
+  void appendCell(const int index) {
+    invalidPattern = false;
+    pattern.push_back(static_cast<char>('0' + index));
+    if (verify && pattern.size() == kLegacyPatternLength &&
+        patternFingerprint(pattern) == expectedFingerprint) {
+      setResult(ActivityResult{KeyboardResult{pattern}});
+      finish();
+      return;
+    }
+    if (pattern.size() < kPatternLength) {
+      requestUpdate();
+      return;
+    }
+    const uint64_t fingerprint = patternFingerprint(pattern);
+    if (verify && fingerprint != expectedFingerprint) {
+      pattern.clear();
+      invalidPattern = true;
+      requestUpdate();
+      return;
+    }
+    setResult(ActivityResult{KeyboardResult{pattern}});
+    finish();
+  }
+};
+
+
+bool deriveVaultKey(const std::string& pattern, std::array<uint8_t, kCryptoKeyBytes>& key) {
+  if (pattern.size() != kPatternLength && pattern.size() != kLegacyPatternLength) return false;
+  static constexpr char domain[] = "CrossInk Notes AES-256-GCM v1";
+  std::array<uint8_t, sizeof(domain) - 1 + kPatternLength> seed{};
+  memcpy(seed.data(), domain, sizeof(domain) - 1);
+  memcpy(seed.data() + sizeof(domain) - 1, pattern.data(), pattern.size());
+  const size_t seedSize = sizeof(domain) - 1 + pattern.size();
+  return mbedtls_sha256(seed.data(), seedSize, key.data(), 0) == 0;
+}
+
+bool isEncryptedPayload(const uint8_t* data, const size_t size) {
+  return size >= kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes &&
+         memcmp(data, kCryptoMagic, kCryptoMagicBytes) == 0;
+}
+
+bool readRawNoteFile(const std::string& path, std::vector<uint8_t>& bytes) {
+  bytes.clear();
+  FsFile file;
+  if (!Storage.openFileForRead("NOTES", path, file)) return false;
+  const uint32_t size = file.size();
+  if (size > kMaxEncryptedPlaintextBytes + kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes) {
+    file.close();
+    return false;
+  }
+  bytes.resize(size);
+  if (size > 0 && file.read(bytes.data(), size) != static_cast<int>(size)) {
+    file.close();
+    bytes.clear();
+    return false;
+  }
+  file.close();
+  return true;
+}
+
+bool writeRawNoteFile(const std::string& path, const uint8_t* data, const size_t size) {
+  FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const size_t written = size == 0 ? 0 : file.write(data, size);
+  file.close();
+  return written == size;
+}
+
+bool saveEncryptedNoteFile(const std::string& path, const std::string& text, const std::string& pattern) {
+  if (text.size() > kMaxEncryptedPlaintextBytes) return false;
+  std::array<uint8_t, kCryptoKeyBytes> key{};
+  if (!deriveVaultKey(pattern, key)) return false;
+
+  std::array<uint8_t, kCryptoNonceBytes> nonce{};
+  esp_fill_random(nonce.data(), nonce.size());
+
+  const size_t headerBytes = kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes;
+  std::vector<uint8_t> payload(headerBytes + text.size());
+  memcpy(payload.data(), kCryptoMagic, kCryptoMagicBytes);
+  memcpy(payload.data() + kCryptoMagicBytes, nonce.data(), nonce.size());
+  uint8_t* tag = payload.data() + kCryptoMagicBytes + kCryptoNonceBytes;
+  uint8_t* cipher = payload.data() + headerBytes;
+
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key.data(), key.size() * 8);
+  if (rc == 0) {
+    rc = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, text.size(), nonce.data(), nonce.size(),
+                                   payload.data(), kCryptoMagicBytes + kCryptoNonceBytes,
+                                   reinterpret_cast<const uint8_t*>(text.data()), cipher, kCryptoTagBytes, tag);
+  }
+  mbedtls_gcm_free(&gcm);
+  std::fill(key.begin(), key.end(), 0);
+  if (rc != 0) return false;
+  return writeRawNoteFile(path, payload.data(), payload.size());
+}
+
+bool loadProtectedNoteFile(const std::string& path, const std::string& pattern, std::string& text) {
+  text.clear();
+  std::vector<uint8_t> payload;
+  if (!readRawNoteFile(path, payload)) return false;
+
+  if (!isEncryptedPayload(payload.data(), payload.size())) {
+    text.assign(reinterpret_cast<const char*>(payload.data()), payload.size());
+    return text.size() <= kMaxEncryptedPlaintextBytes;
+  }
+
+  const size_t headerBytes = kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes;
+  const size_t cipherBytes = payload.size() - headerBytes;
+  if (cipherBytes > kMaxEncryptedPlaintextBytes) return false;
+
+  std::array<uint8_t, kCryptoKeyBytes> key{};
+  if (!deriveVaultKey(pattern, key)) return false;
+  const uint8_t* nonce = payload.data() + kCryptoMagicBytes;
+  const uint8_t* tag = nonce + kCryptoNonceBytes;
+  const uint8_t* cipher = tag + kCryptoTagBytes;
+  text.resize(cipherBytes);
+
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key.data(), key.size() * 8);
+  if (rc == 0) {
+    rc = mbedtls_gcm_auth_decrypt(&gcm, cipherBytes, nonce, kCryptoNonceBytes, payload.data(),
+                                  kCryptoMagicBytes + kCryptoNonceBytes, tag, kCryptoTagBytes, cipher,
+                                  reinterpret_cast<uint8_t*>(text.data()));
+  }
+  mbedtls_gcm_free(&gcm);
+  std::fill(key.begin(), key.end(), 0);
+  if (rc != 0) {
+    text.clear();
+    return false;
+  }
+  return true;
+}
+
+bool noteFileIsEncrypted(const std::string& path) {
+  FsFile file;
+  if (!Storage.openFileForRead("NOTES", path, file)) return false;
+  if (file.size() < kCryptoMagicBytes) {
+    file.close();
+    return false;
+  }
+  std::array<uint8_t, kCryptoMagicBytes> magic{};
+  const int count = file.read(magic.data(), magic.size());
+  file.close();
+  return count == static_cast<int>(magic.size()) && memcmp(magic.data(), kCryptoMagic, kCryptoMagicBytes) == 0;
+}
+
 bool saveNoteFile(const std::string& path, const std::string& text) {
   FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   if (!file) return false;
@@ -105,20 +430,75 @@ bool saveNoteFile(const std::string& path, const std::string& text) {
 class NotesKeyboardActivity final : public KeyboardEntryActivity {
  public:
   NotesKeyboardActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string title,
-                        std::string initialText, const size_t maxLength, std::string path)
+                        std::string initialText, const size_t maxLength, std::string path, std::string vaultPattern)
       : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
                               InputType::Multiline),
-        path(std::move(path)) {}
+        path(std::move(path)), vaultPattern(std::move(vaultPattern)) {}
 
   void onExit() override {
-    if (!saveNoteFile(path, currentText())) {
-      LOG_ERR("NOTES", "Failed to autosave note before editor exit: %s", path.c_str());
-    }
+    const bool saved = noteLockedByPath(path) ? saveEncryptedNoteFile(path, currentText(), vaultPattern)
+                                               : saveNoteFile(path, currentText());
+    if (!saved) LOG_ERR("NOTES", "Failed to autosave note before editor exit: %s", path.c_str());
+    std::fill(vaultPattern.begin(), vaultPattern.end(), '\0');
+    vaultPattern.clear();
     KeyboardEntryActivity::onExit();
   }
 
+ protected:
+  bool handleHeaderActionTap(const int x, const int y) override {
+    if (!pointInRect(lockButtonRect(), x, y)) return false;
+    if (!noteLockedByPath(path)) beginLock();
+    return true;
+  }
+
+  int headerActionReserveWidth() const override { return kLockButtonWidth; }
+
+  void drawHeaderAction() override { drawLockIcon(renderer, lockButtonRect(), true); }
+
  private:
   std::string path;
+  std::string vaultPattern;
+
+  Rect lockButtonRect() const {
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    return Rect{renderer.getScreenWidth() - kLockButtonWidth, header.y, kLockButtonWidth, header.height};
+  }
+
+  void beginLock() {
+    uint64_t expectedFingerprint = 0;
+    const bool hasVault = readVaultFingerprint(expectedFingerprint);
+    startActivityForResult(
+        std::make_unique<VaultPatternActivity>(renderer, mappedInput, hasVault, expectedFingerprint),
+        [this, hasVault](const ActivityResult& result) {
+          if (result.isCancelled) {
+            requestUpdate();
+            return;
+          }
+          const auto* pattern = std::get_if<KeyboardResult>(&result.data);
+          if (!pattern || pattern->text.size() != kPatternLength) {
+            requestUpdate();
+            return;
+          }
+          if (!hasVault && !writeVaultFingerprint(patternFingerprint(pattern->text))) {
+            LOG_ERR("NOTES", "Failed to save Notes vault fingerprint");
+            requestUpdate();
+            return;
+          }
+          if (!saveEncryptedNoteFile(path, currentText(), pattern->text)) {
+            LOG_ERR("NOTES", "Failed to encrypt note: %s", path.c_str());
+            requestUpdate();
+            return;
+          }
+          if (!createLockMarker(path)) {
+            saveNoteFile(path, currentText());
+            LOG_ERR("NOTES", "Failed to lock note: %s", path.c_str());
+            requestUpdate();
+            return;
+          }
+          vaultPattern = pattern->text;
+          finish();
+        });
+  }
 };
 }  // namespace
 
@@ -138,6 +518,9 @@ void NotesActivity::onEnter() {
 void NotesActivity::onExit() {
   filteredNotes.clear();
   notes.clear();
+  std::fill(vaultPattern.begin(), vaultPattern.end(), '\0');
+  vaultPattern.clear();
+  vaultMode = false;
   Activity::onExit();
 }
 
@@ -167,16 +550,13 @@ void NotesActivity::reloadNotes() {
 void NotesActivity::applyFilter() {
   filteredNotes.clear();
   filteredNotes.reserve(notes.size());
-  if (searchQuery.empty()) {
-    for (size_t i = 0; i < notes.size(); ++i) filteredNotes.push_back(i);
-  } else {
-    const std::string needle = lowerAscii(searchQuery);
-    for (size_t i = 0; i < notes.size(); ++i) {
-      const auto& filename = notes[i];
-      bool matches = lowerAscii(displayName(filename)).find(needle) != std::string::npos;
-      if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle);
-      if (matches) filteredNotes.push_back(i);
-    }
+  const std::string needle = lowerAscii(searchQuery);
+  for (size_t i = 0; i < notes.size(); ++i) {
+    const auto& filename = notes[i];
+    if (!vaultMode && noteLockedByFilename(filename)) continue;
+    bool matches = searchQuery.empty() || lowerAscii(displayName(filename)).find(needle) != std::string::npos;
+    if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle);
+    if (matches) filteredNotes.push_back(i);
   }
 
   if (filteredNotes.empty()) {
@@ -225,6 +605,7 @@ std::string NotesActivity::uniquePathForTitle(const std::string& title) const {
 }
 
 bool NotesActivity::loadNote(const std::string& path, std::string& text) const {
+  if (noteLockedByPath(path)) return loadProtectedNoteFile(path, vaultPattern, text);
   text.clear();
   FsFile file;
   if (!Storage.openFileForRead("NOTES", path, file)) return false;
@@ -247,6 +628,11 @@ bool NotesActivity::loadNote(const std::string& path, std::string& text) const {
 
 bool NotesActivity::noteContains(const std::string& path, const std::string& needle) const {
   if (needle.empty()) return true;
+  if (noteLockedByPath(path)) {
+    std::string plain;
+    if (!loadNote(path, plain)) return false;
+    return lowerAscii(std::move(plain)).find(needle) != std::string::npos;
+  }
   constexpr size_t kSearchBufferSize = 512;
   constexpr size_t kMaxSearchBytes = 80;
   if (needle.size() > kMaxSearchBytes) return false;
@@ -291,6 +677,7 @@ bool NotesActivity::noteContains(const std::string& path, const std::string& nee
 
 bool NotesActivity::saveNote(const std::string& path, const std::string& text) const {
   if (text.size() > kMaxNoteBytes) return false;
+  if (noteLockedByPath(path)) return saveEncryptedNoteFile(path, text, vaultPattern);
   return saveNoteFile(path, text);
 }
 
@@ -299,7 +686,8 @@ void NotesActivity::editNote(const std::string& path, const std::string& title) 
   if (!loadNote(path, initialText)) initialText.clear();
 
   startActivityForResult(
-      std::make_unique<NotesKeyboardActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes, path),
+      std::make_unique<NotesKeyboardActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes, path,
+                                              noteLockedByPath(path) ? vaultPattern : std::string{}),
       [this](const ActivityResult&) {
         reloadNotes();
         applyFilter();
@@ -335,10 +723,11 @@ void NotesActivity::createNote() {
 void NotesActivity::renameNote(const std::string& filename) {
   const std::string oldTitle = displayName(filename);
   const std::string oldPath = std::string(kNotesDir) + "/" + filename;
+  const bool wasLocked = noteLockedByPath(oldPath);
   startActivityForResult(
       std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_TITLE), oldTitle, 48,
                                               InputType::Text, 1),
-      [this, filename, oldPath](const ActivityResult& result) {
+      [this, filename, oldPath, wasLocked](const ActivityResult& result) {
         if (result.isCancelled) {
           requestUpdate();
           return;
@@ -363,17 +752,26 @@ void NotesActivity::renameNote(const std::string& filename) {
           return;
         }
         const std::string newPath = uniquePathForTitle(keyboard->text);
-        if (!saveNote(newPath, content)) {
+        const bool wroteNew = wasLocked ? saveEncryptedNoteFile(newPath, content, vaultPattern) : saveNote(newPath, content);
+        if (!wroteNew) {
           LOG_ERR("NOTES", "Failed to write renamed note: %s", newPath.c_str());
+          requestUpdate();
+          return;
+        }
+        if (wasLocked && !createLockMarker(newPath)) {
+          Storage.remove(newPath.c_str());
+          LOG_ERR("NOTES", "Failed to preserve lock while renaming note: %s", oldPath.c_str());
           requestUpdate();
           return;
         }
         if (!Storage.remove(oldPath.c_str())) {
           Storage.remove(newPath.c_str());
+          if (wasLocked) removeLockMarker(newPath);
           LOG_ERR("NOTES", "Failed to remove old note after rename: %s", oldPath.c_str());
           requestUpdate();
           return;
         }
+        if (wasLocked) removeLockMarker(oldPath);
         reloadNotes();
         applyFilter();
         requestUpdate();
@@ -404,6 +802,125 @@ void NotesActivity::openNoteAt(const int index) {
 }
 
 void NotesActivity::openSelectedNote() { openNoteAt(selectorIndex); }
+
+bool NotesActivity::handleVaultSequenceStep(const bool next) {
+  if (vaultMode) {
+    vaultSequencePos = 0;
+    return false;
+  }
+  static constexpr bool sequence[] = {true, false, true, false};
+  if (next == sequence[vaultSequencePos]) {
+    ++vaultSequencePos;
+  } else {
+    vaultSequencePos = next ? 1 : 0;
+  }
+  if (vaultSequencePos < sizeof(sequence) / sizeof(sequence[0])) return false;
+  vaultSequencePos = 0;
+  promptVaultAccess();
+  return true;
+}
+
+void NotesActivity::promptVaultAccess() {
+  uint64_t expectedFingerprint = 0;
+  if (!readVaultFingerprint(expectedFingerprint)) {
+    requestUpdate();
+    return;
+  }
+  startActivityForResult(
+      std::make_unique<VaultPatternActivity>(renderer, mappedInput, true, expectedFingerprint),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          requestUpdate();
+          return;
+        }
+        const auto* pattern = std::get_if<KeyboardResult>(&result.data);
+        if (!pattern || (pattern->text.size() != kPatternLength &&
+                         pattern->text.size() != kLegacyPatternLength)) {
+          requestUpdate();
+          return;
+        }
+        reloadNotes();
+        if (pattern->text.size() == kLegacyPatternLength) {
+          bool hasLegacyEncryptedPayload = false;
+          for (const auto& filename : notes) {
+            const std::string path = std::string(kNotesDir) + "/" + filename;
+            if (noteLockedByPath(path) && noteFileIsEncrypted(path)) {
+              hasLegacyEncryptedPayload = true;
+              break;
+            }
+          }
+          if (hasLegacyEncryptedPayload) {
+            vaultPattern = pattern->text;
+            vaultMode = true;
+            searchQuery.clear();
+            selectorIndex = 0;
+            topIndex = 0;
+            applyFilter();
+            requestUpdate();
+            return;
+          }
+
+          startActivityForResult(
+              std::make_unique<VaultPatternActivity>(renderer, mappedInput, false, 0),
+              [this](const ActivityResult& upgradeResult) {
+                if (upgradeResult.isCancelled) {
+                  requestUpdate();
+                  return;
+                }
+                const auto* newPattern = std::get_if<KeyboardResult>(&upgradeResult.data);
+                if (!newPattern || newPattern->text.size() != kPatternLength) {
+                  requestUpdate();
+                  return;
+                }
+                if (!writeVaultFingerprint(patternFingerprint(newPattern->text))) {
+                  LOG_ERR("NOTES", "Failed to upgrade Notes vault fingerprint");
+                  requestUpdate();
+                  return;
+                }
+                vaultPattern = newPattern->text;
+                vaultMode = true;
+                searchQuery.clear();
+                selectorIndex = 0;
+                topIndex = 0;
+                reloadNotes();
+                migrateLockedNotes();
+                applyFilter();
+                requestUpdate();
+              });
+          return;
+        }
+
+        if (pattern->text.size() != kPatternLength) {
+          requestUpdate();
+          return;
+        }
+        vaultPattern = pattern->text;
+        vaultMode = true;
+        searchQuery.clear();
+        selectorIndex = 0;
+        topIndex = 0;
+        migrateLockedNotes();
+        applyFilter();
+        requestUpdate();
+      });
+}
+
+
+void NotesActivity::migrateLockedNotes() {
+  if (vaultPattern.size() != kPatternLength) return;
+  for (const auto& filename : notes) {
+    const std::string path = std::string(kNotesDir) + "/" + filename;
+    if (!noteLockedByPath(path) || noteFileIsEncrypted(path)) continue;
+    std::string plain;
+    if (!loadProtectedNoteFile(path, vaultPattern, plain)) {
+      LOG_ERR("NOTES", "Failed to read legacy locked note for encryption: %s", path.c_str());
+      continue;
+    }
+    if (!saveEncryptedNoteFile(path, plain, vaultPattern)) {
+      LOG_ERR("NOTES", "Failed to migrate locked note to encrypted storage: %s", path.c_str());
+    }
+  }
+}
 
 void NotesActivity::loop() {
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -457,7 +974,9 @@ void NotesActivity::loop() {
         const Rect rowRect{kTopMargin, listTop + row * kRowHeight, width - kTopMargin * 2, kRowHeight - 2};
         const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                               rowRect.height};
-        const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+        const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,
+                            vaultMode ? kLockButtonWidth : 0, rowRect.height};
+        const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
         if (pointInRect(deleteRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           const std::string path = std::string(kNotesDir) + "/" + filename;
@@ -471,6 +990,8 @@ void NotesActivity::loop() {
                 }
                 if (!Storage.remove(path.c_str())) {
                   LOG_ERR("NOTES", "Failed to delete note: %s", path.c_str());
+                } else {
+                  removeLockMarker(path);
                 }
                 reloadNotes();
                 applyFilter();
@@ -478,6 +999,8 @@ void NotesActivity::loop() {
               });
           return;
         }
+        const std::string& tappedFilename = notes[filteredNotes[static_cast<size_t>(index)]];
+        if (vaultMode && noteLockedByFilename(tappedFilename) && pointInRect(lockRect, tx, ty)) return;
         if (pointInRect(renameRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           renameNote(filename);
@@ -490,19 +1013,25 @@ void NotesActivity::loop() {
   }
 
   const int itemCount = static_cast<int>(filteredNotes.size());
-  if (itemCount > 0) {
-    const auto moveSelection = [this, itemCount, visibleRows](const int next) {
-      selectorIndex = next;
-      if (selectorIndex < topIndex) topIndex = selectorIndex;
-      if (selectorIndex >= topIndex + visibleRows) topIndex = selectorIndex - visibleRows + 1;
-      topIndex = std::clamp(topIndex, 0, std::max(0, itemCount - visibleRows));
-      requestUpdate();
-    };
-    buttonNavigator.onNextRelease(
-        [this, itemCount, &moveSelection] { moveSelection(ButtonNavigator::nextIndex(selectorIndex, itemCount)); });
-    buttonNavigator.onPreviousRelease(
-        [this, itemCount, &moveSelection] { moveSelection(ButtonNavigator::previousIndex(selectorIndex, itemCount)); });
+  const auto moveSelection = [this, itemCount, visibleRows](const int next) {
+    if (itemCount <= 0) return;
+    selectorIndex = next;
+    if (selectorIndex < topIndex) topIndex = selectorIndex;
+    if (selectorIndex >= topIndex + visibleRows) topIndex = selectorIndex - visibleRows + 1;
+    topIndex = std::clamp(topIndex, 0, std::max(0, itemCount - visibleRows));
+    requestUpdate();
+  };
 
+  buttonNavigator.onNextRelease([this, itemCount, &moveSelection] {
+    if (handleVaultSequenceStep(true)) return;
+    if (itemCount > 0) moveSelection(ButtonNavigator::nextIndex(selectorIndex, itemCount));
+  });
+  buttonNavigator.onPreviousRelease([this, itemCount, &moveSelection] {
+    if (handleVaultSequenceStep(false)) return;
+    if (itemCount > 0) moveSelection(ButtonNavigator::previousIndex(selectorIndex, itemCount));
+  });
+
+  if (itemCount > 0) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       openSelectedNote();
       return;
@@ -582,7 +1111,9 @@ void NotesActivity::render(RenderLock&&) {
       const Rect rowRect{kTopMargin, rowY, width - kTopMargin * 2, kRowHeight - 2};
       const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                             rowRect.height};
-      const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+      const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,
+                          vaultMode ? kLockButtonWidth : 0, rowRect.height};
+      const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
       const bool selected = index == selectorIndex;
       if (selected) {
         auto target = makeUiTarget(renderer);
@@ -590,13 +1121,16 @@ void NotesActivity::render(RenderLock&&) {
                                       static_cast<int16_t>(rowRect.width), static_cast<int16_t>(rowRect.height)},
                     freeink::ui::Paint::dither(freeink::ui::Color::LightGray));
       }
-      const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(notes[filteredNotes[static_cast<size_t>(index)]]).c_str(),
+      const std::string& rowFilename = notes[filteredNotes[static_cast<size_t>(index)]];
+      const bool rowLocked = noteLockedByFilename(rowFilename);
+      const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(rowFilename).c_str(),
                                                        rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -
-                                                           kDeleteButtonWidth);
+                                                           kDeleteButtonWidth - (vaultMode ? kLockButtonWidth : 0));
       const int textH = renderer.getLineHeight(UI_12_FONT_ID);
       renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, rowRect.y + (rowRect.height - textH) / 2,
                         title.c_str(), true);
       drawRenameIcon(renderer, renameRect, true);
+      if (vaultMode && rowLocked) drawLockIcon(renderer, lockRect, true);
       drawTrashIcon(renderer, deleteRect, true);
     }
   }

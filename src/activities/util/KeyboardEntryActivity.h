@@ -39,6 +39,13 @@ class KeyboardEntryActivity : public Activity {
   // the activity is torn down by deep sleep rather than completed normally.
   const std::string& currentText() const { return text; }
 
+ protected:
+  // Optional right-side header action for specialized editors. The default
+  // implementation is inert so existing keyboard users are unchanged.
+  virtual bool handleHeaderActionTap(int, int) { return false; }
+  virtual int headerActionReserveWidth() const { return 0; }
+  virtual void drawHeaderAction() {}
+
  private:
   std::string title;
   std::string text;
