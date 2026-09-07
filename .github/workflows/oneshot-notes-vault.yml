@@ -1,0 +1,625 @@
+name: One-shot Notes vault implementation
+
+on:
+  push:
+    branches: [notes-lock-vault-34142490266]
+    paths:
+      - .github/workflows/oneshot-notes-vault.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact feature branch
+        uses: actions/checkout@v6
+        with:
+          ref: notes-lock-vault-34142490266
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Implement Notes vault
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected 1 match, got {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Generic optional action hook for the shared keyboard header.
+          replace_once(
+              'src/activities/util/KeyboardEntryActivity.h',
+              '  const std::string& currentText() const { return text; }\n\n private:\n',
+              '''  const std::string& currentText() const { return text; }\n\n protected:\n  // Optional right-side header action for specialized editors. The default\n  // implementation is inert so existing keyboard users are unchanged.\n  virtual bool handleHeaderActionTap(int, int) { return false; }\n  virtual int headerActionReserveWidth() const { return 0; }\n  virtual void drawHeaderAction() {}\n\n private:\n''',
+              'keyboard header hooks')
+
+          replace_once(
+              'src/activities/util/KeyboardEntryActivity.cpp',
+              '  if (mappedInput.wasScreenTapped(tx, ty)) {\n    if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {\n',
+              '''  if (mappedInput.wasScreenTapped(tx, ty)) {\n    if (handleHeaderActionTap(tx, ty)) return;\n\n    if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {\n''',
+              'keyboard header tap')
+
+          replace_once(
+              'src/activities/util/KeyboardEntryActivity.cpp',
+              '''  if (mappedInput.hasTouchHardware()) {\n    TouchHeaderBackButton::draw(renderer, header, title.c_str(), false);\n  } else {\n    GUI.drawHeader(renderer, header, title.c_str());\n  }\n\n  const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);\n''',
+              '''  if (mappedInput.hasTouchHardware()) {\n    TouchHeaderBackButton::draw(renderer, header, title.c_str(), false, headerActionReserveWidth());\n  } else {\n    GUI.drawHeader(renderer, header, title.c_str());\n  }\n  drawHeaderAction();\n\n  const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);\n''',
+              'keyboard header render')
+
+          # Notes activity state.
+          replace_once(
+              'src/activities/home/NotesActivity.h',
+              '#include <cstddef>\n#include <string>\n',
+              '#include <cstddef>\n#include <cstdint>\n#include <string>\n',
+              'notes cstdint include')
+
+          replace_once(
+              'src/activities/home/NotesActivity.h',
+              '''  int selectorIndex = 0;\n  int topIndex = 0;\n\n  void reloadNotes();\n''',
+              '''  int selectorIndex = 0;\n  int topIndex = 0;\n  bool vaultMode = false;\n  uint8_t vaultSequencePos = 0;\n\n  void reloadNotes();\n''',
+              'notes vault state')
+
+          replace_once(
+              'src/activities/home/NotesActivity.h',
+              '''  void openSelectedNote();\n  void openNoteAt(int index);\n  void editNote(const std::string& path, const std::string& title);\n''',
+              '''  void openSelectedNote();\n  void openNoteAt(int index);\n  void editNote(const std::string& path, const std::string& title);\n  bool handleVaultSequenceStep(bool next);\n  void promptVaultAccess();\n''',
+              'notes vault methods')
+
+          notes = Path('src/activities/home/NotesActivity.cpp')
+          text = notes.read_text()
+
+          text = text.replace('#include <cctype>\n#include <memory>\n', '#include <cctype>\n#include <cstdint>\n#include <memory>\n', 1)
+          text = text.replace(
+              'constexpr int kRenameButtonWidth = 44;\nconstexpr int kRowHeight = 58;\n',
+              '''constexpr int kRenameButtonWidth = 44;\nconstexpr int kLockButtonWidth = 48;\nconstexpr int kRowHeight = 58;\nconstexpr size_t kPatternLength = 4;\nconstexpr const char* kVaultFingerprintPath = "/Notes/.vault";\n''', 1)
+
+          trash_anchor = '''void drawTrashIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {\n  const int iconWidth = 18;\n  const int iconHeight = 22;\n  const int x = rect.x + (rect.width - iconWidth) / 2;\n  const int y = rect.y + (rect.height - iconHeight) / 2;\n\n  renderer.drawLine(x, y + 4, x + iconWidth - 1, y + 4, 2, black);\n  renderer.drawLine(x + 5, y + 1, x + iconWidth - 6, y + 1, 2, black);\n  renderer.drawRect(x + 2, y + 6, iconWidth - 4, iconHeight - 6, 1, black);\n  renderer.drawLine(x + 6, y + 9, x + 6, y + iconHeight - 3, 1, black);\n  renderer.drawLine(x + iconWidth - 7, y + 9, x + iconWidth - 7, y + iconHeight - 3, 1, black);\n}\n\n'''
+          if text.count(trash_anchor) != 1:
+              raise SystemExit('trash helper anchor mismatch')
+
+          vault_helpers = r'''void drawLockIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
+  const int bodyW = 20;
+  const int bodyH = 16;
+  const int bodyX = rect.x + (rect.width - bodyW) / 2;
+  const int bodyY = rect.y + rect.height / 2;
+  const int shackleW = 14;
+  const int shackleH = 12;
+  const int shackleX = rect.x + (rect.width - shackleW) / 2;
+  const int shackleY = bodyY - shackleH + 2;
+  renderer.drawRoundedRect(shackleX, shackleY, shackleW, shackleH, 2, 6, black);
+  renderer.fillRect(bodyX, bodyY, bodyW, bodyH, black);
+  renderer.fillRect(bodyX + bodyW / 2 - 1, bodyY + 5, 3, 7, !black);
+}
+
+std::string lockMarkerPath(const std::string& notePath) { return notePath + ".lock"; }
+
+bool noteLockedByPath(const std::string& notePath) { return Storage.exists(lockMarkerPath(notePath).c_str()); }
+
+bool noteLockedByFilename(const std::string& filename) {
+  return noteLockedByPath(std::string(NotesActivity::kNotesDir) + "/" + filename);
+}
+
+bool createLockMarker(const std::string& notePath) {
+  const std::string marker = lockMarkerPath(notePath);
+  FsFile file = Storage.open(marker.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const uint8_t value = 1;
+  const size_t written = file.write(&value, 1);
+  file.close();
+  return written == 1;
+}
+
+void removeLockMarker(const std::string& notePath) { Storage.remove(lockMarkerPath(notePath).c_str()); }
+
+uint64_t patternFingerprint(const std::string& pattern) {
+  // FNV-1a is sufficient here as a persisted fingerprint. The 4-tap pattern
+  // itself is intentionally a lightweight privacy gate, not file encryption.
+  uint64_t hash = UINT64_C(1469598103934665603);
+  static constexpr char salt[] = "CrossInk-Notes-Vault-v1";
+  for (const unsigned char c : std::string(salt) + pattern) {
+    hash ^= c;
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+bool readVaultFingerprint(uint64_t& fingerprint) {
+  FsFile file = Storage.open(kVaultFingerprintPath, O_RDONLY);
+  if (!file) return false;
+  if (file.size() != sizeof(fingerprint)) {
+    file.close();
+    return false;
+  }
+  const int read = file.read(reinterpret_cast<uint8_t*>(&fingerprint), sizeof(fingerprint));
+  file.close();
+  return read == static_cast<int>(sizeof(fingerprint));
+}
+
+bool writeVaultFingerprint(const uint64_t fingerprint) {
+  FsFile file = Storage.open(kVaultFingerprintPath, O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const size_t written = file.write(reinterpret_cast<const uint8_t*>(&fingerprint), sizeof(fingerprint));
+  file.close();
+  return written == sizeof(fingerprint);
+}
+
+class VaultPatternActivity final : public Activity {
+ public:
+  VaultPatternActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const bool verify,
+                       const uint64_t expectedFingerprint)
+      : Activity("NotesVaultPattern", renderer, mappedInput),
+        verify(verify),
+        expectedFingerprint(expectedFingerprint) {}
+
+  void onEnter() override {
+    Activity::onEnter();
+    requestUpdate();
+  }
+
+  void loop() override {
+    int tx = 0;
+    int ty = 0;
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      for (int i = 0; i < 9; ++i) {
+        if (pointInRect(cellRect(i), tx, ty)) {
+          appendCell(i);
+          return;
+        }
+      }
+    }
+
+    if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+      hardwareSelection = true;
+      selectedCell = (selectedCell + 6) % 9;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+      hardwareSelection = true;
+      selectedCell = (selectedCell + 3) % 9;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+      hardwareSelection = true;
+      selectedCell = selectedCell % 3 == 0 ? selectedCell + 2 : selectedCell - 1;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      hardwareSelection = true;
+      selectedCell = selectedCell % 3 == 2 ? selectedCell - 2 : selectedCell + 1;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      appendCell(selectedCell);
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      ActivityResult cancelled;
+      cancelled.isCancelled = true;
+      setResult(std::move(cancelled));
+      finish();
+    }
+  }
+
+  void render(RenderLock&&) override {
+    renderer.clearScreen();
+    for (int i = 0; i < 9; ++i) {
+      const Rect rect = cellRect(i);
+      renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 8, true);
+      if (hardwareSelection && i == selectedCell) {
+        renderer.drawRoundedRect(rect.x + 4, rect.y + 4, rect.width - 8, rect.height - 8, 2, 6, true);
+      }
+    }
+    if (invalidPattern) {
+      renderer.drawCenteredText(UI_12_FONT_ID, 12, "Code incorrect", true);
+    }
+    renderer.displayBuffer();
+  }
+
+ private:
+  bool verify = false;
+  uint64_t expectedFingerprint = 0;
+  std::string pattern;
+  int selectedCell = 4;
+  bool hardwareSelection = false;
+  bool invalidPattern = false;
+
+  Rect cellRect(const int index) const {
+    constexpr int gap = 12;
+    const int width = renderer.getScreenWidth();
+    const int height = renderer.getScreenHeight();
+    const int cell = std::max(1, std::min((width - gap * 4) / 3, (height - gap * 4) / 3));
+    const int gridW = cell * 3 + gap * 2;
+    const int gridH = cell * 3 + gap * 2;
+    const int startX = (width - gridW) / 2;
+    const int startY = (height - gridH) / 2;
+    const int row = index / 3;
+    const int col = index % 3;
+    return Rect{startX + col * (cell + gap), startY + row * (cell + gap), cell, cell};
+  }
+
+  void appendCell(const int index) {
+    invalidPattern = false;
+    pattern.push_back(static_cast<char>('0' + index));
+    if (pattern.size() < kPatternLength) {
+      requestUpdate();
+      return;
+    }
+    const uint64_t fingerprint = patternFingerprint(pattern);
+    if (verify && fingerprint != expectedFingerprint) {
+      pattern.clear();
+      invalidPattern = true;
+      requestUpdate();
+      return;
+    }
+    setResult(ActivityResult{KeyboardResult{pattern}});
+    finish();
+  }
+};
+
+'''
+          text = text.replace(trash_anchor, trash_anchor + vault_helpers, 1)
+
+          old_editor = r'''class NotesKeyboardActivity final : public KeyboardEntryActivity {
+ public:
+  NotesKeyboardActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string title,
+                        std::string initialText, const size_t maxLength, std::string path)
+      : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
+                              InputType::Multiline),
+        path(std::move(path)) {}
+
+  void onExit() override {
+    if (!saveNoteFile(path, currentText())) {
+      LOG_ERR("NOTES", "Failed to autosave note before editor exit: %s", path.c_str());
+    }
+    KeyboardEntryActivity::onExit();
+  }
+
+ private:
+  std::string path;
+};
+'''
+          new_editor = r'''class NotesKeyboardActivity final : public KeyboardEntryActivity {
+ public:
+  NotesKeyboardActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string title,
+                        std::string initialText, const size_t maxLength, std::string path)
+      : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
+                              InputType::Multiline),
+        path(std::move(path)) {}
+
+  void onExit() override {
+    if (!saveNoteFile(path, currentText())) {
+      LOG_ERR("NOTES", "Failed to autosave note before editor exit: %s", path.c_str());
+    }
+    KeyboardEntryActivity::onExit();
+  }
+
+ protected:
+  bool handleHeaderActionTap(const int x, const int y) override {
+    if (!pointInRect(lockButtonRect(), x, y)) return false;
+    if (!noteLockedByPath(path)) beginLock();
+    return true;
+  }
+
+  int headerActionReserveWidth() const override { return kLockButtonWidth; }
+
+  void drawHeaderAction() override { drawLockIcon(renderer, lockButtonRect(), true); }
+
+ private:
+  std::string path;
+
+  Rect lockButtonRect() const {
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    return Rect{renderer.getScreenWidth() - kLockButtonWidth, header.y, kLockButtonWidth, header.height};
+  }
+
+  void beginLock() {
+    uint64_t expectedFingerprint = 0;
+    const bool hasVault = readVaultFingerprint(expectedFingerprint);
+    startActivityForResult(
+        std::make_unique<VaultPatternActivity>(renderer, mappedInput, hasVault, expectedFingerprint),
+        [this, hasVault](const ActivityResult& result) {
+          if (result.isCancelled) {
+            requestUpdate();
+            return;
+          }
+          const auto* pattern = std::get_if<KeyboardResult>(&result.data);
+          if (!pattern || pattern->text.size() != kPatternLength) {
+            requestUpdate();
+            return;
+          }
+          if (!hasVault && !writeVaultFingerprint(patternFingerprint(pattern->text))) {
+            LOG_ERR("NOTES", "Failed to save Notes vault fingerprint");
+            requestUpdate();
+            return;
+          }
+          if (!createLockMarker(path)) {
+            LOG_ERR("NOTES", "Failed to lock note: %s", path.c_str());
+            requestUpdate();
+            return;
+          }
+          finish();
+        });
+  }
+};
+'''
+          if text.count(old_editor) != 1:
+              raise SystemExit('notes editor class anchor mismatch')
+          text = text.replace(old_editor, new_editor, 1)
+
+          apply_re = re.compile(r'void NotesActivity::applyFilter\(\) \{.*?\n\}\n\nstd::string NotesActivity::displayName', re.S)
+          apply_new = r'''void NotesActivity::applyFilter() {
+  filteredNotes.clear();
+  filteredNotes.reserve(notes.size());
+  const std::string needle = lowerAscii(searchQuery);
+  for (size_t i = 0; i < notes.size(); ++i) {
+    const auto& filename = notes[i];
+    if (noteLockedByFilename(filename) != vaultMode) continue;
+    bool matches = searchQuery.empty() || lowerAscii(displayName(filename)).find(needle) != std::string::npos;
+    if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle);
+    if (matches) filteredNotes.push_back(i);
+  }
+
+  if (filteredNotes.empty()) {
+    selectorIndex = 0;
+    topIndex = 0;
+  } else {
+    selectorIndex = std::clamp(selectorIndex, 0, static_cast<int>(filteredNotes.size()) - 1);
+    topIndex = std::clamp(topIndex, 0, selectorIndex);
+  }
+}
+
+std::string NotesActivity::displayName'''
+          text, n = apply_re.subn(apply_new, text, count=1)
+          if n != 1:
+              raise SystemExit(f'applyFilter replacement count={n}')
+
+          text = text.replace(
+              '  const std::string oldPath = std::string(kNotesDir) + "/" + filename;\n  startActivityForResult(',
+              '  const std::string oldPath = std::string(kNotesDir) + "/" + filename;\n  const bool wasLocked = noteLockedByPath(oldPath);\n  startActivityForResult(', 1)
+          text = text.replace(
+              '[this, filename, oldPath](const ActivityResult& result) {',
+              '[this, filename, oldPath, wasLocked](const ActivityResult& result) {', 1)
+          rename_old = r'''        if (!Storage.remove(oldPath.c_str())) {
+          Storage.remove(newPath.c_str());
+          LOG_ERR("NOTES", "Failed to remove old note after rename: %s", oldPath.c_str());
+          requestUpdate();
+          return;
+        }
+        reloadNotes();
+'''
+          rename_new = r'''        if (wasLocked && !createLockMarker(newPath)) {
+          Storage.remove(newPath.c_str());
+          LOG_ERR("NOTES", "Failed to preserve lock while renaming note: %s", oldPath.c_str());
+          requestUpdate();
+          return;
+        }
+        if (!Storage.remove(oldPath.c_str())) {
+          Storage.remove(newPath.c_str());
+          if (wasLocked) removeLockMarker(newPath);
+          LOG_ERR("NOTES", "Failed to remove old note after rename: %s", oldPath.c_str());
+          requestUpdate();
+          return;
+        }
+        if (wasLocked) removeLockMarker(oldPath);
+        reloadNotes();
+'''
+          if text.count(rename_old) != 1:
+              raise SystemExit('rename lock preservation anchor mismatch')
+          text = text.replace(rename_old, rename_new, 1)
+
+          # Secret page-button sequence and vault unlock.
+          open_anchor = 'void NotesActivity::openSelectedNote() { openNoteAt(selectorIndex); }\n\n'
+          if text.count(open_anchor) != 1:
+              raise SystemExit('openSelectedNote anchor mismatch')
+          vault_methods = r'''bool NotesActivity::handleVaultSequenceStep(const bool next) {
+  if (vaultMode) {
+    vaultSequencePos = 0;
+    return false;
+  }
+  static constexpr bool sequence[] = {true, false, true, false};
+  if (next == sequence[vaultSequencePos]) {
+    ++vaultSequencePos;
+  } else {
+    vaultSequencePos = next ? 1 : 0;
+  }
+  if (vaultSequencePos < sizeof(sequence) / sizeof(sequence[0])) return false;
+  vaultSequencePos = 0;
+  promptVaultAccess();
+  return true;
+}
+
+void NotesActivity::promptVaultAccess() {
+  uint64_t expectedFingerprint = 0;
+  if (!readVaultFingerprint(expectedFingerprint)) {
+    requestUpdate();
+    return;
+  }
+  startActivityForResult(
+      std::make_unique<VaultPatternActivity>(renderer, mappedInput, true, expectedFingerprint),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          requestUpdate();
+          return;
+        }
+        const auto* pattern = std::get_if<KeyboardResult>(&result.data);
+        if (!pattern || pattern->text.size() != kPatternLength) {
+          requestUpdate();
+          return;
+        }
+        vaultMode = true;
+        searchQuery.clear();
+        selectorIndex = 0;
+        topIndex = 0;
+        reloadNotes();
+        applyFilter();
+        requestUpdate();
+      });
+}
+
+'''
+          text = text.replace(open_anchor, open_anchor + vault_methods, 1)
+
+          # Row geometry: reserve a lock slot only while viewing the vault.
+          geom_old = '''        const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,\n                              rowRect.height};\n        const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};\n'''
+          geom_new = '''        const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,\n                              rowRect.height};\n        const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,\n                            vaultMode ? kLockButtonWidth : 0, rowRect.height};\n        const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};\n'''
+          if text.count(geom_old) != 1:
+              raise SystemExit(f'loop row geometry count={text.count(geom_old)}')
+          text = text.replace(geom_old, geom_new, 1)
+
+          # Lock icon in vault list is display-only.
+          text = text.replace(
+              '''        if (pointInRect(renameRect, tx, ty)) {\n          const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];\n          renameNote(filename);\n          return;\n        }\n        openNoteAt(index);\n''',
+              '''        if (pointInRect(lockRect, tx, ty)) return;\n        if (pointInRect(renameRect, tx, ty)) {\n          const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];\n          renameNote(filename);\n          return;\n        }\n        openNoteAt(index);\n''', 1)
+
+          # Remove the lock marker along with a successfully deleted note.
+          delete_old = '''                if (!Storage.remove(path.c_str())) {\n                  LOG_ERR("NOTES", "Failed to delete note: %s", path.c_str());\n                }\n                reloadNotes();\n'''
+          delete_new = '''                if (!Storage.remove(path.c_str())) {\n                  LOG_ERR("NOTES", "Failed to delete note: %s", path.c_str());\n                } else {\n                  removeLockMarker(path);\n                }\n                reloadNotes();\n'''
+          if text.count(delete_old) != 1:
+              raise SystemExit('delete marker cleanup anchor mismatch')
+          text = text.replace(delete_old, delete_new, 1)
+
+          nav_re = re.compile(
+              r'  const int itemCount = static_cast<int>\(filteredNotes.size\(\)\);\n'
+              r'  if \(itemCount > 0\) \{\n'
+              r'    const auto moveSelection = \[this, itemCount, visibleRows\]\(const int next\) \{.*?'
+              r'      return;\n    \}\n  \}\n', re.S)
+          nav_new = r'''  const int itemCount = static_cast<int>(filteredNotes.size());
+  const auto moveSelection = [this, itemCount, visibleRows](const int next) {
+    if (itemCount <= 0) return;
+    selectorIndex = next;
+    if (selectorIndex < topIndex) topIndex = selectorIndex;
+    if (selectorIndex >= topIndex + visibleRows) topIndex = selectorIndex - visibleRows + 1;
+    topIndex = std::clamp(topIndex, 0, std::max(0, itemCount - visibleRows));
+    requestUpdate();
+  };
+
+  buttonNavigator.onNextRelease([this, itemCount, &moveSelection] {
+    if (handleVaultSequenceStep(true)) return;
+    if (itemCount > 0) moveSelection(ButtonNavigator::nextIndex(selectorIndex, itemCount));
+  });
+  buttonNavigator.onPreviousRelease([this, itemCount, &moveSelection] {
+    if (handleVaultSequenceStep(false)) return;
+    if (itemCount > 0) moveSelection(ButtonNavigator::previousIndex(selectorIndex, itemCount));
+  });
+
+  if (itemCount > 0) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      openSelectedNote();
+      return;
+    }
+
+    const auto swipe = mappedInput.wasSwipe();
+    if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+      const int maxTop = std::max(0, itemCount - visibleRows);
+      const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleRows : -visibleRows;
+      topIndex = std::clamp(topIndex + delta, 0, maxTop);
+      selectorIndex = std::clamp(selectorIndex, topIndex, std::min(itemCount - 1, topIndex + visibleRows - 1));
+      requestUpdate();
+      return;
+    }
+  }
+'''
+          text, n = nav_re.subn(nav_new, text, count=1)
+          if n != 1:
+              raise SystemExit(f'navigation replacement count={n}')
+
+          # Render row geometry and lock icon.
+          render_geom_old = '''      const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,\n                            rowRect.height};\n      const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};\n'''
+          render_geom_new = '''      const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,\n                            rowRect.height};\n      const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,\n                          vaultMode ? kLockButtonWidth : 0, rowRect.height};\n      const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};\n'''
+          if text.count(render_geom_old) != 1:
+              raise SystemExit(f'render row geometry count={text.count(render_geom_old)}')
+          text = text.replace(render_geom_old, render_geom_new, 1)
+
+          text = text.replace(
+              '''                                                       rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -\n                                                           kDeleteButtonWidth);\n''',
+              '''                                                       rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -\n                                                           kDeleteButtonWidth - (vaultMode ? kLockButtonWidth : 0));\n''', 1)
+          text = text.replace(
+              '''      drawRenameIcon(renderer, renameRect, true);\n      drawTrashIcon(renderer, deleteRect, true);\n''',
+              '''      drawRenameIcon(renderer, renameRect, true);\n      if (vaultMode) drawLockIcon(renderer, lockRect, true);\n      drawTrashIcon(renderer, deleteRect, true);\n''', 1)
+
+          notes.write_text(text)
+
+          # Sanity checks for all intended additions.
+          required = [
+              'class VaultPatternActivity final',
+              'handleVaultSequenceStep',
+              'noteLockedByFilename(filename) != vaultMode',
+              'if (vaultMode) drawLockIcon',
+              'beginLock()',
+          ]
+          final = notes.read_text()
+          for needle in required:
+              if needle not in final:
+                  raise SystemExit(f'missing expected Notes vault code: {needle}')
+          PY
+
+          git diff --check
+          git diff -- src/activities/home/NotesActivity.cpp src/activities/home/NotesActivity.h \
+            src/activities/util/KeyboardEntryActivity.cpp src/activities/util/KeyboardEntryActivity.h
+
+      - name: Commit clean feature change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "w4h72s5wmt-ui"
+          git config user.email "w4h72s5wmt@privaterelay.appleid.com"
+          git rm .github/workflows/oneshot-notes-vault.yml
+          git add src/activities/home/NotesActivity.cpp src/activities/home/NotesActivity.h \
+            src/activities/util/KeyboardEntryActivity.cpp src/activities/util/KeyboardEntryActivity.h
+          git commit -m "feat: add locked Notes vault"
+          git push origin HEAD:notes-lock-vault-34142490266
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-notes-vault-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Build X4 Pro firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          pio run -e x4-pro | tee pio-x4-pro-notes-vault.log
+
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-notes-vault-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-notes-vault-${{ github.run_number }}-log
+          path: pio-x4-pro-notes-vault.log
+          if-no-files-found: ignore
