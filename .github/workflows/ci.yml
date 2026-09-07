@@ -35,7 +35,7 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Apply Minesweeper menu cosmetics
+      - name: Apply Minesweeper test changes
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -51,6 +51,18 @@ jobs:
               (
                   '''                                               "Ecraser la partie en cours ?"),''',
                   '''                                               "Cela effacera la partie en cours"),''',
+              ),
+              (
+                  '''void MinesweeperActivity::continueGame() {\n  if (!hasSavedGame_) {\n    gameOver_ = false;\n    viewMode_ = ViewMode::Result;\n    requestUpdate();\n    return;\n  }\n  assistedCounterChoice = assistedCounterActive;\n  enterGrid();\n}''',
+                  '''void MinesweeperActivity::continueGame() {\n  assistedCounterChoice = assistedCounterActive;\n  enterGrid();\n}''',
+              ),
+              (
+                  '''void MinesweeperActivity::loopResult() {\n  const Rect header = headerRect(renderer, mappedInput);\n\n  if (!gameOver_) {\n    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||\n        mappedInput.wasPressed(MappedInputManager::Button::Back)) {\n      mappedInput.suppressNextBackRelease();\n      viewMode_ = ViewMode::Menu;\n      selectedIndex_ = gridSizeIndex_;\n      topIndex_ = 0;\n      initialViewportPending_ = true;\n      requestUpdate();\n    }\n    return;\n  }\n''',
+                  '''void MinesweeperActivity::loopResult() {\n  const Rect header = headerRect(renderer, mappedInput);\n''',
+              ),
+              (
+                  '''void MinesweeperActivity::renderResult() {\n  if (gameOver_) {\n    renderGrid();\n    return;\n  }\n\n  renderer.clearScreen();\n  const auto& metrics = UITheme::getInstance().getMetrics();\n  const Rect header = headerRect(renderer, mappedInput);\n  if (mappedInput.hasTouchHardware()) {\n    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);\n  } else {\n    GUI.drawHeader(renderer, header, "Continuer", nullptr, false);\n  }\n\n  const int x = metrics.contentSidePadding;\n  const int y = header.y + header.height + metrics.verticalSpacing * 2;\n  renderer.drawText(UI_12_FONT_ID, x, y, "Aucune partie sauvegardee");\n  renderer.drawText(UI_10_FONT_ID, x, y + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing,\n                    "pour le moment.");\n\n  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");\n  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);\n  renderer.displayBuffer();\n}''',
+                  '''void MinesweeperActivity::renderResult() {\n  renderGrid();\n}''',
               ),
               (
                   '''  const int splitX = scorePanel.x + scorePanel.width * 2 / 5;''',
