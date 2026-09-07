@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -26,7 +27,10 @@ constexpr int kSideButtonWidth = 52;
 constexpr int kSearchClearWidth = 44;
 constexpr int kDeleteButtonWidth = 48;
 constexpr int kRenameButtonWidth = 44;
+constexpr int kLockButtonWidth = 48;
 constexpr int kRowHeight = 58;
+constexpr size_t kPatternLength = 4;
+constexpr const char* kVaultFingerprintPath = "/Notes/.vault";
 constexpr int kRowSidePadding = 16;
 constexpr int kCornerRadius = 6;
 
@@ -94,6 +98,186 @@ void drawTrashIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
   renderer.drawLine(x + iconWidth - 7, y + 9, x + iconWidth - 7, y + iconHeight - 3, 1, black);
 }
 
+void drawLockIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
+  const int bodyW = 20;
+  const int bodyH = 16;
+  const int bodyX = rect.x + (rect.width - bodyW) / 2;
+  const int bodyY = rect.y + rect.height / 2;
+  const int shackleW = 14;
+  const int shackleH = 12;
+  const int shackleX = rect.x + (rect.width - shackleW) / 2;
+  const int shackleY = bodyY - shackleH + 2;
+  renderer.drawRoundedRect(shackleX, shackleY, shackleW, shackleH, 2, 6, black);
+  renderer.fillRect(bodyX, bodyY, bodyW, bodyH, black);
+  renderer.fillRect(bodyX + bodyW / 2 - 1, bodyY + 5, 3, 7, !black);
+}
+
+std::string lockMarkerPath(const std::string& notePath) { return notePath + ".lock"; }
+
+bool noteLockedByPath(const std::string& notePath) { return Storage.exists(lockMarkerPath(notePath).c_str()); }
+
+bool noteLockedByFilename(const std::string& filename) {
+  return noteLockedByPath(std::string("/Notes") + "/" + filename);
+}
+
+bool createLockMarker(const std::string& notePath) {
+  const std::string marker = lockMarkerPath(notePath);
+  FsFile file = Storage.open(marker.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const uint8_t value = 1;
+  const size_t written = file.write(&value, 1);
+  file.close();
+  return written == 1;
+}
+
+void removeLockMarker(const std::string& notePath) { Storage.remove(lockMarkerPath(notePath).c_str()); }
+
+uint64_t patternFingerprint(const std::string& pattern) {
+  // Salted fingerprint only: this is a privacy gate, not note-content encryption.
+  uint64_t hash = UINT64_C(1469598103934665603);
+  static constexpr char salt[] = "CrossInk-Notes-Vault-v1";
+  for (const unsigned char c : std::string(salt) + pattern) {
+    hash ^= c;
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+bool readVaultFingerprint(uint64_t& fingerprint) {
+  FsFile file = Storage.open(kVaultFingerprintPath, O_RDONLY);
+  if (!file) return false;
+  if (file.size() != sizeof(fingerprint)) {
+    file.close();
+    return false;
+  }
+  const int read = file.read(reinterpret_cast<uint8_t*>(&fingerprint), sizeof(fingerprint));
+  file.close();
+  return read == static_cast<int>(sizeof(fingerprint));
+}
+
+bool writeVaultFingerprint(const uint64_t fingerprint) {
+  FsFile file = Storage.open(kVaultFingerprintPath, O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const size_t written = file.write(reinterpret_cast<const uint8_t*>(&fingerprint), sizeof(fingerprint));
+  file.close();
+  return written == sizeof(fingerprint);
+}
+
+class VaultPatternActivity final : public Activity {
+ public:
+  VaultPatternActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const bool verify,
+                       const uint64_t expectedFingerprint)
+      : Activity("NotesVaultPattern", renderer, mappedInput),
+        verify(verify),
+        expectedFingerprint(expectedFingerprint) {}
+
+  void onEnter() override {
+    Activity::onEnter();
+    requestUpdate();
+  }
+
+  void loop() override {
+    int tx = 0;
+    int ty = 0;
+    if (mappedInput.wasScreenTapped(tx, ty)) {
+      for (int i = 0; i < 9; ++i) {
+        if (pointInRect(cellRect(i), tx, ty)) {
+          appendCell(i);
+          return;
+        }
+      }
+    }
+
+    if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+      hardwareSelection = true;
+      selectedCell = (selectedCell + 6) % 9;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+      hardwareSelection = true;
+      selectedCell = (selectedCell + 3) % 9;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+      hardwareSelection = true;
+      selectedCell = selectedCell % 3 == 0 ? selectedCell + 2 : selectedCell - 1;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      hardwareSelection = true;
+      selectedCell = selectedCell % 3 == 2 ? selectedCell - 2 : selectedCell + 1;
+      requestUpdate();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      appendCell(selectedCell);
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      ActivityResult cancelled;
+      cancelled.isCancelled = true;
+      setResult(std::move(cancelled));
+      finish();
+    }
+  }
+
+  void render(RenderLock&&) override {
+    renderer.clearScreen();
+    for (int i = 0; i < 9; ++i) {
+      const Rect rect = cellRect(i);
+      renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 2, 8, true);
+      if (hardwareSelection && i == selectedCell) {
+        renderer.drawRoundedRect(rect.x + 4, rect.y + 4, rect.width - 8, rect.height - 8, 2, 6, true);
+      }
+    }
+    if (invalidPattern) renderer.drawCenteredText(UI_12_FONT_ID, 12, "Code incorrect", true);
+    renderer.displayBuffer();
+  }
+
+ private:
+  bool verify = false;
+  uint64_t expectedFingerprint = 0;
+  std::string pattern;
+  int selectedCell = 4;
+  bool hardwareSelection = false;
+  bool invalidPattern = false;
+
+  Rect cellRect(const int index) const {
+    constexpr int gap = 12;
+    const int width = renderer.getScreenWidth();
+    const int height = renderer.getScreenHeight();
+    const int cell = std::max(1, std::min((width - gap * 4) / 3, (height - gap * 4) / 3));
+    const int gridW = cell * 3 + gap * 2;
+    const int gridH = cell * 3 + gap * 2;
+    const int startX = (width - gridW) / 2;
+    const int startY = (height - gridH) / 2;
+    const int row = index / 3;
+    const int col = index % 3;
+    return Rect{startX + col * (cell + gap), startY + row * (cell + gap), cell, cell};
+  }
+
+  void appendCell(const int index) {
+    invalidPattern = false;
+    pattern.push_back(static_cast<char>('0' + index));
+    if (pattern.size() < kPatternLength) {
+      requestUpdate();
+      return;
+    }
+    const uint64_t fingerprint = patternFingerprint(pattern);
+    if (verify && fingerprint != expectedFingerprint) {
+      pattern.clear();
+      invalidPattern = true;
+      requestUpdate();
+      return;
+    }
+    setResult(ActivityResult{KeyboardResult{pattern}});
+    finish();
+  }
+};
+
 bool saveNoteFile(const std::string& path, const std::string& text) {
   FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   if (!file) return false;
@@ -117,8 +301,53 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
     KeyboardEntryActivity::onExit();
   }
 
+ protected:
+  bool handleHeaderActionTap(const int x, const int y) override {
+    if (!pointInRect(lockButtonRect(), x, y)) return false;
+    if (!noteLockedByPath(path)) beginLock();
+    return true;
+  }
+
+  int headerActionReserveWidth() const override { return kLockButtonWidth; }
+
+  void drawHeaderAction() override { drawLockIcon(renderer, lockButtonRect(), true); }
+
  private:
   std::string path;
+
+  Rect lockButtonRect() const {
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    return Rect{renderer.getScreenWidth() - kLockButtonWidth, header.y, kLockButtonWidth, header.height};
+  }
+
+  void beginLock() {
+    uint64_t expectedFingerprint = 0;
+    const bool hasVault = readVaultFingerprint(expectedFingerprint);
+    startActivityForResult(
+        std::make_unique<VaultPatternActivity>(renderer, mappedInput, hasVault, expectedFingerprint),
+        [this, hasVault](const ActivityResult& result) {
+          if (result.isCancelled) {
+            requestUpdate();
+            return;
+          }
+          const auto* pattern = std::get_if<KeyboardResult>(&result.data);
+          if (!pattern || pattern->text.size() != kPatternLength) {
+            requestUpdate();
+            return;
+          }
+          if (!hasVault && !writeVaultFingerprint(patternFingerprint(pattern->text))) {
+            LOG_ERR("NOTES", "Failed to save Notes vault fingerprint");
+            requestUpdate();
+            return;
+          }
+          if (!createLockMarker(path)) {
+            LOG_ERR("NOTES", "Failed to lock note: %s", path.c_str());
+            requestUpdate();
+            return;
+          }
+          finish();
+        });
+  }
 };
 }  // namespace
 
@@ -167,16 +396,13 @@ void NotesActivity::reloadNotes() {
 void NotesActivity::applyFilter() {
   filteredNotes.clear();
   filteredNotes.reserve(notes.size());
-  if (searchQuery.empty()) {
-    for (size_t i = 0; i < notes.size(); ++i) filteredNotes.push_back(i);
-  } else {
-    const std::string needle = lowerAscii(searchQuery);
-    for (size_t i = 0; i < notes.size(); ++i) {
-      const auto& filename = notes[i];
-      bool matches = lowerAscii(displayName(filename)).find(needle) != std::string::npos;
-      if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle);
-      if (matches) filteredNotes.push_back(i);
-    }
+  const std::string needle = lowerAscii(searchQuery);
+  for (size_t i = 0; i < notes.size(); ++i) {
+    const auto& filename = notes[i];
+    if (noteLockedByFilename(filename) != vaultMode) continue;
+    bool matches = searchQuery.empty() || lowerAscii(displayName(filename)).find(needle) != std::string::npos;
+    if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle);
+    if (matches) filteredNotes.push_back(i);
   }
 
   if (filteredNotes.empty()) {
@@ -335,10 +561,11 @@ void NotesActivity::createNote() {
 void NotesActivity::renameNote(const std::string& filename) {
   const std::string oldTitle = displayName(filename);
   const std::string oldPath = std::string(kNotesDir) + "/" + filename;
+  const bool wasLocked = noteLockedByPath(oldPath);
   startActivityForResult(
       std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_TITLE), oldTitle, 48,
                                               InputType::Text, 1),
-      [this, filename, oldPath](const ActivityResult& result) {
+      [this, filename, oldPath, wasLocked](const ActivityResult& result) {
         if (result.isCancelled) {
           requestUpdate();
           return;
@@ -368,12 +595,20 @@ void NotesActivity::renameNote(const std::string& filename) {
           requestUpdate();
           return;
         }
+        if (wasLocked && !createLockMarker(newPath)) {
+          Storage.remove(newPath.c_str());
+          LOG_ERR("NOTES", "Failed to preserve lock while renaming note: %s", oldPath.c_str());
+          requestUpdate();
+          return;
+        }
         if (!Storage.remove(oldPath.c_str())) {
           Storage.remove(newPath.c_str());
+          if (wasLocked) removeLockMarker(newPath);
           LOG_ERR("NOTES", "Failed to remove old note after rename: %s", oldPath.c_str());
           requestUpdate();
           return;
         }
+        if (wasLocked) removeLockMarker(oldPath);
         reloadNotes();
         applyFilter();
         requestUpdate();
@@ -404,6 +639,51 @@ void NotesActivity::openNoteAt(const int index) {
 }
 
 void NotesActivity::openSelectedNote() { openNoteAt(selectorIndex); }
+
+bool NotesActivity::handleVaultSequenceStep(const bool next) {
+  if (vaultMode) {
+    vaultSequencePos = 0;
+    return false;
+  }
+  static constexpr bool sequence[] = {true, false, true, false};
+  if (next == sequence[vaultSequencePos]) {
+    ++vaultSequencePos;
+  } else {
+    vaultSequencePos = next ? 1 : 0;
+  }
+  if (vaultSequencePos < sizeof(sequence) / sizeof(sequence[0])) return false;
+  vaultSequencePos = 0;
+  promptVaultAccess();
+  return true;
+}
+
+void NotesActivity::promptVaultAccess() {
+  uint64_t expectedFingerprint = 0;
+  if (!readVaultFingerprint(expectedFingerprint)) {
+    requestUpdate();
+    return;
+  }
+  startActivityForResult(
+      std::make_unique<VaultPatternActivity>(renderer, mappedInput, true, expectedFingerprint),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          requestUpdate();
+          return;
+        }
+        const auto* pattern = std::get_if<KeyboardResult>(&result.data);
+        if (!pattern || pattern->text.size() != kPatternLength) {
+          requestUpdate();
+          return;
+        }
+        vaultMode = true;
+        searchQuery.clear();
+        selectorIndex = 0;
+        topIndex = 0;
+        reloadNotes();
+        applyFilter();
+        requestUpdate();
+      });
+}
 
 void NotesActivity::loop() {
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -457,7 +737,9 @@ void NotesActivity::loop() {
         const Rect rowRect{kTopMargin, listTop + row * kRowHeight, width - kTopMargin * 2, kRowHeight - 2};
         const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                               rowRect.height};
-        const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+        const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,
+                            vaultMode ? kLockButtonWidth : 0, rowRect.height};
+        const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
         if (pointInRect(deleteRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           const std::string path = std::string(kNotesDir) + "/" + filename;
@@ -471,6 +753,8 @@ void NotesActivity::loop() {
                 }
                 if (!Storage.remove(path.c_str())) {
                   LOG_ERR("NOTES", "Failed to delete note: %s", path.c_str());
+                } else {
+                  removeLockMarker(path);
                 }
                 reloadNotes();
                 applyFilter();
@@ -478,6 +762,7 @@ void NotesActivity::loop() {
               });
           return;
         }
+        if (pointInRect(lockRect, tx, ty)) return;
         if (pointInRect(renameRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           renameNote(filename);
@@ -490,19 +775,25 @@ void NotesActivity::loop() {
   }
 
   const int itemCount = static_cast<int>(filteredNotes.size());
-  if (itemCount > 0) {
-    const auto moveSelection = [this, itemCount, visibleRows](const int next) {
-      selectorIndex = next;
-      if (selectorIndex < topIndex) topIndex = selectorIndex;
-      if (selectorIndex >= topIndex + visibleRows) topIndex = selectorIndex - visibleRows + 1;
-      topIndex = std::clamp(topIndex, 0, std::max(0, itemCount - visibleRows));
-      requestUpdate();
-    };
-    buttonNavigator.onNextRelease(
-        [this, itemCount, &moveSelection] { moveSelection(ButtonNavigator::nextIndex(selectorIndex, itemCount)); });
-    buttonNavigator.onPreviousRelease(
-        [this, itemCount, &moveSelection] { moveSelection(ButtonNavigator::previousIndex(selectorIndex, itemCount)); });
+  const auto moveSelection = [this, itemCount, visibleRows](const int next) {
+    if (itemCount <= 0) return;
+    selectorIndex = next;
+    if (selectorIndex < topIndex) topIndex = selectorIndex;
+    if (selectorIndex >= topIndex + visibleRows) topIndex = selectorIndex - visibleRows + 1;
+    topIndex = std::clamp(topIndex, 0, std::max(0, itemCount - visibleRows));
+    requestUpdate();
+  };
 
+  buttonNavigator.onNextRelease([this, itemCount, &moveSelection] {
+    if (handleVaultSequenceStep(true)) return;
+    if (itemCount > 0) moveSelection(ButtonNavigator::nextIndex(selectorIndex, itemCount));
+  });
+  buttonNavigator.onPreviousRelease([this, itemCount, &moveSelection] {
+    if (handleVaultSequenceStep(false)) return;
+    if (itemCount > 0) moveSelection(ButtonNavigator::previousIndex(selectorIndex, itemCount));
+  });
+
+  if (itemCount > 0) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       openSelectedNote();
       return;
@@ -582,7 +873,9 @@ void NotesActivity::render(RenderLock&&) {
       const Rect rowRect{kTopMargin, rowY, width - kTopMargin * 2, kRowHeight - 2};
       const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                             rowRect.height};
-      const Rect renameRect{deleteRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+      const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,
+                          vaultMode ? kLockButtonWidth : 0, rowRect.height};
+      const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
       const bool selected = index == selectorIndex;
       if (selected) {
         auto target = makeUiTarget(renderer);
@@ -592,11 +885,12 @@ void NotesActivity::render(RenderLock&&) {
       }
       const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(notes[filteredNotes[static_cast<size_t>(index)]]).c_str(),
                                                        rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -
-                                                           kDeleteButtonWidth);
+                                                           kDeleteButtonWidth - (vaultMode ? kLockButtonWidth : 0));
       const int textH = renderer.getLineHeight(UI_12_FONT_ID);
       renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, rowRect.y + (rowRect.height - textH) / 2,
                         title.c_str(), true);
       drawRenameIcon(renderer, renameRect, true);
+      if (vaultMode) drawLockIcon(renderer, lockRect, true);
       drawTrashIcon(renderer, deleteRect, true);
     }
   }

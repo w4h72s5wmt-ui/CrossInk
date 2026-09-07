@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,8 @@ class NotesActivity final : public Activity {
   std::string searchQuery;
   int selectorIndex = 0;
   int topIndex = 0;
+  bool vaultMode = false;
+  uint8_t vaultSequencePos = 0;
 
   void reloadNotes();
   void applyFilter();
@@ -35,6 +38,8 @@ class NotesActivity final : public Activity {
   void openSelectedNote();
   void openNoteAt(int index);
   void editNote(const std::string& path, const std::string& title);
+  bool handleVaultSequenceStep(bool next);
+  void promptVaultAccess();
   bool loadNote(const std::string& path, std::string& text) const;
   bool noteContains(const std::string& path, const std::string& needle) const;
   bool saveNote(const std::string& path, const std::string& text) const;
