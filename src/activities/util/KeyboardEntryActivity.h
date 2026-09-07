@@ -4,8 +4,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
+#include <variant>
 
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
@@ -22,13 +24,24 @@ class KeyboardEntryActivity : public Activity {
   explicit KeyboardEntryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                  std::string title = "Enter Text", std::string initialText = "",
                                  const size_t maxLength = 0, InputType inputType = InputType::Text,
-                                 const size_t minLength = 0)
+                                 const size_t minLength = 0,
+                                 std::function<void(const std::string&)> forcedExitHandler = {})
       : Activity("KeyboardEntry", renderer, mappedInput),
         title(std::move(title)),
         text(std::move(initialText)),
         maxLength(maxLength),
         inputType(inputType),
-        minLength(minLength) {}
+        minLength(minLength),
+        forcedExitHandler(std::move(forcedExitHandler)) {}
+
+  ~KeyboardEntryActivity() override {
+    // OK and Cancel have already produced an explicit ActivityResult. A
+    // replacement (notably deep sleep) destroys the editor without either
+    // path, so give its owner one last chance to persist the live draft.
+    if (forcedExitHandler && !result.isCancelled && !std::holds_alternative<KeyboardResult>(result.data)) {
+      forcedExitHandler(text);
+    }
+  }
 
   void onEnter() override;
   void onExit() override;
@@ -41,6 +54,7 @@ class KeyboardEntryActivity : public Activity {
   size_t maxLength;
   InputType inputType;
   size_t minLength;
+  std::function<void(const std::string&)> forcedExitHandler;
   bool passwordVisible = false;
   PredictiveText predictiveText;
 
