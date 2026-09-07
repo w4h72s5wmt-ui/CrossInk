@@ -935,6 +935,10 @@ bool GfxRenderer::isPixelBlack(const int x, const int y) const {
 }
 
 void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
+  if (textClipActive_ && (x < textClipLeft_ || x >= textClipRight_ || y < textClipTop_ || y >= textClipBottom_)) {
+    return;
+  }
+
   int phyX = 0;
   int phyY = 0;
 
@@ -1077,6 +1081,20 @@ void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* te
                                    const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir) const {
   const int x = (getScreenWidth() - getTextWidth(fontId, text, style, baseDir)) / 2;
   drawText(fontId, x, y, text, black, style, baseDir);
+}
+
+void GfxRenderer::beginTextClip(const int x, const int y, const int width, const int height) const {
+  assert(!textClipActive_ && "nested GfxRenderer text clips are not supported");
+  textClipActive_ = true;
+  textClipLeft_ = x;
+  textClipTop_ = y;
+  textClipRight_ = x + std::max(0, width);
+  textClipBottom_ = y + std::max(0, height);
+}
+
+void GfxRenderer::endTextClip() const {
+  assert(textClipActive_ && "GfxRenderer text clip ended without begin");
+  textClipActive_ = false;
 }
 
 void GfxRenderer::drawText(const int fontId, const int x, const int y, const char* text, const bool black,
@@ -1471,10 +1489,16 @@ void GfxRenderer::fillRectImpl(const int x, const int y, const int width, const 
   // Clip in logical space.
   const int screenW = getScreenWidth();
   const int screenH = getScreenHeight();
-  const int lx0 = std::max(0, x);
-  const int ly0 = std::max(0, y);
-  const int lx1 = std::min(screenW, x + width);
-  const int ly1 = std::min(screenH, y + height);
+  int lx0 = std::max(0, x);
+  int ly0 = std::max(0, y);
+  int lx1 = std::min(screenW, x + width);
+  int ly1 = std::min(screenH, y + height);
+  if (textClipActive_) {
+    lx0 = std::max(lx0, textClipLeft_);
+    ly0 = std::max(ly0, textClipTop_);
+    lx1 = std::min(lx1, textClipRight_);
+    ly1 = std::min(ly1, textClipBottom_);
+  }
   if (lx0 >= lx1 || ly0 >= ly1) return;
 
   // Rotate the two opposing logical corners into physical-framebuffer space.
@@ -2055,6 +2079,12 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       }
     }
   }
+
+  const int sourceWidth = bitmap.getWidth() - cropPixX * 2;
+  const int sourceHeight = bitmap.getHeight() - cropPixY * 2;
+  const int renderedWidth = isScaled ? static_cast<int>(std::floor((sourceWidth - 1) * scale)) + 1 : sourceWidth;
+  const int renderedHeight = isScaled ? static_cast<int>(std::floor((sourceHeight - 1) * scale)) + 1 : sourceHeight;
+  preserveImagePolarity(x, y, renderedWidth, renderedHeight);
 }
 
 void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y, const int maxWidth,
@@ -2118,6 +2148,17 @@ void GfxRenderer::drawBitmap1Bit(const Bitmap& bitmap, const int x, const int y,
       // White pixels (val == 3) are not drawn (leave background)
     }
   }
+
+  const int renderedWidth =
+      isScaled ? static_cast<int>(std::floor((bitmap.getWidth() - 1) * scale)) + 1 : bitmap.getWidth();
+  const int renderedHeight =
+      isScaled ? static_cast<int>(std::floor((bitmap.getHeight() - 1) * scale)) + 1 : bitmap.getHeight();
+  preserveImagePolarity(x, y, renderedWidth, renderedHeight);
+}
+
+void GfxRenderer::preserveImagePolarity(const int x, const int y, const int width, const int height) const {
+  if (renderMode != BW || !display.isInverted() || _stripActive) return;
+  invertRect(x, y, width, height);
 }
 
 void GfxRenderer::drawPerspectiveBitmap(const Bitmap& bitmap, const int x, const int y, const int w, const int hL,
@@ -2175,6 +2216,14 @@ void GfxRenderer::drawPerspectiveBitmap(const Bitmap& bitmap, const int x, const
           drawPixel(screenX, screenY, false);
         }
       }
+    }
+  }
+
+  if (renderMode == BW && display.isInverted() && !_stripActive) {
+    for (int dx = 0; dx < w; ++dx) {
+      const int colH = (w == 1) ? hL : (hL + (hR - hL) * dx / (w - 1));
+      const int colTop = (hMax - colH) / 2;
+      invertRect(x + dx, y + colTop, 1, colH);
     }
   }
 }

@@ -1,0 +1,162 @@
+name: CrossInk Notes + Demineur X4 Pro
+
+on:
+  push:
+    branches: [measure-111-opt12]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-x4-pro-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CrossInk sources
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Apply measurement-only optimizations 1 and 2
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/activities/home/MinesweeperActivity.cpp')
+          s = p.read_text()
+          old = '''void MinesweeperActivity::revealFlood(const int startIndex) {
+            std::array<uint8_t, kMaxCells> queue{};
+            const int dimension = gridDimension();
+            const int cellCount = dimension * dimension;
+            int head = 0;
+            int tail = 0;
+            queue[tail++] = static_cast<uint8_t>(startIndex);
+
+            while (head < tail) {
+              const int index = queue[head++];
+              if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
+              revealed_[index] = 1;
+              ++revealedSafeCells_;
+              if (adjacentMineCount(index) != 0) continue;
+
+              const int row = index / dimension;
+              const int col = index % dimension;
+              for (int dr = -1; dr <= 1; ++dr) {
+                for (int dc = -1; dc <= 1; ++dc) {
+                  if (dr == 0 && dc == 0) continue;
+                  const int nr = row + dr;
+                  const int nc = col + dc;
+                  if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
+                  const int next = nr * dimension + nc;
+                  if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+                    queue[tail++] = static_cast<uint8_t>(next);
+                  }
+                }
+              }
+            }
+          }
+          '''
+          new = '''void MinesweeperActivity::revealFlood(const int startIndex) {
+            const int dimension = gridDimension();
+            const int cellCount = dimension * dimension;
+            if (startIndex < 0 || startIndex >= cellCount || revealed_[startIndex] || flagged_[startIndex] || mines_[startIndex]) {
+              return;
+            }
+
+            std::array<uint8_t, kMaxCells> queue{};
+            int head = 0;
+            int tail = 0;
+            revealed_[startIndex] = 1;
+            ++revealedSafeCells_;
+            queue[tail++] = static_cast<uint8_t>(startIndex);
+
+            while (head < tail) {
+              const int index = queue[head++];
+              if (adjacentMineCount(index) != 0) continue;
+
+              const int row = index / dimension;
+              const int col = index % dimension;
+              for (int dr = -1; dr <= 1; ++dr) {
+                for (int dc = -1; dc <= 1; ++dc) {
+                  if (dr == 0 && dc == 0) continue;
+                  const int nr = row + dr;
+                  const int nc = col + dc;
+                  if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
+                  const int next = nr * dimension + nc;
+                  if (revealed_[next] || flagged_[next] || mines_[next] || tail >= cellCount) continue;
+                  revealed_[next] = 1;
+                  ++revealedSafeCells_;
+                  queue[tail++] = static_cast<uint8_t>(next);
+                }
+              }
+            }
+          }
+          '''
+          if old not in s:
+              raise SystemExit('Minesweeper source pattern not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('src/activities/util/KeyboardEntryActivity.cpp')
+          s = p.read_text()
+          old = "  return !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));"
+          new = "  return c != '\\'' && c != '-' &&\n         !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));"
+          if old not in s:
+              raise SystemExit('Keyboard source pattern not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          git diff -- src/activities/home/MinesweeperActivity.cpp src/activities/util/KeyboardEntryActivity.cpp
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Cache incremental X4 Pro build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pio/build/x4-pro
+            .pio/libdeps/x4-pro
+          key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-x4-pro-pio6.1.19-
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
+      - name: Build X4 Pro firmware directly from sources
+        run: |
+          set -euo pipefail
+          pio run -e x4-pro | tee pio-x4-pro-notes.log
+
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-build-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-build-${{ github.run_number }}-log
+          path: pio-x4-pro-notes.log
+          if-no-files-found: ignore

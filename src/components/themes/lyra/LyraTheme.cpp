@@ -56,6 +56,30 @@ int mainMenuIconYOffset(const UIIcon icon) {
   }
 }
 
+
+void drawNoteMainMenuIcon(const GfxRenderer& renderer, const int x, const int y) {
+  renderer.drawRect(x + 5, y + 3, 22, 27, 2, true);
+  renderer.drawLine(x + 9, y + 4, x + 9, y + 28, 1, true);
+  renderer.drawLine(x + 12, y + 10, x + 23, y + 10, 2, true);
+  renderer.drawLine(x + 12, y + 16, x + 23, y + 16, 2, true);
+  renderer.drawLine(x + 12, y + 22, x + 20, y + 22, 2, true);
+}
+
+void drawMinesweeperMainMenuIcon(const GfxRenderer& renderer, const int x, const int y) {
+  constexpr int cx = 16;
+  constexpr int cy = 16;
+  renderer.drawRect(x + 3, y + 3, 26, 26, 2, true);
+  renderer.fillRect(x + cx - 5, y + cy - 5, 10, 10, true);
+  renderer.drawLine(x + cx, y + 7, x + cx, y + cy - 6, 2, true);
+  renderer.drawLine(x + cx, y + cy + 6, x + cx, y + 25, 2, true);
+  renderer.drawLine(x + 7, y + cy, x + cx - 6, y + cy, 2, true);
+  renderer.drawLine(x + cx + 6, y + cy, x + 25, y + cy, 2, true);
+  renderer.drawLine(x + 9, y + 9, x + 11, y + 11, 2, true);
+  renderer.drawLine(x + 21, y + 21, x + 23, y + 23, 2, true);
+  renderer.drawLine(x + 21, y + 11, x + 23, y + 9, 2, true);
+  renderer.drawLine(x + 9, y + 23, x + 11, y + 21, 2, true);
+}
+
 }  // namespace
 
 const freeink::Icon* LyraTheme::iconForName(UIIcon icon, uint32_t size) {
@@ -387,7 +411,7 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
       renderer.fillRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, cornerRadius, Color::White);
       renderer.drawRoundedRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, 1, cornerRadius, true, true, false,
                                false, true);
-    } else {
+    } else if (labels[i] != nullptr) {
       // Clear the previous full-sized hint before drawing the inactive marker.
       // Dictionary chaining can otherwise leave its old label visible.
       renderer.fillRect(x, pageHeight - buttonY, buttonWidth, buttonHeight, false);
@@ -661,7 +685,13 @@ void LyraTheme::drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount
 
     if (rowIcon != nullptr) {
       UIIcon icon = rowIcon(i);
-      if (icon == UIIcon::BookmarkIcon) {
+      if (icon == UIIcon::NoteIcon) {
+        drawNoteMainMenuIcon(renderer, textX, textY + 3);
+        textX += mainMenuIconSize + hPaddingInSelection + 2;
+      } else if (icon == UIIcon::MinesweeperIcon) {
+        drawMinesweeperMainMenuIcon(renderer, textX, textY + 3);
+        textX += mainMenuIconSize + hPaddingInSelection + 2;
+      } else if (icon == UIIcon::BookmarkIcon) {
         // Draw a small bookmark ribbon icon to match the status bar ribbon.
         const int ribbonWidth = 16;
         const int ribbonHeight = 22;
