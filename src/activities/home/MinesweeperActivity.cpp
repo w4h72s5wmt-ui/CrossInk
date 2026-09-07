@@ -28,7 +28,7 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/minesweeper.bin";
 constexpr const char SCORE_PATH[] = "/.crosspoint/minesweeper-scores.bin";
-constexpr uint32_t SAVE_MAGIC = 0x4D535735;  // MSW5: packed + CRC16, intentionally incompatible with old saves.
+constexpr uint32_t SAVE_MAGIC = 0x4D535734;  // MSW4: packed, intentionally incompatible with old saves.
 constexpr uint32_t SCORE_MAGIC = 0x4D534353;
 constexpr uint8_t SCORE_VERSION = 1;
 constexpr int64_t LOSS_UNDO_WINDOW_US = 5LL * 1000LL * 1000LL;
@@ -142,23 +142,6 @@ bool writeValue(FsFile& file, const T& value) {
 template <typename T>
 bool readValue(FsFile& file, T& value) {
   return file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T)) == static_cast<int>(sizeof(T));
-}
-
-uint16_t crc16Update(uint16_t crc, const uint8_t* data, const size_t length) {
-  for (size_t i = 0; i < length; ++i) {
-    crc ^= static_cast<uint16_t>(data[i]) << 8;
-    for (int bit = 0; bit < 8; ++bit) {
-      crc = (crc & 0x8000) != 0
-                ? static_cast<uint16_t>((static_cast<uint16_t>(crc << 1)) ^ 0x1021)
-                : static_cast<uint16_t>(crc << 1);
-    }
-  }
-  return crc;
-}
-
-template <typename T>
-uint16_t crc16Value(const uint16_t crc, const T& value) {
-  return crc16Update(crc, reinterpret_cast<const uint8_t*>(&value), sizeof(T));
 }
 
 bool loadBestScores() {
@@ -290,8 +273,8 @@ void MinesweeperActivity::loopMenu() {
   if (mappedInput.hasTouchHardware() && mappedInput.wasScreenTapped(resetTapX, resetTapY) &&
       pointInRect(scoreResetButtonRect(renderer, mappedInput), resetTapX, resetTapY)) {
     startActivityForResult(
-        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Reinitialiser les scores",
-                                               "Effacer tous les meilleurs scores ?"),
+        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Réinitialiser les scores ?",
+                                               ""),
         [this](const ActivityResult& result) {
           if (!result.isCancelled) {
             bestScores.fill(0);
@@ -415,19 +398,6 @@ void MinesweeperActivity::loopGrid() {
 void MinesweeperActivity::loopResult() {
   const Rect header = headerRect(renderer, mappedInput);
 
-  if (!gameOver_) {
-    if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
-        mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      mappedInput.suppressNextBackRelease();
-      viewMode_ = ViewMode::Menu;
-      selectedIndex_ = gridSizeIndex_;
-      topIndex_ = 0;
-      initialViewportPending_ = true;
-      requestUpdate();
-    }
-    return;
-  }
-
   if (!won_ && undoAvailable && lossUndoDeadlineUs > 0 && esp_timer_get_time() >= lossUndoDeadlineUs) {
     undoAvailable = false;
     undoMineIndex = -1;
@@ -495,7 +465,7 @@ void MinesweeperActivity::activateRow(const int row) {
     return;
   }
   if (row == 5) {
-    continueGame();
+    if (hasSavedGame_) continueGame();
     return;
   }
   if (row == 6) {
@@ -504,8 +474,8 @@ void MinesweeperActivity::activateRow(const int row) {
       return;
     }
     startActivityForResult(
-        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Nouvelle partie",
-                                               "Ecraser la partie en cours ?"),
+        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Effacer la partie en cours :",
+                                               ""),
         [this](const ActivityResult& result) {
           if (result.isCancelled) {
             requestUpdate();
@@ -517,12 +487,6 @@ void MinesweeperActivity::activateRow(const int row) {
 }
 
 void MinesweeperActivity::continueGame() {
-  if (!hasSavedGame_) {
-    gameOver_ = false;
-    viewMode_ = ViewMode::Result;
-    requestUpdate();
-    return;
-  }
   assistedCounterChoice = assistedCounterActive;
   enterGrid();
 }
@@ -643,21 +607,18 @@ void MinesweeperActivity::revealCell(const int index) {
 }
 
 void MinesweeperActivity::revealFlood(const int startIndex) {
+  std::array<uint8_t, kMaxCells> queue{};
   const int dimension = gridDimension();
   const int cellCount = dimension * dimension;
-  if (startIndex < 0 || startIndex >= cellCount || revealed_[startIndex] || flagged_[startIndex] || mines_[startIndex]) {
-    return;
-  }
-
-  std::array<uint8_t, kMaxCells> queue{};
   int head = 0;
   int tail = 0;
-  revealed_[startIndex] = 1;
-  ++revealedSafeCells_;
   queue[tail++] = static_cast<uint8_t>(startIndex);
 
   while (head < tail) {
     const int index = queue[head++];
+    if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
+    revealed_[index] = 1;
+    ++revealedSafeCells_;
     if (adjacentMineCount(index) != 0) continue;
 
     const int row = index / dimension;
@@ -669,12 +630,9 @@ void MinesweeperActivity::revealFlood(const int startIndex) {
         const int nc = col + dc;
         if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
         const int next = nr * dimension + nc;
-        if (revealed_[next] || flagged_[next] || mines_[next] || tail >= cellCount) continue;
-        // Mark on enqueue: every cell can enter the queue only once, so a large
-        // empty area cannot consume the 256-entry queue with duplicates.
-        revealed_[next] = 1;
-        ++revealedSafeCells_;
-        queue[tail++] = static_cast<uint8_t>(next);
+        if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
+          queue[tail++] = static_cast<uint8_t>(next);
+        }
       }
     }
   }
@@ -727,22 +685,11 @@ bool MinesweeperActivity::saveGame() {
   const uint8_t selected = static_cast<uint8_t>(std::clamp(selectedCellIndex_, 0, cellCount - 1));
   const uint8_t savedOfficialScore = static_cast<uint8_t>(std::clamp(officialScore, 0, 255));
 
-  uint16_t crc = 0xFFFF;
-  crc = crc16Value(crc, SAVE_MAGIC);
-  crc = crc16Value(crc, grid);
-  crc = crc16Value(crc, stateFlags);
-  crc = crc16Value(crc, selected);
-  crc = crc16Value(crc, savedOfficialScore);
-  crc = crc16Update(crc, mines_.data(), packedBytes);
-  crc = crc16Update(crc, revealed_.data(), packedBytes);
-  crc = crc16Update(crc, flagged_.data(), packedBytes);
-
   bool ok = writeValue(file, SAVE_MAGIC) && writeValue(file, grid) && writeValue(file, stateFlags) &&
             writeValue(file, selected) && writeValue(file, savedOfficialScore);
   if (ok) ok = file.write(mines_.data(), packedBytes) == packedBytes;
   if (ok) ok = file.write(revealed_.data(), packedBytes) == packedBytes;
   if (ok) ok = file.write(flagged_.data(), packedBytes) == packedBytes;
-  if (ok) ok = writeValue(file, crc);
   file.close();
 
   if (!ok) {
@@ -783,7 +730,7 @@ bool MinesweeperActivity::loadSavedGame() {
   const int cellCount = totalCells();
   const size_t packedBytes = static_cast<size_t>((cellCount + 7) / 8);
   constexpr size_t headerBytes = sizeof(uint32_t) + 4 * sizeof(uint8_t);
-  const size_t expectedSize = headerBytes + 3 * packedBytes + sizeof(uint16_t);
+  const size_t expectedSize = headerBytes + 3 * packedBytes;
   if (file.size() != expectedSize || selected >= cellCount) {
     file.close();
     clearSavedGame();
@@ -794,24 +741,12 @@ bool MinesweeperActivity::loadSavedGame() {
   mines_.fill(0);
   revealed_.fill(0);
   flagged_.fill(0);
-  uint16_t savedCrc = 0;
   ok = file.read(mines_.data(), packedBytes) == static_cast<int>(packedBytes);
   if (ok) ok = file.read(revealed_.data(), packedBytes) == static_cast<int>(packedBytes);
   if (ok) ok = file.read(flagged_.data(), packedBytes) == static_cast<int>(packedBytes);
-  if (ok) ok = readValue(file, savedCrc);
   file.close();
 
-  uint16_t calculatedCrc = 0xFFFF;
-  calculatedCrc = crc16Value(calculatedCrc, magic);
-  calculatedCrc = crc16Value(calculatedCrc, grid);
-  calculatedCrc = crc16Value(calculatedCrc, stateFlags);
-  calculatedCrc = crc16Value(calculatedCrc, selected);
-  calculatedCrc = crc16Value(calculatedCrc, savedOfficialScore);
-  calculatedCrc = crc16Update(calculatedCrc, mines_.data(), packedBytes);
-  calculatedCrc = crc16Update(calculatedCrc, revealed_.data(), packedBytes);
-  calculatedCrc = crc16Update(calculatedCrc, flagged_.data(), packedBytes);
-
-  if (!ok || savedCrc != calculatedCrc) {
+  if (!ok) {
     clearSavedGame();
     resetGame();
     return false;
@@ -963,13 +898,30 @@ void MinesweeperActivity::renderMenu() {
     renderer.drawRoundedRect(actionX, actionY, actionWidth, actionHeight, 1, 6, true);
   }
 
+  // Disabled Continue: keep the control visible, but dither its label, value
+  // and outline to medium gray when there is no saved game.
+  if (!hasSavedGame_) {
+    for (int visible = 0; visible < drawnRows; ++visible) {
+      if (topIndex_ + visible != 5) continue;
+      const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;
+      const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;
+      const int actionY = rowTop + actionInsetY;
+      const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);
+      for (int y = actionY; y < actionY + actionHeight; ++y) {
+        for (int x = actionX; x < actionX + actionWidth; ++x) {
+          if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);
+        }
+      }
+    }
+  }
+
   const Rect scorePanel = scoreTableRect(renderer, mappedInput);
   renderer.fillRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, false);
   renderer.drawRect(scorePanel.x, scorePanel.y, scorePanel.width, scorePanel.height, 1, true);
   const int headerRowHeight = 30;
   const int dataTop = scorePanel.y + headerRowHeight;
   const int dataHeight = scorePanel.height - headerRowHeight;
-  const int splitX = scorePanel.x + scorePanel.width * 2 / 5;
+  const int splitX = scorePanel.x + scorePanel.width / 2;
 
   renderer.drawLine(scorePanel.x, dataTop, scorePanel.x + scorePanel.width, dataTop, 1, true);
   renderer.drawLine(splitX, dataTop, splitX, scorePanel.y + scorePanel.height, 1, true);
@@ -982,7 +934,7 @@ void MinesweeperActivity::renderMenu() {
   };
 
   const Rect scoreHeader{scorePanel.x, scorePanel.y, scorePanel.width, headerRowHeight};
-  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "SCORES");
+  drawCenteredCellText(UI_12_FONT_ID, scoreHeader, "Meilleurs scores");
 
   constexpr const char* SCORE_GRID_LABELS[SCORE_GRID_COUNT] = {"5 x 5", "9 x 9", "12 x 12", "16 x 16"};
   for (int row = 0; row < SCORE_GRID_COUNT; ++row) {
@@ -1177,27 +1129,5 @@ void MinesweeperActivity::renderGrid() {
 }
 
 void MinesweeperActivity::renderResult() {
-  if (gameOver_) {
-    renderGrid();
-    return;
-  }
-
-  renderer.clearScreen();
-  const auto& metrics = UITheme::getInstance().getMetrics();
-  const Rect header = headerRect(renderer, mappedInput);
-  if (mappedInput.hasTouchHardware()) {
-    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Continuer", false);
-  } else {
-    GUI.drawHeader(renderer, header, "Continuer", nullptr, false);
-  }
-
-  const int x = metrics.contentSidePadding;
-  const int y = header.y + header.height + metrics.verticalSpacing * 2;
-  renderer.drawText(UI_12_FONT_ID, x, y, "Aucune partie sauvegardee");
-  renderer.drawText(UI_10_FONT_ID, x, y + renderer.getLineHeight(UI_12_FONT_ID) + metrics.verticalSpacing,
-                    "pour le moment.");
-
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
-  renderer.displayBuffer();
+  renderGrid();
 }
