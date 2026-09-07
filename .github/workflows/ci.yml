@@ -38,7 +38,7 @@ jobs:
       - name: Build X4 Pro firmware
         run: |
           set -euo pipefail
-          pio run -j1 -e x4-pro | tee pio-x4-pro.log
+          pio run -e x4-pro | tee pio-x4-pro.log
 
       - name: Extract firmware stats
         run: |
