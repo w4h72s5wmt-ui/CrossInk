@@ -35,6 +35,42 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      - name: Apply Minesweeper menu cosmetics
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/activities/home/MinesweeperActivity.cpp")
+          text = path.read_text()
+
+          replacements = [
+              (
+                  '''  if (row == 5) {\n    continueGame();\n    return;\n  }''',
+                  '''  if (row == 5) {\n    if (hasSavedGame_) continueGame();\n    return;\n  }''',
+              ),
+              (
+                  '''                                               "Ecraser la partie en cours ?"),''',
+                  '''                                               "Cela effacera la partie en cours"),''',
+              ),
+              (
+                  '''  const int splitX = scorePanel.x + scorePanel.width * 2 / 5;''',
+                  '''  const int splitX = scorePanel.x + scorePanel.width / 2;''',
+              ),
+              (
+                  '''  }\n\n  const Rect scorePanel = scoreTableRect(renderer, mappedInput);''',
+                  '''  }\n\n  // Disabled Continue: keep the control visible, but dither its label, value\n  // and outline to medium gray when there is no saved game.\n  if (!hasSavedGame_) {\n    for (int visible = 0; visible < drawnRows; ++visible) {\n      if (topIndex_ + visible != 5) continue;\n      const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;\n      const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;\n      const int actionY = rowTop + actionInsetY;\n      const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);\n      for (int y = actionY; y < actionY + actionHeight; ++y) {\n        for (int x = actionX; x < actionX + actionWidth; ++x) {\n          if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);\n        }\n      }\n    }\n  }\n\n  const Rect scorePanel = scoreTableRect(renderer, mappedInput);''',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"Expected exactly one match, got {count}: {old[:60]!r}")
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
       - name: Build X4 Pro firmware
         run: |
           set -euo pipefail
