@@ -4,13 +4,16 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
+#include <variant>
 
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
+#include "PredictiveText.h"
 
-enum class InputType { Text, Password, Url };
+enum class InputType { Text, Password, Url, Multiline };
 
 // Text entry on the FreeInkUI keyboard component: the SDK layout tables and
 // keyboard() do the key rendering and hit-rect registration, InteractionBuffer
@@ -21,13 +24,24 @@ class KeyboardEntryActivity : public Activity {
   explicit KeyboardEntryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                  std::string title = "Enter Text", std::string initialText = "",
                                  const size_t maxLength = 0, InputType inputType = InputType::Text,
-                                 const size_t minLength = 0)
+                                 const size_t minLength = 0,
+                                 std::function<void(const std::string&)> forcedExitHandler = {})
       : Activity("KeyboardEntry", renderer, mappedInput),
         title(std::move(title)),
         text(std::move(initialText)),
         maxLength(maxLength),
         inputType(inputType),
-        minLength(minLength) {}
+        minLength(minLength),
+        forcedExitHandler(std::move(forcedExitHandler)) {}
+
+  ~KeyboardEntryActivity() override {
+    // OK and Cancel have already produced an explicit ActivityResult. A
+    // replacement (notably deep sleep) destroys the editor without either
+    // path, so give its owner one last chance to persist the live draft.
+    if (forcedExitHandler && !result.isCancelled && !std::holds_alternative<KeyboardResult>(result.data)) {
+      forcedExitHandler(text);
+    }
+  }
 
   void onEnter() override;
   void onExit() override;
@@ -40,7 +54,9 @@ class KeyboardEntryActivity : public Activity {
   size_t maxLength;
   InputType inputType;
   size_t minLength;
+  std::function<void(const std::string&)> forcedExitHandler;
   bool passwordVisible = false;
+  PredictiveText predictiveText;
 
   ButtonNavigator buttonNavigator;
 
@@ -48,14 +64,15 @@ class KeyboardEntryActivity : public Activity {
   // layouts (with the always-visible number row); the URL layers are
   // app-defined tables in the .cpp.
   freeink::ui::KeyboardLayoutId layoutId = freeink::ui::KeyboardLayoutId::QwertyEn;
+  bool showLangKey = false;
   bool shifted = false;
   bool symbols = false;
   bool urlPanel = false;  // URL snippet panel replaces the letter layer
 
   // Key hit rects registered by the keyboard component during render();
-  // loop() routes touch snapshots against them. 5-row EN layout registers 41
-  // keys, so 48 leaves headroom.
-  freeink::ui::InteractionBuffer<48> interactions;
+  // loop() routes touch snapshots against them. Cyrillic's wider rows register
+  // 48 keys, so 56 retains headroom for the double-buffered interaction table.
+  freeink::ui::InteractionBuffer<56> interactions;
 
   // GPIO selection over the current layout grid (row/col in layout terms;
   // the bottom action row is just the last row).
@@ -82,9 +99,10 @@ class KeyboardEntryActivity : public Activity {
   freeink::ui::TouchHoldRouter touchRouter;
 
   // loop() runs on the main task while render() rebuilds the interaction
-  // table on the render task; routing against a half-built table would read
-  // torn entries, so taps are dropped during the rebuild window. atomic (not
-  // volatile) so the flag also orders the table writes on dual-core targets.
+  // table on the render task. This is only the first-published-table gate;
+  // later renders publish into the SDK's double buffer without clearing it,
+  // so the previous complete table remains routable during a rebuild. Atomic
+  // release/acquire ordering pairs the first publish with the main task.
   std::atomic<bool> interactionsReady{false};
 
   int delPressCount = 0;
@@ -100,6 +118,7 @@ class KeyboardEntryActivity : public Activity {
   // Advance of s[start, end) measured in place by temporarily null-terminating
   // at `end` — avoids a substr temporary per measurement.
   int measureRange(std::string& s, int start, int end) const;
+  bool rangeIsRtl(std::string& s, int start, int end) const;
   // Largest line end in (start, s.length()] whose advance fits maxWidth.
   // Binary search over the monotonic prefix advance; always advances at least
   // one byte so an oversized glyph cannot stall the wrap loop.
@@ -121,6 +140,8 @@ class KeyboardEntryActivity : public Activity {
   bool backspaceUtf8();
   static size_t utf8Prev(const std::string& s, size_t pos);
   static size_t utf8Next(const std::string& s, size_t pos);
+  bool predictiveEnabled() const;
+  freeink::ui::Rect predictiveBarRect() const;
 
   freeink::ui::Rect keyboardRect() const;
 
