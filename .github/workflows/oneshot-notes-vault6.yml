@@ -1,0 +1,70 @@
+name: One-shot Notes vault6 build
+
+on:
+  push:
+    branches: [notes-encrypted-vault-34142490266]
+    paths:
+      - .github/workflows/oneshot-notes-vault6.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v6
+        with:
+          ref: notes-encrypted-vault-34142490266
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Apply Notes vault6 patch
+        run: python3 tools/apply_notes_vault_6_mixed.py
+
+      - name: Validate patch
+        run: git diff --check
+
+      - name: Commit feature sources
+        run: |
+          set -euo pipefail
+          git config user.name "w4h72s5wmt-ui"
+          git config user.email "w4h72s5wmt@privaterelay.appleid.com"
+          git rm .github/workflows/oneshot-notes-vault6.yml tools/apply_notes_vault_6_mixed.py
+          git add src/activities/home/NotesActivity.cpp
+          git commit -m "feat: use 6-cell Notes vault with mixed unlocked list"
+          git push origin HEAD:notes-encrypted-vault-34142490266
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Build X4 Pro firmware
+        run: |
+          set -euo pipefail
+          pio run -e x4-pro | tee pio-x4-pro-notes-vault6.log
+
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-notes-vault6-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-notes-vault6-${{ github.run_number }}-log
+          path: pio-x4-pro-notes-vault6.log
+          if-no-files-found: ignore
