@@ -8,6 +8,7 @@
 #include <array>
 #include <cctype>
 #include <memory>
+#include <utility>
 
 #include "MappedInputManager.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -92,6 +93,33 @@ void drawTrashIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
   renderer.drawLine(x + 6, y + 9, x + 6, y + iconHeight - 3, 1, black);
   renderer.drawLine(x + iconWidth - 7, y + 9, x + iconWidth - 7, y + iconHeight - 3, 1, black);
 }
+
+bool saveNoteFile(const std::string& path, const std::string& text) {
+  FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) return false;
+  const size_t written = text.empty() ? 0 : file.write(reinterpret_cast<const uint8_t*>(text.data()), text.size());
+  file.close();
+  return written == text.size();
+}
+
+class NotesKeyboardActivity final : public KeyboardEntryActivity {
+ public:
+  NotesKeyboardActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string title,
+                        std::string initialText, const size_t maxLength, std::string path)
+      : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
+                              InputType::Multiline),
+        path(std::move(path)) {}
+
+  void onExit() override {
+    if (!saveNoteFile(path, currentText())) {
+      LOG_ERR("NOTES", "Failed to autosave note before editor exit: %s", path.c_str());
+    }
+    KeyboardEntryActivity::onExit();
+  }
+
+ private:
+  std::string path;
+};
 }  // namespace
 
 NotesActivity::NotesActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -263,11 +291,7 @@ bool NotesActivity::noteContains(const std::string& path, const std::string& nee
 
 bool NotesActivity::saveNote(const std::string& path, const std::string& text) const {
   if (text.size() > kMaxNoteBytes) return false;
-  FsFile file = Storage.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
-  if (!file) return false;
-  const size_t written = text.empty() ? 0 : file.write(reinterpret_cast<const uint8_t*>(text.data()), text.size());
-  file.close();
-  return written == text.size();
+  return saveNoteFile(path, text);
 }
 
 void NotesActivity::editNote(const std::string& path, const std::string& title) {
@@ -275,15 +299,8 @@ void NotesActivity::editNote(const std::string& path, const std::string& title) 
   if (!loadNote(path, initialText)) initialText.clear();
 
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes,
-                                              InputType::Multiline),
-      [this, path](const ActivityResult& result) {
-        if (!result.isCancelled) {
-          const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
-          if (keyboard && !saveNote(path, keyboard->text)) {
-            LOG_ERR("NOTES", "Failed to save note: %s", path.c_str());
-          }
-        }
+      std::make_unique<NotesKeyboardActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes, path),
+      [this](const ActivityResult&) {
         reloadNotes();
         applyFilter();
         requestUpdate();
