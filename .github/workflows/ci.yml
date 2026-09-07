@@ -49,8 +49,12 @@ jobs:
                   '''  if (row == 5) {\n    if (hasSavedGame_) continueGame();\n    return;\n  }''',
               ),
               (
-                  '''                                               "Ecraser la partie en cours ?"),''',
-                  '''                                               "Cela effacera la partie en cours"),''',
+                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Reinitialiser les scores",\n                                               "Effacer tous les meilleurs scores ?"),''',
+                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Réinitialiser les scores ?",\n                                               ""),''',
+              ),
+              (
+                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Nouvelle partie",\n                                               "Ecraser la partie en cours ?"),''',
+                  '''        std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Effacer la partie en cours :",\n                                               ""),''',
               ),
               (
                   '''void MinesweeperActivity::continueGame() {\n  if (!hasSavedGame_) {\n    gameOver_ = false;\n    viewMode_ = ViewMode::Result;\n    requestUpdate();\n    return;\n  }\n  assistedCounterChoice = assistedCounterActive;\n  enterGrid();\n}''',
