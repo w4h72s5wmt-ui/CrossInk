@@ -25,44 +25,16 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('src/activities/home/MinesweeperActivity.cpp')
           text = path.read_text()
 
-          old_flood = '''void MinesweeperActivity::revealFlood(const int startIndex) {
-            std::array<uint8_t, kMaxCells> queue{};
-            const int dimension = gridDimension();
-            const int cellCount = dimension * dimension;
-            int head = 0;
-            int tail = 0;
-            queue[tail++] = static_cast<uint8_t>(startIndex);
-
-            while (head < tail) {
-              const int index = queue[head++];
-              if (index < 0 || index >= cellCount || revealed_[index] || flagged_[index] || mines_[index]) continue;
-              revealed_[index] = 1;
-              ++revealedSafeCells_;
-              if (adjacentMineCount(index) != 0) continue;
-
-              const int row = index / dimension;
-              const int col = index % dimension;
-              for (int dr = -1; dr <= 1; ++dr) {
-                for (int dc = -1; dc <= 1; ++dc) {
-                  if (dr == 0 && dc == 0) continue;
-                  const int nr = row + dr;
-                  const int nc = col + dc;
-                  if (nr < 0 || nr >= dimension || nc < 0 || nc >= dimension) continue;
-                  const int next = nr * dimension + nc;
-                  if (!revealed_[next] && !flagged_[next] && !mines_[next] && tail < kMaxCells) {
-                    queue[tail++] = static_cast<uint8_t>(next);
-                  }
-                }
-              }
-            }
-          }
-          '''
-
-          new_flood = '''void MinesweeperActivity::revealFlood(const int startIndex) {
+          flood_pattern = re.compile(
+              r"void MinesweeperActivity::revealFlood\(const int startIndex\) \{.*?\n\}\n\nvoid MinesweeperActivity::toggleFlag",
+              re.S,
+          )
+          flood_replacement = '''void MinesweeperActivity::revealFlood(const int startIndex) {
             std::array<uint8_t, kMaxCells> queue{};
             CellBits queued{};
             const int dimension = gridDimension();
@@ -96,30 +68,37 @@ jobs:
               }
             }
           }
-          '''
 
-          old_render = '''      for (int y = actionY; y < actionY + actionHeight; ++y) {
-                for (int x = actionX; x < actionX + actionWidth; ++x) {
-                  if (((x + y) & 1) == 0) renderer.fillRect(x, y, 1, 1, false);
-                }
-              }
-          '''
+          void MinesweeperActivity::toggleFlag'''
 
-          new_render = '''      // One horizontal erase span every other row gives the same
-              // disabled/dithered impression with O(height) draw calls instead of
-              // O(width * height) single-pixel calls.
-              for (int y = actionY; y < actionY + actionHeight; y += 2) {
-                renderer.fillRect(actionX, y, actionWidth, 1, false);
-              }
-          '''
+          text, flood_count = flood_pattern.subn(flood_replacement, text, count=1)
+          if flood_count != 1:
+              raise SystemExit(f'revealFlood replacement count={flood_count}')
 
-          if old_flood not in text:
-              raise SystemExit('revealFlood block not found')
-          if old_render not in text:
-              raise SystemExit('disabled Continue render block not found')
+          render_pattern = re.compile(
+              r"(?P<indent>\s*)for \(int y = actionY; y < actionY \+ actionHeight; \+\+y\) \{\n"
+              r"(?P=indent)  for \(int x = actionX; x < actionX \+ actionWidth; \+\+x\) \{\n"
+              r"(?P=indent)    if \(\(\(x \+ y\) & 1\) == 0\) renderer\.fillRect\(x, y, 1, 1, false\);\n"
+              r"(?P=indent)  \}\n"
+              r"(?P=indent)\}",
+              re.S,
+          )
 
-          text = text.replace(old_flood, new_flood, 1)
-          text = text.replace(old_render, new_render, 1)
+          def repl(match):
+              i = match.group('indent')
+              return (
+                  f"{i}// One horizontal erase span every other row gives the same\n"
+                  f"{i}// disabled/dithered impression with O(height) draw calls instead of\n"
+                  f"{i}// O(width * height) single-pixel calls.\n"
+                  f"{i}for (int y = actionY; y < actionY + actionHeight; y += 2) {{\n"
+                  f"{i}  renderer.fillRect(actionX, y, actionWidth, 1, false);\n"
+                  f"{i}}}"
+              )
+
+          text, render_count = render_pattern.subn(repl, text, count=1)
+          if render_count != 1:
+              raise SystemExit(f'disabled Continue replacement count={render_count}')
+
           path.write_text(text)
           PY
 
