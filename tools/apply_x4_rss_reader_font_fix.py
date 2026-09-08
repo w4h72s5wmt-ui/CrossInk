@@ -35,10 +35,49 @@ rss = replace_once(
     "RSS draw article body with real reader font",
 )
 
+# The sort selector used to be vertically centered in the whole touch target,
+# while TouchHeaderBackButton positions the title in its 52px visual lane with
+# TITLE_VERTICAL_OFFSET. Align the selector's actual font baseline with the
+# title baseline. The touch rectangle itself is deliberately left unchanged.
+rss = replace_once(
+    rss,
+    '''      fui::TextStyle sortStyle = screen.theme().smallText;
+      sortStyle.align = fui::TextAlign::Center;
+      sortStyle.maxLines = 1;
+      const Rect touch = sortTouchRect(renderer, mappedInput);
+      screen.target().text(fui::Rect{static_cast<int16_t>(touch.x), static_cast<int16_t>(touch.y),
+                                     static_cast<int16_t>(touch.width), static_cast<int16_t>(touch.height)},
+                           sortMode == SortMode::DATE_DESC ? "D v" : "SRC", sortStyle);
+''',
+    '''      fui::TextStyle sortStyle = screen.theme().smallText;
+      sortStyle.align = fui::TextAlign::Center;
+      sortStyle.maxLines = 1;
+      const Rect touch = sortTouchRect(renderer, mappedInput);
+      const auto headerLayout = TouchHeaderBackButton::layout(headerRect);
+      const int iconBottom = headerLayout.iconRect.y +
+                             (headerLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2;
+      const int availableOffset = std::max(0, headerRect.y + headerRect.height - iconBottom);
+      const int titleOffset = std::clamp(TouchHeaderBackButton::TITLE_VERTICAL_OFFSET, 0, availableOffset);
+      const auto scale = uiScaleSpec();
+      const int titleBaselineY =
+          headerLayout.iconRect.y + titleOffset +
+          std::max(0, (headerLayout.iconRect.height - renderer.getLineHeight(scale.titleFontId)) / 2) +
+          renderer.getFontAscenderSize(scale.titleFontId);
+      const int sortLineHeight = renderer.getLineHeight(scale.smallFontId);
+      const int sortTop = titleBaselineY - renderer.getFontAscenderSize(scale.smallFontId);
+      screen.target().text(fui::Rect{static_cast<int16_t>(touch.x), static_cast<int16_t>(sortTop),
+                                     static_cast<int16_t>(touch.width), static_cast<int16_t>(sortLineHeight)},
+                           sortMode == SortMode::DATE_DESC ? "D v" : "SRC", sortStyle);
+''',
+    "RSS sort selector title-baseline alignment",
+)
+
 if "bodyStyle.font = readerFontId" in rss:
     raise RuntimeError("RSS reader font is still being passed as a FreeInkUI font slot")
 if "renderer.drawText(readerFontId, lineRect.x, lineRect.y" not in rss:
     raise RuntimeError("RSS direct reader-font drawing is missing")
+if "const int sortTop = titleBaselineY - renderer.getFontAscenderSize(scale.smallFontId);" not in rss:
+    raise RuntimeError("RSS sort selector baseline alignment is missing")
 
 rss_path.write_text(rss)
-print("Applied RSS global reader font-size rendering fix.")
+print("Applied RSS reader font-size and header sort baseline fixes.")
