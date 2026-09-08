@@ -71,6 +71,7 @@ class RssNewsActivity final : public Activity {
   RssItem* feedItems = nullptr;
   freeink::ui::ListItem* listItems = nullptr;
   size_t articleCount = 0;
+  size_t articleLineOffset = 0;
   int selectorIndex = 0;
   int topIndex = 0;
   int visibleRows = 1;
@@ -100,6 +101,7 @@ class RssNewsActivity final : public Activity {
   void activateSelected();
   void openArticle(size_t articleIndex);
   void closeArticle();
+  void scrollArticle(int deltaLines);
 
   void requestManualRefresh();
   void launchWifiSelection();
