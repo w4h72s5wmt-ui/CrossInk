@@ -11,6 +11,7 @@ PATCHES = (
     "tools/apply_x4_notes_title_lock_visibility_fix.py",
     "tools/apply_x4_minesweeper_save_timestamp.py",
     "tools/apply_x4_rss_reader_font_fix.py",
+    "tools/apply_x4_rss_feed_config.py",
 )
 
 for patch in PATCHES:
@@ -182,5 +183,11 @@ require("src/activities/home/RssNewsActivity.cpp", "renderer.drawText(readerFont
         "RSS reader font rendering missing")
 reject("src/activities/home/RssNewsActivity.cpp", "bodyStyle.font = readerFontId",
        "RSS reader font still routed through FreeInkUI slot")
+require("src/activities/home/RssNewsActivity.h", 'static constexpr char FEEDS_PATH[] = "/RSS/feeds.txt";',
+        "RSS SD feed configuration missing")
+require("src/activities/home/RssNewsActivity.cpp", "header.sourceHash != sourceConfigHash()",
+        "RSS cache/config binding missing")
+reject("src/activities/home/RssNewsActivity.h", "Le Figaro", "Removed Figaro default feed remains")
+reject("src/activities/home/RssNewsActivity.h", "Numerama", "Removed Numerama default feed remains")
 
 print("Applied and validated combined X4 Pro Notes/Minesweeper/RSS overlay.")
