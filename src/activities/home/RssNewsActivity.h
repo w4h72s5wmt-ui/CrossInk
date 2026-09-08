@@ -2,11 +2,11 @@
 
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
+#include <Memory.h>
 #include <RssParser.h>
 
 #include <array>
 #include <atomic>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,12 +36,15 @@ class RssNewsActivity final : public Activity {
     const char* url;
   };
 
-  static constexpr size_t SOURCE_COUNT = 5;
-  static constexpr size_t ITEMS_PER_SOURCE = 5;
+  // X4 Pro only: keep a generous offline archive. The feed parser is bounded
+  // to 100 current items/source while the SD cache preserves older unique
+  // entries until that source reaches the same 100-item history limit.
+  static constexpr size_t SOURCE_COUNT = 8;
+  static constexpr size_t ITEMS_PER_SOURCE = 100;
   static constexpr size_t MAX_ARTICLES = SOURCE_COUNT * ITEMS_PER_SOURCE;
-  static constexpr size_t FEED_ITEM_CAPACITY = 8;
-  static constexpr uint32_t CACHE_MAGIC = 0x52535331;  // RSS1
-  static constexpr uint16_t CACHE_VERSION = 1;
+  static constexpr size_t FEED_ITEM_CAPACITY = ITEMS_PER_SOURCE;
+  static constexpr uint32_t CACHE_MAGIC = 0x52535332;  // RSS2
+  static constexpr uint16_t CACHE_VERSION = 2;
   static constexpr char CACHE_PATH[] = "/.crosspoint/rss_news.bin";
   static constexpr char CACHE_TMP_PATH[] = "/.crosspoint/rss_news.tmp";
 
@@ -50,16 +53,23 @@ class RssNewsActivity final : public Activity {
   static constexpr std::array<Source, SOURCE_COUNT> SOURCES = {{
       {"Le Figaro", "https://rss.lefigaro.fr/lefigaro/laune"},
       {"iGeneration", "https://www.igen.fr/rss"},
+      {"iPhoneSoft", "https://feeds.feedburner.com/IphoneSoft"},
       {"Jeuxvideo.com", "https://www.jeuxvideo.com/rss/rss.xml"},
       {"Numerama", "https://www.numerama.com/feed/"},
       {"Frandroid", "https://www.frandroid.com/feed"},
+      {"Science & Vie", "https://www.science-et-vie.com/feed"},
+      {"Futura", "https://www.futura-sciences.com/rss/actualites.xml"},
   }};
 
   ButtonNavigator buttonNavigator;
   State state = State::LIST;
   ScreenTransitionRefresh screenTransitionRefresh;
-  std::unique_ptr<CachedArticle[]> articles;
-  std::unique_ptr<RssItem[]> feedItems;
+  HeapByteBuffer articleStorage;
+  HeapByteBuffer feedStorage;
+  HeapByteBuffer listItemStorage;
+  CachedArticle* articles = nullptr;
+  RssItem* feedItems = nullptr;
+  freeink::ui::ListItem* listItems = nullptr;
   size_t articleCount = 0;
   int selectorIndex = 0;
   int topIndex = 0;
@@ -74,7 +84,6 @@ class RssNewsActivity final : public Activity {
   freeink::ui::GfxRendererTarget uiTarget;
   UiApp app;
   std::atomic<bool> uiReady{false};
-  std::array<freeink::ui::ListItem, MAX_ARTICLES + 1> listItems{};
 
   static void rootScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
@@ -87,7 +96,7 @@ class RssNewsActivity final : public Activity {
   bool ensureBuffers();
   bool loadCache();
   bool saveCache() const;
-  void replaceSourceArticles(uint8_t sourceIndex, const RssItem* items, size_t count);
+  void mergeSourceArticles(uint8_t sourceIndex, RssItem* items, size_t count);
   void activateSelected();
   void openArticle(size_t articleIndex);
   void closeArticle();
