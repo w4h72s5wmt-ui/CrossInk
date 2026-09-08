@@ -16,6 +16,7 @@ PATCHES = (
     "tools/apply_x4_rss_readability_layout.py",
     "tools/apply_x4_rss_article_cleanup.py",
     "tools/apply_x4_rss_feed_limits.py",
+    "tools/apply_x4_rss_source_cleanup.py",
 )
 
 for patch in PATCHES:
@@ -202,12 +203,18 @@ require("src/activities/home/RssNewsActivity.cpp", "item.value = nullptr;",
         "RSS list still reserves a right-side value column")
 require("src/activities/home/RssNewsActivity.cpp", "formatPublishedDate(article.item.published",
         "RSS compact published date rendering missing")
-require("src/activities/home/RssArticleCache.cpp", 'constexpr char BODY_MAGIC[] = "XRSS2\\n";',
+require("src/activities/home/RssArticleCache.cpp", 'constexpr char BODY_MAGIC[] = "XRSS3\\n";',
         "RSS article body cache versioning missing")
-require("src/activities/home/RssArticleCache.cpp", "cleanExtractedText(text, textLength, item.title)",
-        "RSS article text cleaner missing")
+require("src/activities/home/RssArticleCache.cpp", "cleanExtractedText(text, textLength, item.title, item.summary, sourceName, item.link)",
+        "RSS source-aware article text cleaner missing")
 require("src/activities/home/RssArticleCache.cpp", 'tagEquals(name, "nav")',
         "RSS web chrome filtering missing")
+require("src/activities/home/RssArticleCache.cpp", "SourceCleanupProfile::FRANDROID",
+        "RSS Frandroid cleanup profile missing")
+require("src/activities/home/RssArticleCache.cpp", "SourceCleanupProfile::FUTURA",
+        "RSS Futura cleanup profile missing")
+require("src/activities/home/RssArticleCache.cpp", "lineRepeatedBySummary",
+        "RSS feed-summary redundancy filtering missing")
 require("src/activities/home/RssNewsActivity.cpp", "RssArticleCache::remove(articles[i].item);",
         "RSS stale article body pruning missing")
 require("src/activities/home/RssNewsActivity.cpp", "Purged article bodies for obsolete feed configuration",
