@@ -5,11 +5,12 @@
 
 #include <cstddef>
 
-// RSS fields are intentionally bounded. The reader only needs enough text for
-// an e-ink headline/summary view and must not let a large feed grow the heap.
+// X4 Pro RSS records are intentionally bounded so a malformed feed can never
+// grow memory without limit. The larger summary field keeps substantially more
+// offline text while still allowing hundreds of cached articles in PSRAM/SD.
 constexpr size_t RSS_TITLE_CAPACITY = 144;
 constexpr size_t RSS_LINK_CAPACITY = 384;
-constexpr size_t RSS_SUMMARY_CAPACITY = 320;
+constexpr size_t RSS_SUMMARY_CAPACITY = 2048;
 constexpr size_t RSS_PUBLISHED_CAPACITY = 56;
 
 struct RssItem {
@@ -25,8 +26,8 @@ enum class RssParserError { NONE, NO_ITEM_BUFFER, INVALID_INPUT, PARSER_MEMORY, 
  * Streaming RSS/Atom parser backed by a caller-owned fixed item buffer.
  *
  * The parser accepts RSS 2.0 <item> feeds and Atom <entry> feeds. It retains
- * only title, article URL, a short textual summary, and the publication date.
- * No feed document is buffered in full.
+ * only title, article URL, textual RSS content/summary, and the publication
+ * date. The feed document itself is never buffered in full.
  */
 class RssParser final : public Print {
  public:
