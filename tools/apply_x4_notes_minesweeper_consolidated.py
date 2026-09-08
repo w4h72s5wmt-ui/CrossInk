@@ -2,13 +2,15 @@ from pathlib import Path
 import runpy
 
 
-# Build 145 is the development baseline. The four historical patches recreate
-# its behaviour, then current-only format cleanup removes migration/compat paths.
+# Build 145 is the development baseline. These patches recreate its behaviour,
+# add the combined-app fixes, then current-only format cleanup removes
+# migration/compat paths.
 PATCHES = (
     "tools/apply_x4_notes_minesweeper_overrides.py",
     "tools/apply_x4_notes_minesweeper_optimizations.py",
     "tools/apply_x4_notes_title_lock_visibility_fix.py",
     "tools/apply_x4_minesweeper_save_timestamp.py",
+    "tools/apply_x4_rss_reader_font_fix.py",
 )
 
 for patch in PATCHES:
@@ -176,5 +178,9 @@ reject("src/activities/home/MinesweeperActivity.cpp", "SAVE_MAGIC_V4", "Mineswee
 reject("src/activities/home/MinesweeperActivity.cpp", "CellBits queued{};", "Minesweeper duplicate flood queue still present")
 require("src/activities/home/MinesweeperActivity.h", "std::array<char, 48> continueLabel_{};",
         "Minesweeper compact continue label missing")
+require("src/activities/home/RssNewsActivity.cpp", "renderer.drawText(readerFontId, lineRect.x, lineRect.y",
+        "RSS reader font rendering missing")
+reject("src/activities/home/RssNewsActivity.cpp", "bodyStyle.font = readerFontId",
+       "RSS reader font still routed through FreeInkUI slot")
 
-print("Applied and validated build-145 current-format-only Notes/Minesweeper overlay.")
+print("Applied and validated combined X4 Pro Notes/Minesweeper/RSS overlay.")
