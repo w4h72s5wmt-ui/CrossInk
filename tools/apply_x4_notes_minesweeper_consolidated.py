@@ -2,8 +2,8 @@ from pathlib import Path
 import runpy
 
 
-# Build 143 is the behavioural baseline. Keep the historical patch files as
-# small, reviewable units, but expose one deterministic entry point to CI.
+# Build 145 is the development baseline. The four historical patches recreate
+# its behaviour, then current-only format cleanup removes migration/compat paths.
 PATCHES = (
     "tools/apply_x4_notes_minesweeper_overrides.py",
     "tools/apply_x4_notes_minesweeper_optimizations.py",
@@ -32,11 +32,7 @@ def replace_section(text: str, start: str, end: str, replacement: str, label: st
     return text[:start_pos] + replacement + text[end_pos:]
 
 
-# Notes: encryption was already streamed while reading, but locking/saving a
-# note still built a second payload as large as the note. Stream encryption to
-# a temporary file and swap it into place only after authentication tag
-# generation succeeds. This removes the ~32 KiB worst-case extra heap peak
-# while retaining the existing CROSSNT2 on-disk format and rollback safety.
+# Notes: stream encrypted saves to avoid a second note-sized payload in heap.
 core_path = Path("src/activities/home/NotesActivityCore.inc")
 core = core_path.read_text()
 streaming_save = r'''bool saveEncryptedNoteFile(const std::string& path, const std::string& text, const std::string& pattern) {
@@ -53,7 +49,6 @@ streaming_save = r'''bool saveEncryptedNoteFile(const std::string& path, const s
   const std::string tempPath = path + ".crypt.tmp";
   const std::string backupPath = path + ".crypt.bak";
   if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
-  // Recover an interrupted previous swap before starting a new one.
   if (Storage.exists(backupPath.c_str())) {
     if (!Storage.exists(path.c_str())) {
       Storage.rename(backupPath.c_str(), path.c_str());
@@ -134,10 +129,7 @@ core = replace_section(
 )
 core_path.write_text(core)
 
-
-# Minesweeper: keep the integer types used by the proven build 143 code path so
-# std::clamp/max expressions stay type-safe. Retain only compact changes that do
-# not alter arithmetic types.
+# Safe compact state that does not disturb std::clamp/max arithmetic.
 header_path = Path("src/activities/home/MinesweeperActivity.h")
 header = header_path.read_text()
 header = replace_once(header, "  enum class ViewMode {\n", "  enum class ViewMode : uint8_t {\n", "Minesweeper compact view mode")
@@ -152,10 +144,11 @@ cpp = replace_once(cpp, "    std::array<char, 16> savedWhen{};\n", "    std::arr
                    "Minesweeper compact timestamp scratch")
 cpp_path.write_text(cpp)
 
+# Development-only policy: do not carry compatibility code for unpublished
+# formats. Old saves/notes may be discarded during development.
+runpy.run_path("tools/apply_x4_dev_current_formats_only.py", run_name="__main__")
 
-# Consolidation guard: if a future base refactor means one historical patch no
-# longer lands exactly, fail before the expensive firmware build rather than
-# silently shipping a half-applied Notes/Minesweeper variant.
+
 def require(path: str, needle: str, label: str) -> None:
     text = Path(path).read_text()
     if needle not in text:
@@ -168,17 +161,19 @@ def reject(path: str, needle: str, label: str) -> None:
         raise RuntimeError(f"Consolidation validation failed: {label}")
 
 
-require("src/activities/home/NotesActivityCore.inc", "kCryptoMagicV2", "Notes V2 encrypted format missing")
-require("src/activities/home/NotesActivityCore.inc", ".crypt.tmp", "Notes atomic streaming save missing")
+require("src/activities/home/NotesActivityCore.inc", ".crypt.tmp", "Notes streaming save missing")
 require("src/activities/home/NotesActivityCore.inc", "if (hasVault) {", "Notes passwordless locking missing")
 reject("src/activities/home/NotesActivityCore.inc", "std::vector<uint8_t> payload(headerBytes + text.size())",
        "Notes full-size encryption buffer still present")
+reject("src/activities/home/NotesActivityCore.inc", "kCryptoMagicV1", "Notes legacy encrypted format remains")
+reject("src/activities/home/NotesActivityCore.inc", "kLegacyPatternLength", "Notes legacy vault code remains")
+reject("src/activities/home/NotesActivityCore.inc", "migrateLockedNotes", "Notes migration code remains")
 require("src/activities/home/NotesViewerKeyboardBase.h", "if (headerActionReserveWidth() <= 0) return;",
         "Notes title/search lock suppression missing")
-require("src/activities/home/MinesweeperActivity.cpp", "SAVE_MAGIC_V4", "Minesweeper V4 compatibility missing")
 require("src/activities/home/MinesweeperActivity.cpp", "currentSaveDateTime()", "Minesweeper RTC timestamp missing")
+reject("src/activities/home/MinesweeperActivity.cpp", "SAVE_MAGIC_V4", "Minesweeper legacy save support remains")
 reject("src/activities/home/MinesweeperActivity.cpp", "CellBits queued{};", "Minesweeper duplicate flood queue still present")
 require("src/activities/home/MinesweeperActivity.h", "std::array<char, 48> continueLabel_{};",
         "Minesweeper compact continue label missing")
 
-print("Applied and validated consolidated build-143 Notes/Minesweeper optimizations.")
+print("Applied and validated build-145 current-format-only Notes/Minesweeper overlay.")
