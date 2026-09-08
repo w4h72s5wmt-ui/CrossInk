@@ -53,14 +53,14 @@ viewer = replace_once(
       drawNotesHeaderAction();
     } else {
       Rect iconRect = headerActionRect();
-      // Build 150 used +6 px and was too low; +3 px keeps the artwork
-      // between the original high position and that build's low position.
-      iconRect.y += 3;
+      // The header already aligns title and controls in the same vertical lane.
+      // Keep only the small optical correction needed by the padlock artwork.
+      iconRect.y += 2;
       drawOpenLockLight(iconRect);
     }
   }
 ''',
-    "Notes editor-only lock action and balanced alignment",
+    "Notes editor-only lock action and title-baseline alignment",
 )
 viewer_path.write_text(viewer)
 
@@ -83,7 +83,7 @@ core = replace_once(
 
 # The content editor knows the exact on-disk path. Use that instead of deriving
 # lock state from the displayed title (which is ambiguous for duplicate titles
-# or sanitised filenames), and apply the same +3 px visual correction.
+# or sanitised filenames), and apply the same optical alignment correction.
 core = replace_once(
     core,
     '''  int headerActionReserveWidth() const override { return kLockButtonWidth; }
@@ -96,11 +96,11 @@ core = replace_once(
 
   void drawHeaderAction() override {
     Rect iconRect = lockButtonRect();
-    iconRect.y += 3;
+    iconRect.y += 2;
     drawLockIcon(renderer, iconRect, true);
   }
 ''',
-    "Notes exact-path lock state and header icon alignment",
+    "Notes exact-path lock state and title-baseline alignment",
 )
 
 # Unlock through a temporary plaintext file and keep the encrypted original as
@@ -165,4 +165,4 @@ core = replace_once(
 )
 
 core_path.write_text(core)
-print("Applied editor-only Notes lock action, balanced icon alignment, exact-path state, and reliable unlock fixes.")
+print("Applied editor-only Notes lock action, title-baseline alignment, exact-path state, and reliable unlock fixes.")
