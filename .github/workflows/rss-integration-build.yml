@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-x4-pro:
@@ -15,82 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feat/rss-news-reader
           submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Remove duplicate RSS Home integration left by old workflow
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('src/activities/home/HomeActivity.cpp')
-          text = path.read_text()
-
-          text = text.replace(
-              '  RssNews,\n  RssNews,\n  RssNews,\n',
-              '  RssNews,\n')
-          text = text.replace(
-              '  items.push({"RSS", Library, HomeMenuAction::RssNews});\n'
-              '  items.push({"RSS", Library, HomeMenuAction::RssNews});\n'
-              '  items.push({"RSS", Library, HomeMenuAction::RssNews});\n',
-              '  items.push({"RSS", Library, HomeMenuAction::RssNews});\n')
-          text = text.replace(
-              '          case HomeMenuAction::RssNews:\n'
-              '            onRssNewsOpen();\n'
-              '            break;\n'
-              '          case HomeMenuAction::RssNews:\n'
-              '            onRssNewsOpen();\n'
-              '            break;\n'
-              '          case HomeMenuAction::RssNews:\n'
-              '            onRssNewsOpen();\n'
-              '            break;\n',
-              '          case HomeMenuAction::RssNews:\n'
-              '            onRssNewsOpen();\n'
-              '            break;\n')
-          text = text.replace(
-              '      case HomeMenuAction::RssNews:\n'
-              '        onRssNewsOpen();\n'
-              '        break;\n'
-              '      case HomeMenuAction::RssNews:\n'
-              '        onRssNewsOpen();\n'
-              '        break;\n'
-              '      case HomeMenuAction::RssNews:\n'
-              '        onRssNewsOpen();\n'
-              '        break;\n',
-              '      case HomeMenuAction::RssNews:\n'
-              '        onRssNewsOpen();\n'
-              '        break;\n')
-          text = text.replace(
-              'void HomeActivity::onRssNewsOpen() {\n'
-              '  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput), [](const ActivityResult&) {});\n'
-              '}\n\n'
-              'void HomeActivity::onRssNewsOpen() {\n'
-              '  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput), [](const ActivityResult&) {});\n'
-              '}\n\n'
-              'void HomeActivity::onRssNewsOpen() {\n'
-              '  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput), [](const ActivityResult&) {});\n'
-              '}\n',
-              'void HomeActivity::onRssNewsOpen() {\n'
-              '  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput), [](const ActivityResult&) {});\n'
-              '}\n')
-
-          path.write_text(text)
-          PY
-
-      - name: Commit cleanup if needed
-        shell: bash
-        run: |
-          if git diff --quiet -- src/activities/home/HomeActivity.cpp; then
-            echo "HomeActivity.cpp is already clean"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/activities/home/HomeActivity.cpp
-            git commit -m "fix(rss): remove duplicate Home integration"
-            git push origin HEAD:feat/rss-news-reader
-          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -102,3 +27,11 @@ jobs:
 
       - name: Build X4 Pro
         run: pio run -e x4-pro
+
+      - name: Publish X4 Pro firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrossInk-X4-Pro-RSS
+          path: .pio/build/x4-pro/firmware.bin
+          if-no-files-found: error
+          retention-days: 14
