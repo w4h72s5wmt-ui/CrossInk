@@ -25,13 +25,27 @@ namespace fui = freeink::ui;
 
 namespace {
 constexpr fui::ActionId ACTION_ROW = 1;
-constexpr size_t HTTP_BUFFER_SIZE = 2048;
+constexpr size_t HTTP_BUFFER_SIZE = 4096;
+constexpr size_t ARTICLE_PAGE_LINES = 8;
 
 struct CacheHeader {
   uint32_t magic;
   uint16_t version;
   uint16_t count;
 };
+
+HeapByteBuffer allocateRssBuffer(const size_t bytes) {
+  auto buffer = makePsramByteBufferNoThrow(bytes);
+  if (!buffer) buffer = makeHeapByteBufferNoThrow(bytes);
+  return buffer;
+}
+
+bool sameRssItem(const RssItem& left, const RssItem& right) {
+  if (left.link[0] && right.link[0]) return std::strcmp(left.link, right.link) == 0;
+  if (std::strcmp(left.title, right.title) != 0) return false;
+  if (left.published[0] || right.published[0]) return std::strcmp(left.published, right.published) == 0;
+  return true;
+}
 }  // namespace
 
 RssNewsActivity::RssNewsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -48,6 +62,7 @@ void RssNewsActivity::onEnter() {
   topIndex = 0;
   visibleRows = 1;
   articleCount = 0;
+  articleLineOffset = 0;
   refreshHadError = false;
   usedNetwork = false;
   goHomeAfterRefreshCancel = false;
@@ -72,8 +87,12 @@ void RssNewsActivity::onExit() {
   uiReady = false;
   articleTitleLines.clear();
   articleSummaryLines.clear();
-  feedItems.reset();
-  articles.reset();
+  listItems = nullptr;
+  feedItems = nullptr;
+  articles = nullptr;
+  listItemStorage.reset();
+  feedStorage.reset();
+  articleStorage.reset();
 
 #ifndef SIMULATOR
   if (usedNetwork || WiFi.getMode() != WIFI_MODE_NULL) {
@@ -87,23 +106,42 @@ void RssNewsActivity::onExit() {
 }
 
 bool RssNewsActivity::ensureBuffers() {
-  if (!articles) {
-    // ~23 KB at current field bounds; activity-lifetime allocation avoids
-    // per-refresh heap churn and keeps the same bounded path on C3 targets.
-    articles = makeUniqueNoThrow<CachedArticle[]>(MAX_ARTICLES);
-    if (!articles) {
+  if (!articleStorage) {
+    articleStorage = allocateRssBuffer(sizeof(CachedArticle) * MAX_ARTICLES);
+    if (!articleStorage) {
       LOG_ERR("RSS", "OOM allocating article cache (%zu records)", MAX_ARTICLES);
       return false;
     }
+    articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
+    std::memset(articles, 0, sizeof(CachedArticle) * MAX_ARTICLES);
+  } else if (!articles) {
+    articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
   }
-  if (!feedItems) {
-    // ~7 KB parser scratch. One feed is fetched at a time and this buffer is reused.
-    feedItems = makeUniqueNoThrow<RssItem[]>(FEED_ITEM_CAPACITY);
-    if (!feedItems) {
+
+  if (!feedStorage) {
+    feedStorage = allocateRssBuffer(sizeof(RssItem) * FEED_ITEM_CAPACITY);
+    if (!feedStorage) {
       LOG_ERR("RSS", "OOM allocating feed scratch (%zu records)", FEED_ITEM_CAPACITY);
       return false;
     }
+    feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
+    std::memset(feedItems, 0, sizeof(RssItem) * FEED_ITEM_CAPACITY);
+  } else if (!feedItems) {
+    feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
   }
+
+  if (!listItemStorage) {
+    listItemStorage = allocateRssBuffer(sizeof(fui::ListItem) * (MAX_ARTICLES + 1));
+    if (!listItemStorage) {
+      LOG_ERR("RSS", "OOM allocating RSS list items");
+      return false;
+    }
+    listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
+    std::memset(listItems, 0, sizeof(fui::ListItem) * (MAX_ARTICLES + 1));
+  } else if (!listItems) {
+    listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
+  }
+
   return true;
 }
 
@@ -172,8 +210,38 @@ bool RssNewsActivity::saveCache() const {
   return true;
 }
 
-void RssNewsActivity::replaceSourceArticles(const uint8_t sourceIndex, const RssItem* items, const size_t count) {
-  if (!articles || sourceIndex >= SOURCE_COUNT) return;
+void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* items, const size_t count) {
+  if (!articles || !items || sourceIndex >= SOURCE_COUNT) return;
+
+  size_t mergedCount = 0;
+  const size_t incomingCount = std::min(count, ITEMS_PER_SOURCE);
+  for (size_t i = 0; i < incomingCount; ++i) {
+    bool duplicate = false;
+    for (size_t j = 0; j < mergedCount; ++j) {
+      if (sameRssItem(items[i], items[j])) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) {
+      if (mergedCount != i) items[mergedCount] = items[i];
+      ++mergedCount;
+    }
+  }
+
+  // Reuse the per-feed scratch as the merge buffer: newest feed records first,
+  // then older unique SD-cached history up to 100 records for this source.
+  for (size_t i = 0; i < articleCount && mergedCount < ITEMS_PER_SOURCE; ++i) {
+    if (articles[i].sourceIndex != sourceIndex) continue;
+    bool duplicate = false;
+    for (size_t j = 0; j < mergedCount; ++j) {
+      if (sameRssItem(articles[i].item, items[j])) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) items[mergedCount++] = articles[i].item;
+  }
 
   size_t writeIndex = 0;
   for (size_t readIndex = 0; readIndex < articleCount; ++readIndex) {
@@ -183,7 +251,7 @@ void RssNewsActivity::replaceSourceArticles(const uint8_t sourceIndex, const Rss
   }
   articleCount = writeIndex;
 
-  const size_t addCount = std::min({count, ITEMS_PER_SOURCE, MAX_ARTICLES - articleCount});
+  const size_t addCount = std::min(mergedCount, MAX_ARTICLES - articleCount);
   for (size_t i = 0; i < addCount; ++i) {
     CachedArticle& article = articles[articleCount++];
     article = CachedArticle{};
@@ -225,6 +293,10 @@ void RssNewsActivity::screenHeader(UiApp::ScreenType& screen) {
 
 void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
   screenHeader(screen);
+  if (!listItems) {
+    screen.centeredText(tr(STR_MEMORY_ERROR), screen.theme().bodyText);
+    return;
+  }
 
   listItems[0] = fui::ListItem{};
   listItems[0].label = tr(STR_UPDATE);
@@ -242,7 +314,7 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
   }
 
   fui::ListProps props;
-  props.items = listItems.data();
+  props.items = listItems;
   props.count = static_cast<uint16_t>(articleCount + 1);
   props.selectedIndex = static_cast<int16_t>(selectorIndex);
   props.action = ACTION_ROW;
@@ -253,13 +325,6 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
   topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(articleCount + 1));
   props.topIndex = static_cast<uint16_t>(topIndex);
   screen.list(props);
-
-  if (articleCount == 0) {
-    // The explicit update row remains available above; this text explains why
-    // the screen is otherwise empty without starting any network activity.
-    fui::TextStyle centered = screen.theme().bodyText;
-    centered.align = fui::TextAlign::Center;
-  }
 }
 
 void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
@@ -279,11 +344,14 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
   const int16_t metaHeight = screen.target().lineHeight(metaStyle.font);
 
   for (const auto& line : articleTitleLines) {
+    if (screen.body().height < titleHeight) break;
     screen.target().text(screen.takeTop(titleHeight, theme.spaceXs), line.c_str(), titleStyle);
   }
   screen.spacer(theme.spaceSm);
-  screen.target().text(screen.takeTop(metaHeight, theme.spaceSm), SOURCES[article.sourceIndex].name, metaStyle);
-  if (article.item.published[0]) {
+  if (screen.body().height >= metaHeight) {
+    screen.target().text(screen.takeTop(metaHeight, theme.spaceSm), SOURCES[article.sourceIndex].name, metaStyle);
+  }
+  if (article.item.published[0] && screen.body().height >= metaHeight) {
     screen.target().text(screen.takeTop(metaHeight, theme.spaceMd), article.item.published, metaStyle);
   }
 
@@ -291,9 +359,10 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
     screen.centeredText(tr(STR_NO_ENTRIES), bodyStyle);
     return;
   }
-  for (const auto& line : articleSummaryLines) {
+
+  for (size_t i = articleLineOffset; i < articleSummaryLines.size(); ++i) {
     if (screen.body().height < bodyHeight) break;
-    screen.target().text(screen.takeTop(bodyHeight, theme.spaceXs), line.c_str(), bodyStyle);
+    screen.target().text(screen.takeTop(bodyHeight, theme.spaceXs), articleSummaryLines[i].c_str(), bodyStyle);
   }
 }
 
@@ -337,7 +406,8 @@ void RssNewsActivity::openArticle(const size_t articleIndex) {
   const int maxWidth = std::max(80, renderer.getScreenWidth() - margin * 2);
   const auto scale = uiScaleSpec();
   articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);
-  articleSummaryLines = renderer.wrappedText(scale.bodyFontId, article.item.summary, maxWidth, 24);
+  articleSummaryLines = renderer.wrappedText(scale.bodyFontId, article.item.summary, maxWidth, 160);
+  articleLineOffset = 0;
   state = State::ARTICLE;
   requestUpdate();
 }
@@ -345,8 +415,21 @@ void RssNewsActivity::openArticle(const size_t articleIndex) {
 void RssNewsActivity::closeArticle() {
   articleTitleLines.clear();
   articleSummaryLines.clear();
+  articleLineOffset = 0;
   state = State::LIST;
   requestUpdate();
+}
+
+void RssNewsActivity::scrollArticle(const int deltaLines) {
+  if (articleSummaryLines.empty()) return;
+  const size_t oldOffset = articleLineOffset;
+  if (deltaLines > 0) {
+    articleLineOffset = std::min(articleSummaryLines.size() - 1, articleLineOffset + static_cast<size_t>(deltaLines));
+  } else if (deltaLines < 0) {
+    const size_t amount = static_cast<size_t>(-deltaLines);
+    articleLineOffset = amount > articleLineOffset ? 0 : articleLineOffset - amount;
+  }
+  if (articleLineOffset != oldOffset) requestUpdate();
 }
 
 void RssNewsActivity::requestManualRefresh() {
@@ -394,9 +477,9 @@ void RssNewsActivity::onWifiSelectionComplete(const bool connected) {
 bool RssNewsActivity::fetchSource(const uint8_t sourceIndex, size_t& outCount, bool& cancelled) {
   outCount = 0;
   if (!feedItems || sourceIndex >= SOURCE_COUNT) return false;
-  for (size_t i = 0; i < FEED_ITEM_CAPACITY; ++i) feedItems[i] = RssItem{};
+  std::memset(feedItems, 0, sizeof(RssItem) * FEED_ITEM_CAPACITY);
 
-  RssParser parser(feedItems.get(), FEED_ITEM_CAPACITY);
+  RssParser parser(feedItems, FEED_ITEM_CAPACITY);
   HttpDownloader::DownloadOptions options;
   options.bufferSize = HTTP_BUFFER_SIZE;
   options.transport = HttpDownloader::Transport::WOLFSSL;
@@ -452,12 +535,11 @@ void RssNewsActivity::refreshFeeds() {
 
     size_t fetchedCount = 0;
     if (fetchSource(sourceIndex, fetchedCount, cancelled)) {
-      replaceSourceArticles(sourceIndex, feedItems.get(), fetchedCount);
+      mergeSourceArticles(sourceIndex, feedItems, fetchedCount);
       ++successfulSources;
     } else if (!cancelled) {
       refreshHadError = true;
-      // Keep the previous cached records for this source; one broken feed must
-      // not erase the other sources or make the whole reader unusable.
+      // Keep previous SD-cached records when a feed is temporarily unavailable.
     }
     if (cancelled) break;
   }
@@ -487,13 +569,16 @@ void RssNewsActivity::seedSimulatorArticles() {
   if (!articles) return;
   articleCount = 0;
   for (uint8_t sourceIndex = 0; sourceIndex < SOURCE_COUNT; ++sourceIndex) {
-    CachedArticle& article = articles[articleCount++];
-    article = CachedArticle{};
-    article.sourceIndex = sourceIndex;
-    snprintf(article.item.title, sizeof(article.item.title), "Exemple d'actualite %s", SOURCES[sourceIndex].name);
-    snprintf(article.item.summary, sizeof(article.item.summary),
-             "Ce contenu de demonstration permet de verifier la liste, le tactile et la lecture sans connexion WiFi.");
-    snprintf(article.item.published, sizeof(article.item.published), "Aujourd'hui");
+    for (size_t sample = 0; sample < 3; ++sample) {
+      CachedArticle& article = articles[articleCount++];
+      article = CachedArticle{};
+      article.sourceIndex = sourceIndex;
+      snprintf(article.item.title, sizeof(article.item.title), "Exemple %u - %s", static_cast<unsigned>(sample + 1),
+               SOURCES[sourceIndex].name);
+      snprintf(article.item.summary, sizeof(article.item.summary),
+               "Contenu hors ligne de demonstration pour verifier le cache SD, le tactile et la pagination de lecture.");
+      snprintf(article.item.published, sizeof(article.item.published), "Aujourd'hui");
+    }
   }
 }
 
@@ -506,7 +591,26 @@ void RssNewsActivity::loop() {
   }
 
   if (state == State::ARTICLE) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) closeArticle();
+    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      closeArticle();
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Down) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      scrollArticle(static_cast<int>(ARTICLE_PAGE_LINES));
+      return;
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Up) ||
+        mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+      scrollArticle(-static_cast<int>(ARTICLE_PAGE_LINES));
+      return;
+    }
+    const auto swipe = mappedInput.wasSwipe();
+    if (swipe == MappedInputManager::SwipeDir::Up) {
+      scrollArticle(static_cast<int>(ARTICLE_PAGE_LINES));
+    } else if (swipe == MappedInputManager::SwipeDir::Down) {
+      scrollArticle(-static_cast<int>(ARTICLE_PAGE_LINES));
+    }
     return;
   }
 
@@ -578,7 +682,7 @@ void RssNewsActivity::render(RenderLock&&) {
       labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_OPEN), tr(STR_UPDATE), tr(STR_DIR_DOWN));
       break;
     case State::ARTICLE:
-      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
+      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", tr(STR_DIR_UP), tr(STR_DIR_DOWN));
       break;
     case State::WIFI_SELECTION:
     case State::REFRESHING:
