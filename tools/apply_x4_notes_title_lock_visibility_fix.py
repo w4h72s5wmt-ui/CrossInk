@@ -136,9 +136,7 @@ core = replace_once(
       return;
     }
 
-    if (Storage.exists(backupPath.c_str()) && !Storage.remove(backupPath.c_str())) {
-      LOG_WARN("NOTES", "Unlocked note kept a stale backup: %s", backupPath.c_str());
-    }
+    if (Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
     requestUpdate(true);
   }
 ''',
