@@ -67,6 +67,7 @@ enum class HomeMenuAction {
   Minesweeper,
   RssNews,
   RssNews,
+  RssNews,
   FileTransfer,
   Settings,
 };
@@ -288,6 +289,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
   items.push({"Demineur", MinesweeperIcon, HomeMenuAction::Minesweeper});
   items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({"RSS", Library, HomeMenuAction::RssNews});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
@@ -314,6 +316,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
 
   items.push({tr(STR_NOTES), NoteIcon, HomeMenuAction::Notes});
   items.push({"Demineur", MinesweeperIcon, HomeMenuAction::Minesweeper});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
@@ -1572,6 +1575,9 @@ void HomeActivity::loop() {
           case HomeMenuAction::RssNews:
             onRssNewsOpen();
             break;
+          case HomeMenuAction::RssNews:
+            onRssNewsOpen();
+            break;
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
@@ -1833,6 +1839,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Minesweeper:
         onMinesweeperOpen();
+        break;
+      case HomeMenuAction::RssNews:
+        onRssNewsOpen();
         break;
       case HomeMenuAction::RssNews:
         onRssNewsOpen();
@@ -2376,6 +2385,10 @@ void HomeActivity::onNotesOpen() {
 
 void HomeActivity::onMinesweeperOpen() {
   startActivityForResult(std::make_unique<MinesweeperActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+
+void HomeActivity::onRssNewsOpen() {
+  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput), [](const ActivityResult&) {});
 }
 
 void HomeActivity::onRssNewsOpen() {
