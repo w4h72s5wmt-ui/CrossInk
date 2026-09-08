@@ -4,13 +4,14 @@
 #include <expat.h>
 
 #include <cstddef>
+#include <cstdint>
 
 // X4 Pro RSS records are intentionally bounded so a malformed feed can never
-// grow memory without limit. The larger summary field keeps substantially more
-// offline text while still allowing hundreds of cached articles in PSRAM/SD.
+// grow memory without limit. 4 KB of cleaned feed-provided body text per item
+// still leaves ample room for hundreds of articles in the X4 Pro PSRAM/SD cache.
 constexpr size_t RSS_TITLE_CAPACITY = 144;
 constexpr size_t RSS_LINK_CAPACITY = 384;
-constexpr size_t RSS_SUMMARY_CAPACITY = 2048;
+constexpr size_t RSS_SUMMARY_CAPACITY = 4096;
 constexpr size_t RSS_PUBLISHED_CAPACITY = 56;
 
 struct RssItem {
@@ -25,9 +26,9 @@ enum class RssParserError { NONE, NO_ITEM_BUFFER, INVALID_INPUT, PARSER_MEMORY, 
 /**
  * Streaming RSS/Atom parser backed by a caller-owned fixed item buffer.
  *
- * The parser accepts RSS 2.0 <item> feeds and Atom <entry> feeds. It retains
- * only title, article URL, textual RSS content/summary, and the publication
- * date. The feed document itself is never buffered in full.
+ * RSS feeds often expose the same article twice inside an item: a short
+ * <description> and a longer <content:encoded>. The parser deliberately keeps
+ * one best body candidate instead of concatenating those fields.
  */
 class RssParser final : public Print {
  public:
@@ -74,6 +75,11 @@ class RssParser final : public Print {
   size_t linkLength = 0;
   size_t summaryLength = 0;
   size_t publishedLength = 0;
+
+  // Body priority: description=1, Atom summary=2, content/content:encoded=3.
+  // Only the highest-priority field encountered for an item is retained.
+  uint8_t activeSummaryPriority = 0;
+  uint8_t selectedSummaryPriority = 0;
 
   bool inItem = false;
   bool atomEntry = false;
