@@ -77,6 +77,7 @@ class RssNewsActivity final : public Activity {
   uint16_t* displayOrder = nullptr;
   size_t articleCount = 0;
   size_t articleLineOffset = 0;
+  size_t articlePageLines = 8;
   size_t openArticleIndex = MAX_ARTICLES;
   int selectorIndex = 0;
   int topIndex = 0;

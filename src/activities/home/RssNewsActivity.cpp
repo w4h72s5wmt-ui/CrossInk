@@ -13,7 +13,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "RssArticleCache.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -28,7 +30,6 @@ namespace fui = freeink::ui;
 namespace {
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr size_t HTTP_BUFFER_SIZE = 4096;
-constexpr size_t ARTICLE_PAGE_LINES = 8;
 constexpr int SORT_TOUCH_WIDTH = 72;
 
 struct CacheHeader {
@@ -150,6 +151,7 @@ void RssNewsActivity::onEnter() {
   visibleRows = 1;
   articleCount = 0;
   articleLineOffset = 0;
+  articlePageLines = 8;
   openArticleIndex = MAX_ARTICLES;
   refreshHadError = false;
   usedNetwork = false;
@@ -483,9 +485,14 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
   fui::TextStyle titleStyle = theme.bodyText;
   fui::TextStyle bodyStyle = theme.bodyText;
   fui::TextStyle metaStyle = theme.smallText;
+  const int readerFontId = SETTINGS.getReaderFontId();
+  bodyStyle.font = readerFontId;
   const int16_t titleHeight = screen.target().lineHeight(titleStyle.font);
-  const int16_t bodyHeight = screen.target().lineHeight(bodyStyle.font);
+  const int16_t bodyHeight = static_cast<int16_t>(std::max(
+      1, static_cast<int>(renderer.getLineHeight(readerFontId) * SETTINGS.getReaderLineCompression() + 0.5f)));
   const int16_t metaHeight = screen.target().lineHeight(metaStyle.font);
+  const int readerMargin = std::max(12, static_cast<int>(SETTINGS.screenMarginHorizontal));
+  const int readerWidth = std::max(1, renderer.getScreenWidth() - readerMargin * 2);
 
   for (const auto& line : articleTitleLines) {
     if (screen.body().height < titleHeight) break;
@@ -504,10 +511,16 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
     return;
   }
 
+  size_t displayedLines = 0;
   for (size_t i = articleLineOffset; i < articleSummaryLines.size(); ++i) {
     if (screen.body().height < bodyHeight) break;
-    screen.target().text(screen.takeTop(bodyHeight, theme.spaceXs), articleSummaryLines[i].c_str(), bodyStyle);
+    fui::Rect lineRect = screen.takeTop(bodyHeight);
+    lineRect.x = static_cast<int16_t>(readerMargin);
+    lineRect.width = static_cast<int16_t>(readerWidth);
+    screen.target().text(lineRect, articleSummaryLines[i].c_str(), bodyStyle);
+    ++displayedLines;
   }
+  articlePageLines = std::max<size_t>(1, displayedLines);
 }
 
 void RssNewsActivity::buildStatusScreen(UiApp::ScreenType& screen) {
@@ -547,12 +560,22 @@ void RssNewsActivity::openArticle(const size_t articleIndex) {
   openArticleIndex = articleIndex;
   const CachedArticle& article = articles[articleIndex];
 
-  const int margin = UITheme::getInstance().getMetrics().contentSidePadding;
+  sdFontSystem.ensureLoaded(renderer);
+  const int readerFontId = SETTINGS.getReaderFontId();
+  const int margin = std::max(12, static_cast<int>(SETTINGS.screenMarginHorizontal));
   const int maxWidth = std::max(80, renderer.getScreenWidth() - margin * 2);
   const auto scale = uiScaleSpec();
+
+  std::string offlineBody;
+  if (!RssArticleCache::load(article.item, offlineBody)) offlineBody = article.item.summary;
+  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {
+    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);
+  }
+
   articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);
-  articleSummaryLines = renderer.wrappedText(scale.bodyFontId, article.item.summary, maxWidth, 320);
+  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);
   articleLineOffset = 0;
+  articlePageLines = 8;
   state = State::ARTICLE;
   requestUpdate();
 }
@@ -561,6 +584,7 @@ void RssNewsActivity::closeArticle() {
   articleTitleLines.clear();
   articleSummaryLines.clear();
   articleLineOffset = 0;
+  articlePageLines = 8;
   openArticleIndex = MAX_ARTICLES;
   state = State::LIST;
   requestUpdate();
@@ -682,8 +706,33 @@ void RssNewsActivity::refreshFeeds() {
 
     size_t fetchedCount = 0;
     if (fetchSource(sourceIndex, fetchedCount, cancelled)) {
-      mergeSourceArticles(sourceIndex, feedItems, fetchedCount);
-      ++successfulSources;
+      for (size_t itemIndex = 0; itemIndex < fetchedCount; ++itemIndex) {
+        statusMessage = std::string(SOURCES[sourceIndex].name) + " " + std::to_string(itemIndex + 1) + "/" +
+                        std::to_string(fetchedCount);
+        requestUpdate(true);
+        const auto cacheResult = RssArticleCache::ensureCached(feedItems[itemIndex], [this, &cancelled]() {
+          mappedInput.update();
+          if (mappedInput.wasHomeGesture()) {
+            goHomeAfterRefreshCancel = true;
+            cancelled = true;
+          }
+          if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
+              mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+              mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+            cancelled = true;
+          }
+          return cancelled;
+        });
+        if (cacheResult == RssArticleCache::CacheResult::CANCELLED) {
+          cancelled = true;
+          break;
+        }
+        if (cacheResult == RssArticleCache::CacheResult::FAILED) refreshHadError = true;
+      }
+      if (!cancelled) {
+        mergeSourceArticles(sourceIndex, feedItems, fetchedCount);
+        ++successfulSources;
+      }
     } else if (!cancelled) {
       refreshHadError = true;
     }
@@ -754,19 +803,19 @@ void RssNewsActivity::loop() {
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Down) ||
         mappedInput.wasReleased(MappedInputManager::Button::Right)) {
-      scrollArticle(static_cast<int>(ARTICLE_PAGE_LINES));
+      scrollArticle(static_cast<int>(articlePageLines));
       return;
     }
     if (mappedInput.wasReleased(MappedInputManager::Button::Up) ||
         mappedInput.wasReleased(MappedInputManager::Button::Left)) {
-      scrollArticle(-static_cast<int>(ARTICLE_PAGE_LINES));
+      scrollArticle(-static_cast<int>(articlePageLines));
       return;
     }
     const auto swipe = mappedInput.wasSwipe();
     if (swipe == MappedInputManager::SwipeDir::Up) {
-      scrollArticle(static_cast<int>(ARTICLE_PAGE_LINES));
+      scrollArticle(static_cast<int>(articlePageLines));
     } else if (swipe == MappedInputManager::SwipeDir::Down) {
-      scrollArticle(-static_cast<int>(ARTICLE_PAGE_LINES));
+      scrollArticle(-static_cast<int>(articlePageLines));
     }
     return;
   }
