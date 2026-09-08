@@ -51,6 +51,9 @@ jobs:
       - name: Apply Notes + Minesweeper refinements
         run: python3 tools/apply_x4_notes_minesweeper_overrides.py
 
+      - name: Apply Notes + Minesweeper optimizations
+        run: python3 tools/apply_x4_notes_minesweeper_optimizations.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
