@@ -1,4 +1,4 @@
-name: RSS Integration Build
+name: RSS X4 Pro Build
 
 on:
   push:
@@ -7,86 +7,15 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  integrate-and-build:
+  build-x4-pro:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feat/rss-news-reader
           submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Integrate RSS activity into Home
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          cpp = Path('src/activities/home/HomeActivity.cpp')
-          text = cpp.read_text()
-          original = text
-
-          if '#include "RssNewsActivity.h"' not in text:
-              text = text.replace('#include "NotesActivity.h"', '#include "NotesActivity.h"\n#include "RssNewsActivity.h"')
-
-          text = text.replace('  Notes,\n  Minesweeper,', '  Notes,\n  Minesweeper,\n  RssNews,')
-          text = text.replace('static constexpr int kCapacity = 10;', 'static constexpr int kCapacity = 11;')
-
-          marker = '  items.push({"Demineur", MinesweeperIcon, HomeMenuAction::Minesweeper});'
-          rssline = '  items.push({"RSS", Library, HomeMenuAction::RssNews});'
-          text = text.replace(marker, marker + '\n' + rssline)
-
-          switch_marker = '          case HomeMenuAction::Minesweeper:\n            onMinesweeperOpen();\n            break;'
-          switch_rss = switch_marker + '\n          case HomeMenuAction::RssNews:\n            onRssNewsOpen();\n            break;'
-          text = text.replace(switch_marker, switch_rss)
-
-          switch_marker2 = '      case HomeMenuAction::Minesweeper:\n        onMinesweeperOpen();\n        break;'
-          switch_rss2 = switch_marker2 + '\n      case HomeMenuAction::RssNews:\n        onRssNewsOpen();\n        break;'
-          text = text.replace(switch_marker2, switch_rss2)
-
-          method_marker = '''void HomeActivity::onMinesweeperOpen() {
-            startActivityForResult(std::make_unique<MinesweeperActivity>(renderer, mappedInput), [](const ActivityResult&) {});
-          }'''
-          method_rss = method_marker + '''
-
-          void HomeActivity::onRssNewsOpen() {
-            startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput), [](const ActivityResult&) {});
-          }'''
-          text = text.replace(method_marker, method_rss)
-
-          if text == original:
-              print('HomeActivity.cpp already integrated or no matching changes needed')
-          cpp.write_text(text)
-
-          header = Path('src/activities/home/HomeActivity.h')
-          h = header.read_text()
-          h = h.replace('  void onMinesweeperOpen();', '  void onMinesweeperOpen();\n  void onRssNewsOpen();')
-          header.write_text(h)
-
-          parser = Path('lib/RssParser/RssParser.cpp')
-          p = parser.read_text()
-          p = p.replace('strcmp(name, "content") == 0 ||\n      localNameEquals(name, "encoded")',
-                        'localNameEquals(name, "content") || localNameEquals(name, "encoded")')
-          p = p.replace('strcmp(name, "content") == 0 ||\n             localNameEquals(name, "encoded")',
-                        'localNameEquals(name, "content") || localNameEquals(name, "encoded")')
-          parser.write_text(p)
-          PY
-
-      - name: Commit integration
-        shell: bash
-        run: |
-          if git diff --quiet; then
-            echo "No integration changes to commit"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/activities/home/HomeActivity.cpp src/activities/home/HomeActivity.h lib/RssParser/RssParser.cpp
-            git commit -m "feat: expose RSS reader from home menu"
-            git push origin HEAD:feat/rss-news-reader
-          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
