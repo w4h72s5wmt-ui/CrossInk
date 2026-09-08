@@ -9,6 +9,8 @@
 #include <WiFi.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 
 #include "MappedInputManager.h"
@@ -27,6 +29,7 @@ namespace {
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr size_t HTTP_BUFFER_SIZE = 4096;
 constexpr size_t ARTICLE_PAGE_LINES = 8;
+constexpr int SORT_TOUCH_WIDTH = 72;
 
 struct CacheHeader {
   uint32_t magic;
@@ -46,6 +49,89 @@ bool sameRssItem(const RssItem& left, const RssItem& right) {
   if (left.published[0] || right.published[0]) return std::strcmp(left.published, right.published) == 0;
   return true;
 }
+
+int monthNumber(const char* month) {
+  static constexpr const char* MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  if (!month) return 0;
+  for (int i = 0; i < 12; ++i) {
+    if (std::tolower(static_cast<unsigned char>(month[0])) == std::tolower(static_cast<unsigned char>(MONTHS[i][0])) &&
+        std::tolower(static_cast<unsigned char>(month[1])) == std::tolower(static_cast<unsigned char>(MONTHS[i][1])) &&
+        std::tolower(static_cast<unsigned char>(month[2])) == std::tolower(static_cast<unsigned char>(MONTHS[i][2]))) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
+int64_t daysFromCivil(int year, unsigned month, unsigned day) {
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(year - era * 400);
+  const unsigned doy = (153 * (month + (month > 2 ? static_cast<unsigned>(-3) : 9)) + 2) / 5 + day - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+int parseTimezoneOffsetSeconds(const char* zone) {
+  if (!zone || !zone[0] || std::strcmp(zone, "GMT") == 0 || std::strcmp(zone, "UTC") == 0 || zone[0] == 'Z') return 0;
+  if (zone[0] != '+' && zone[0] != '-') return 0;
+  int hours = 0;
+  int minutes = 0;
+  if (std::sscanf(zone + 1, "%2d:%2d", &hours, &minutes) < 1 && std::sscanf(zone + 1, "%2d%2d", &hours, &minutes) < 1) {
+    return 0;
+  }
+  const int seconds = hours * 3600 + minutes * 60;
+  return zone[0] == '-' ? -seconds : seconds;
+}
+
+int64_t makeDateKey(int year, int month, int day, int hour, int minute, int second, int zoneOffsetSeconds) {
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 ||
+      minute > 59 || second < 0 || second > 60) {
+    return 0;
+  }
+  return daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) * 86400LL + hour * 3600LL +
+         minute * 60LL + second - zoneOffsetSeconds;
+}
+
+int64_t publishedDateKey(const char* value) {
+  if (!value || !value[0]) return 0;
+
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  char zone[8] = {};
+
+  // ISO 8601 / RFC 3339, as commonly used by Atom feeds.
+  if (std::sscanf(value, "%4d-%2d-%2dT%2d:%2d:%2d%7s", &year, &month, &day, &hour, &minute, &second, zone) >= 6 ||
+      std::sscanf(value, "%4d-%2d-%2d %2d:%2d:%2d%7s", &year, &month, &day, &hour, &minute, &second, zone) >= 6) {
+    return makeDateKey(year, month, day, hour, minute, second, parseTimezoneOffsetSeconds(zone));
+  }
+
+  // RFC 822 / RFC 1123, with or without a weekday prefix.
+  char monthText[4] = {};
+  zone[0] = '\0';
+  int matched = std::sscanf(value, "%*3s, %2d %3s %4d %2d:%2d:%2d %7s", &day, monthText, &year, &hour, &minute,
+                            &second, zone);
+  if (matched < 6) {
+    zone[0] = '\0';
+    matched = std::sscanf(value, "%2d %3s %4d %2d:%2d:%2d %7s", &day, monthText, &year, &hour, &minute, &second,
+                          zone);
+  }
+  if (matched >= 6) {
+    month = monthNumber(monthText);
+    return makeDateKey(year, month, day, hour, minute, second, parseTimezoneOffsetSeconds(zone));
+  }
+  return 0;
+}
+
+Rect sortTouchRect(const GfxRenderer& renderer, const MappedInputManager& input) {
+  const Rect header = TouchHeaderBackButton::headerRect(renderer, input);
+  return Rect{header.x + header.width - SORT_TOUCH_WIDTH, header.y, SORT_TOUCH_WIDTH, header.height};
+}
 }  // namespace
 
 RssNewsActivity::RssNewsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -58,11 +144,13 @@ void RssNewsActivity::onEnter() {
   sdFontSystem.releaseLoadedFont(renderer);
 
   state = State::LIST;
+  sortMode = SortMode::DATE_DESC;
   selectorIndex = 0;
   topIndex = 0;
   visibleRows = 1;
   articleCount = 0;
   articleLineOffset = 0;
+  openArticleIndex = MAX_ARTICLES;
   refreshHadError = false;
   usedNetwork = false;
   goHomeAfterRefreshCancel = false;
@@ -78,6 +166,7 @@ void RssNewsActivity::onEnter() {
     statusMessage = tr(STR_MEMORY_ERROR);
   } else {
     loadCache();
+    rebuildDisplayOrder();
   }
   requestUpdate();
 }
@@ -87,9 +176,11 @@ void RssNewsActivity::onExit() {
   uiReady = false;
   articleTitleLines.clear();
   articleSummaryLines.clear();
+  displayOrder = nullptr;
   listItems = nullptr;
   feedItems = nullptr;
   articles = nullptr;
+  displayOrderStorage.reset();
   listItemStorage.reset();
   feedStorage.reset();
   articleStorage.reset();
@@ -142,6 +233,18 @@ bool RssNewsActivity::ensureBuffers() {
     listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
   }
 
+  if (!displayOrderStorage) {
+    displayOrderStorage = allocateRssBuffer(sizeof(uint16_t) * MAX_ARTICLES);
+    if (!displayOrderStorage) {
+      LOG_ERR("RSS", "OOM allocating RSS sort index");
+      return false;
+    }
+    displayOrder = reinterpret_cast<uint16_t*>(displayOrderStorage.get());
+    std::memset(displayOrder, 0, sizeof(uint16_t) * MAX_ARTICLES);
+  } else if (!displayOrder) {
+    displayOrder = reinterpret_cast<uint16_t*>(displayOrderStorage.get());
+  }
+
   return true;
 }
 
@@ -155,7 +258,7 @@ bool RssNewsActivity::loadCache() {
   CacheHeader header{};
   const bool headerOk = file.read(&header, sizeof(header)) == static_cast<int>(sizeof(header));
   if (!headerOk || header.magic != CACHE_MAGIC || header.version != CACHE_VERSION || header.count > MAX_ARTICLES) {
-    LOG_ERR("RSS", "Ignoring invalid RSS cache");
+    LOG_ERR("RSS", "Ignoring incompatible RSS cache; refresh will rebuild it");
     file.close();
     return false;
   }
@@ -229,8 +332,6 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
     }
   }
 
-  // Reuse the per-feed scratch as the merge buffer: newest feed records first,
-  // then older unique SD-cached history up to 100 records for this source.
   for (size_t i = 0; i < articleCount && mergedCount < ITEMS_PER_SOURCE; ++i) {
     if (articles[i].sourceIndex != sourceIndex) continue;
     bool duplicate = false;
@@ -260,6 +361,37 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
   }
 }
 
+void RssNewsActivity::rebuildDisplayOrder() {
+  if (!displayOrder || !articles) return;
+  for (size_t i = 0; i < articleCount; ++i) displayOrder[i] = static_cast<uint16_t>(i);
+
+  std::stable_sort(displayOrder, displayOrder + articleCount, [this](const uint16_t leftIndex, const uint16_t rightIndex) {
+    const CachedArticle& left = articles[leftIndex];
+    const CachedArticle& right = articles[rightIndex];
+    if (sortMode == SortMode::SOURCE && left.sourceIndex != right.sourceIndex) return left.sourceIndex < right.sourceIndex;
+
+    const int64_t leftDate = publishedDateKey(left.item.published);
+    const int64_t rightDate = publishedDateKey(right.item.published);
+    if (leftDate != rightDate) return leftDate > rightDate;
+    if (sortMode == SortMode::DATE_DESC && left.sourceIndex != right.sourceIndex) return left.sourceIndex < right.sourceIndex;
+    return leftIndex < rightIndex;
+  });
+}
+
+void RssNewsActivity::toggleSortMode() {
+  if (state != State::LIST) return;
+  sortMode = sortMode == SortMode::DATE_DESC ? SortMode::SOURCE : SortMode::DATE_DESC;
+  rebuildDisplayOrder();
+  selectorIndex = 0;
+  topIndex = 0;
+  requestUpdate();
+}
+
+size_t RssNewsActivity::articleIndexForDisplayRow(const size_t displayRow) const {
+  if (!displayOrder || displayRow >= articleCount) return MAX_ARTICLES;
+  return static_cast<size_t>(displayOrder[displayRow]);
+}
+
 void RssNewsActivity::rootScreen(UiApp::ScreenType& screen, void* user) {
   auto* self = static_cast<RssNewsActivity*>(user);
   switch (self->state) {
@@ -280,11 +412,21 @@ void RssNewsActivity::screenHeader(UiApp::ScreenType& screen) {
   screen.takeBottom(static_cast<int16_t>(UITheme::getInstance().getMetrics().buttonHintsHeight));
   if (mappedInput.hasTouchHardware()) {
     const Rect headerRect = TouchHeaderBackButton::headerRect(renderer, mappedInput);
-    TouchHeaderBackButton::draw(renderer, uiTarget, headerRect, "RSS", false, 0);
+    const int rightReserve = state == State::LIST ? SORT_TOUCH_WIDTH : 0;
+    TouchHeaderBackButton::draw(renderer, uiTarget, headerRect, "RSS", false, rightReserve);
+    if (state == State::LIST) {
+      fui::TextStyle sortStyle = screen.theme().smallText;
+      sortStyle.align = fui::TextAlign::Center;
+      sortStyle.maxLines = 1;
+      const Rect touch = sortTouchRect(renderer, mappedInput);
+      screen.target().text(fui::Rect{static_cast<int16_t>(touch.x), static_cast<int16_t>(touch.y),
+                                     static_cast<int16_t>(touch.width), static_cast<int16_t>(touch.height)},
+                           sortMode == SortMode::DATE_DESC ? "D v" : "SRC", sortStyle);
+    }
     screen.takeTop(static_cast<int16_t>(headerRect.height));
   } else {
     fui::HeaderProps header;
-    header.title = "RSS";
+    header.title = sortMode == SortMode::DATE_DESC ? "RSS - date" : "RSS - source";
     header.borderEdges = fui::EdgeBottom;
     screen.header(header);
   }
@@ -293,7 +435,7 @@ void RssNewsActivity::screenHeader(UiApp::ScreenType& screen) {
 
 void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
   screenHeader(screen);
-  if (!listItems) {
+  if (!listItems || !displayOrder) {
     screen.centeredText(tr(STR_MEMORY_ERROR), screen.theme().bodyText);
     return;
   }
@@ -304,7 +446,9 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
   listItems[0].actionValue = 0;
 
   for (size_t i = 0; i < articleCount; ++i) {
-    const CachedArticle& article = articles[i];
+    const size_t articleIndex = articleIndexForDisplayRow(i);
+    if (articleIndex >= articleCount) continue;
+    const CachedArticle& article = articles[articleIndex];
     fui::ListItem& item = listItems[i + 1];
     item = fui::ListItem{};
     item.label = article.item.title;
@@ -329,12 +473,12 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
 
 void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
   screenHeader(screen);
-  if (selectorIndex <= 0 || static_cast<size_t>(selectorIndex - 1) >= articleCount) {
+  if (openArticleIndex >= articleCount) {
     screen.centeredText(tr(STR_NO_ENTRIES), screen.theme().bodyText);
     return;
   }
 
-  const CachedArticle& article = articles[selectorIndex - 1];
+  const CachedArticle& article = articles[openArticleIndex];
   const auto& theme = screen.theme();
   fui::TextStyle titleStyle = theme.bodyText;
   fui::TextStyle bodyStyle = theme.bodyText;
@@ -393,20 +537,21 @@ void RssNewsActivity::activateSelected() {
     requestManualRefresh();
     return;
   }
-  const size_t articleIndex = static_cast<size_t>(selectorIndex - 1);
+  const size_t displayRow = static_cast<size_t>(selectorIndex - 1);
+  const size_t articleIndex = articleIndexForDisplayRow(displayRow);
   if (articleIndex < articleCount) openArticle(articleIndex);
 }
 
 void RssNewsActivity::openArticle(const size_t articleIndex) {
   if (!articles || articleIndex >= articleCount) return;
-  selectorIndex = static_cast<int>(articleIndex + 1);
+  openArticleIndex = articleIndex;
   const CachedArticle& article = articles[articleIndex];
 
   const int margin = UITheme::getInstance().getMetrics().contentSidePadding;
   const int maxWidth = std::max(80, renderer.getScreenWidth() - margin * 2);
   const auto scale = uiScaleSpec();
   articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);
-  articleSummaryLines = renderer.wrappedText(scale.bodyFontId, article.item.summary, maxWidth, 160);
+  articleSummaryLines = renderer.wrappedText(scale.bodyFontId, article.item.summary, maxWidth, 320);
   articleLineOffset = 0;
   state = State::ARTICLE;
   requestUpdate();
@@ -416,6 +561,7 @@ void RssNewsActivity::closeArticle() {
   articleTitleLines.clear();
   articleSummaryLines.clear();
   articleLineOffset = 0;
+  openArticleIndex = MAX_ARTICLES;
   state = State::LIST;
   requestUpdate();
 }
@@ -441,6 +587,7 @@ void RssNewsActivity::requestManualRefresh() {
 
 #ifdef SIMULATOR
   seedSimulatorArticles();
+  rebuildDisplayOrder();
   saveCache();
   selectorIndex = 0;
   topIndex = 0;
@@ -539,7 +686,6 @@ void RssNewsActivity::refreshFeeds() {
       ++successfulSources;
     } else if (!cancelled) {
       refreshHadError = true;
-      // Keep previous SD-cached records when a feed is temporarily unavailable.
     }
     if (cancelled) break;
   }
@@ -550,11 +696,13 @@ void RssNewsActivity::refreshFeeds() {
       return;
     }
     mappedInput.suppressNextBackRelease();
+    rebuildDisplayOrder();
     state = State::LIST;
     requestUpdate();
     return;
   }
 
+  rebuildDisplayOrder();
   if (successfulSources > 0 && !saveCache()) {
     LOG_ERR("RSS", "Could not persist refreshed cache");
     refreshHadError = true;
@@ -577,7 +725,8 @@ void RssNewsActivity::seedSimulatorArticles() {
                SOURCES[sourceIndex].name);
       snprintf(article.item.summary, sizeof(article.item.summary),
                "Contenu hors ligne de demonstration pour verifier le cache SD, le tactile et la pagination de lecture.");
-      snprintf(article.item.published, sizeof(article.item.published), "Aujourd'hui");
+      snprintf(article.item.published, sizeof(article.item.published), "2026-09-%02uT12:00:00Z",
+               static_cast<unsigned>(8 - sample));
     }
   }
 }
@@ -588,6 +737,14 @@ void RssNewsActivity::loop() {
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
     state == State::ARTICLE ? closeArticle() : onGoHome();
     return;
+  }
+
+  if (state == State::LIST && mappedInput.hasTouchHardware()) {
+    const Rect sortRect = sortTouchRect(renderer, mappedInput);
+    if (mappedInput.wasTapInRect(sortRect.x, sortRect.y, sortRect.width, sortRect.height)) {
+      toggleSortMode();
+      return;
+    }
   }
 
   if (state == State::ARTICLE) {
