@@ -57,6 +57,9 @@ jobs:
       - name: Hide Notes lock from title/search editing
         run: python3 tools/apply_x4_notes_title_lock_visibility_fix.py
 
+      - name: Add Minesweeper save date and time
+        run: python3 tools/apply_x4_minesweeper_save_timestamp.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
