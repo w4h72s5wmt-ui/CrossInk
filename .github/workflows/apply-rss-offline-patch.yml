@@ -6,6 +6,7 @@ on:
       - feat/rss-news-reader
     paths:
       - tools/apply_rss_offline_patch.py
+      - tools/run_rss_offline_patch.py
       - .github/workflows/apply-rss-offline-patch.yml
 
 permissions:
@@ -20,7 +21,7 @@ jobs:
           ref: feat/rss-news-reader
 
       - name: Apply readable RSS source patch
-        run: python tools/apply_rss_offline_patch.py
+        run: python tools/run_rss_offline_patch.py
 
       - name: Commit patched RSS sources
         run: |
