@@ -132,6 +132,38 @@ core = replace_once(
     "Notes exact-path lock state and exact title-baseline alignment",
 )
 
+# Use the note-title text baseline as the single vertical reference for all row
+# artwork. Each icon has different visual extents inside an unchanged touch box,
+# so geometric centering of those boxes cannot align the actual drawings.
+# Align the visible bottom of pencil, lock body and trash can to the text baseline.
+core = replace_once(
+    core,
+    '''      const int textH = renderer.getLineHeight(UI_12_FONT_ID);
+      renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, rowRect.y + (rowRect.height - textH) / 2,
+                        title.c_str(), true);
+      drawRenameIcon(renderer, renameRect, true);
+      if (vaultMode && rowLocked) drawLockIcon(renderer, lockRect, true);
+      drawTrashIcon(renderer, deleteRect, true);
+''',
+    '''      const int textH = renderer.getLineHeight(UI_12_FONT_ID);
+      const int textY = rowRect.y + (rowRect.height - textH) / 2;
+      const int rowBaselineY = textY + renderer.getFontAscenderSize(UI_12_FONT_ID);
+      renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, textY, title.c_str(), true);
+
+      auto artworkOnBaseline = [rowBaselineY](Rect rect, const int visualBottomFromCenter) {
+        const int currentVisualBottomY = rect.y + rect.height / 2 + visualBottomFromCenter;
+        rect.y += rowBaselineY - currentVisualBottomY;
+        return rect;
+      };
+      // Real visible bottoms relative to each action rectangle's center:
+      // pencil +11px, lock body +15px, trash can +10px.
+      drawRenameIcon(renderer, artworkOnBaseline(renameRect, 11), true);
+      if (vaultMode && rowLocked) drawLockIcon(renderer, artworkOnBaseline(lockRect, 15), true);
+      drawTrashIcon(renderer, artworkOnBaseline(deleteRect, 10), true);
+''',
+    "Notes list text/action baseline alignment",
+)
+
 # Unlock through a temporary plaintext file and keep the encrypted original as
 # a backup until the marker is removed. This prevents a failed SD operation from
 # leaving a plaintext note behind a stale .lock marker (or vice versa).
@@ -197,6 +229,8 @@ if "iconRect.y += 2" in viewer or "iconRect.y += 2" in core:
     raise RuntimeError("Notes lock still uses a hard-coded vertical pixel offset")
 if "lockArtworkRectOnTitleBaseline" not in viewer or "lockArtworkRectOnTitleBaseline(lockButtonRect())" not in core:
     raise RuntimeError("Notes lock exact title-baseline alignment is missing")
+if "const int rowBaselineY = textY + renderer.getFontAscenderSize(UI_12_FONT_ID);" not in core:
+    raise RuntimeError("Notes list action/text baseline alignment is missing")
 
 core_path.write_text(core)
-print("Applied editor-only Notes lock action, exact title-baseline alignment, exact-path state, and reliable unlock fixes.")
+print("Applied Notes header and list baseline alignment, editor-only lock action, exact-path state, and reliable unlock fixes.")
