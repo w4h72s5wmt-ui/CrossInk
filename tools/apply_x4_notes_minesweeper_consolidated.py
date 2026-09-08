@@ -34,8 +34,8 @@ def replace_section(text: str, start: str, end: str, replacement: str, label: st
 
 # Notes: encryption was already streamed while reading, but locking/saving a
 # note still built a second payload as large as the note. Stream encryption to
-# a temporary file and atomically swap it into place only after authentication
-# tag generation succeeds. This removes the ~32 KiB worst-case extra heap peak
+# a temporary file and swap it into place only after authentication tag
+# generation succeeds. This removes the ~32 KiB worst-case extra heap peak
 # while retaining the existing CROSSNT2 on-disk format and rollback safety.
 core_path = Path("src/activities/home/NotesActivityCore.inc")
 core = core_path.read_text()
@@ -52,10 +52,10 @@ streaming_save = r'''bool saveEncryptedNoteFile(const std::string& path, const s
 
   const std::string tempPath = path + ".crypt.tmp";
   const std::string backupPath = path + ".crypt.bak";
-  if (Storage.exists(tempPath)) Storage.remove(tempPath);
+  if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
   // Recover an interrupted previous swap before starting a new one.
-  if (Storage.exists(backupPath)) {
-    if (!Storage.exists(path)) {
+  if (Storage.exists(backupPath.c_str())) {
+    if (!Storage.exists(path.c_str())) {
       Storage.rename(backupPath.c_str(), path.c_str());
     } else {
       Storage.remove(backupPath.c_str());
@@ -103,12 +103,12 @@ streaming_save = r'''bool saveEncryptedNoteFile(const std::string& path, const s
   file.close();
 
   if (rc != 0) {
-    if (Storage.exists(tempPath)) Storage.remove(tempPath.c_str());
+    if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
     return false;
   }
 
   bool movedOriginal = false;
-  if (Storage.exists(path)) {
+  if (Storage.exists(path.c_str())) {
     if (!Storage.rename(path.c_str(), backupPath.c_str())) {
       Storage.remove(tempPath.c_str());
       return false;
@@ -117,10 +117,10 @@ streaming_save = r'''bool saveEncryptedNoteFile(const std::string& path, const s
   }
   if (!Storage.rename(tempPath.c_str(), path.c_str())) {
     if (movedOriginal) Storage.rename(backupPath.c_str(), path.c_str());
-    if (Storage.exists(tempPath)) Storage.remove(tempPath.c_str());
+    if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
     return false;
   }
-  if (movedOriginal && Storage.exists(backupPath)) Storage.remove(backupPath.c_str());
+  if (movedOriginal && Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
   return true;
 }
 
@@ -135,19 +135,15 @@ core = replace_section(
 core_path.write_text(core)
 
 
-# Minesweeper: compact short-lived/activity-local state. All ranges are bounded
-# by the 7-row menu and 16x16 maximum grid, so wider ints only wasted RAM.
+# Minesweeper: keep the integer types used by the proven build 143 code path so
+# std::clamp/max expressions stay type-safe. Retain only compact changes that do
+# not alter arithmetic types.
 header_path = Path("src/activities/home/MinesweeperActivity.h")
 header = header_path.read_text()
 header = replace_once(header, "  enum class ViewMode {\n", "  enum class ViewMode : uint8_t {\n", "Minesweeper compact view mode")
-header = replace_once(
-    header,
-    '''  ViewMode viewMode_ = ViewMode::Menu;\n  int selectedIndex_ = 0;\n  int gridSizeIndex_ = 0;\n  uint8_t savedGridSizeIndex_ = 0;\n  uint32_t savedAtPacked_ = 0;\n  std::array<char, 64> continueLabel_{};\n  int visibleRows_ = 1;\n  int topIndex_ = 0;\n  bool initialViewportPending_ = true;\n  int selectedCellIndex_ = 0;\n''',
-    '''  ViewMode viewMode_ = ViewMode::Menu;\n  uint8_t selectedIndex_ = 0;\n  uint8_t gridSizeIndex_ = 0;\n  uint8_t savedGridSizeIndex_ = 0;\n  uint32_t savedAtPacked_ = 0;\n  std::array<char, 48> continueLabel_{};\n  uint8_t visibleRows_ = 1;\n  uint8_t topIndex_ = 0;\n  bool initialViewportPending_ = true;\n  uint16_t selectedCellIndex_ = 0;\n''',
-    "Minesweeper compact menu/grid members",
-)
-header = replace_once(header, "  int revealedSafeCells_ = 0;\n", "  uint16_t revealedSafeCells_ = 0;\n",
-                      "Minesweeper compact revealed counter")
+header = replace_once(header, "  std::array<char, 64> continueLabel_{};\n",
+                      "  std::array<char, 48> continueLabel_{};\n",
+                      "Minesweeper compact continue label")
 header_path.write_text(header)
 
 cpp_path = Path("src/activities/home/MinesweeperActivity.cpp")
