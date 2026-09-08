@@ -54,6 +54,9 @@ jobs:
       - name: Apply Notes + Minesweeper optimizations
         run: python3 tools/apply_x4_notes_minesweeper_optimizations.py
 
+      - name: Hide Notes lock from title/search editing
+        run: python3 tools/apply_x4_notes_title_lock_visibility_fix.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
