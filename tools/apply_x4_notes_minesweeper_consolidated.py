@@ -13,6 +13,7 @@ PATCHES = (
     "tools/apply_x4_rss_reader_font_fix.py",
     "tools/apply_x4_rss_feed_config.py",
     "tools/apply_x4_rss_feed_config_escape_fix.py",
+    "tools/apply_x4_rss_readability_layout.py",
 )
 
 for patch in PATCHES:
@@ -193,5 +194,11 @@ require("src/activities/home/RssNewsActivity.cpp", "config.find('\\n', lineStart
 reject("src/activities/home/RssNewsActivity.cpp", "\x00", "RSS feeds.txt parser contains embedded NUL")
 reject("src/activities/home/RssNewsActivity.h", "Le Figaro", "Removed Figaro default feed remains")
 reject("src/activities/home/RssNewsActivity.h", "Numerama", "Removed Numerama default feed remains")
+require("src/activities/home/RssNewsActivity.cpp", "fui::TextStyle titleStyle = theme.titleText;",
+        "RSS readable article title hierarchy missing")
+require("src/activities/home/RssNewsActivity.cpp", "item.value = nullptr;",
+        "RSS list still reserves a right-side value column")
+require("src/activities/home/RssNewsActivity.cpp", "formatPublishedDate(article.item.published",
+        "RSS compact published date rendering missing")
 
 print("Applied and validated combined X4 Pro Notes/Minesweeper/RSS overlay.")
