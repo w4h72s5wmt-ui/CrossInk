@@ -255,8 +255,7 @@ void XMLCALL RssParser::startElement(void* userData, const XML_Char* name, const
     return;
   }
 
-  if (localNameEquals(name, "description") || localNameEquals(name, "summary") || strcmp(name, "content") == 0 ||
-      localNameEquals(name, "encoded")) {
+  if (localNameEquals(name, "description") || localNameEquals(name, "summary") || localNameEquals(name, "content") || localNameEquals(name, "encoded")) {
     self->inSummary = true;
     return;
   }
@@ -283,8 +282,7 @@ void XMLCALL RssParser::endElement(void* userData, const XML_Char* name) {
     self->inTitle = false;
   } else if (localNameEquals(name, "link")) {
     self->inLinkText = false;
-  } else if (localNameEquals(name, "description") || localNameEquals(name, "summary") || strcmp(name, "content") == 0 ||
-             localNameEquals(name, "encoded")) {
+  } else if (localNameEquals(name, "description") || localNameEquals(name, "summary") || localNameEquals(name, "content") || localNameEquals(name, "encoded")) {
     self->inSummary = false;
   } else if (localNameEquals(name, "pubDate") || localNameEquals(name, "published") ||
              localNameEquals(name, "updated") || localNameEquals(name, "date")) {
