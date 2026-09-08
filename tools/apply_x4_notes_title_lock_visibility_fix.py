@@ -8,10 +8,31 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-# Notes title/search fields must stay visually clean. Only the actual note
-# content viewer/editor reserves and draws the lock action.
+# The lock action belongs only to active note-content editing. Title/search
+# fields and the read-only viewer must neither display nor handle a padlock.
 viewer_path = Path("src/activities/home/NotesViewerKeyboardBase.h")
 viewer = viewer_path.read_text()
+viewer = replace_once(
+    viewer,
+    '''      if (pointIn(headerActionRect(), tx, ty)) {
+        handleHeaderActionTap(tx, ty);
+        return;
+      }
+''',
+    "",
+    "Notes disable lock tap in read-only viewer",
+)
+viewer = replace_once(
+    viewer,
+    '''    TouchHeaderBackButton::draw(renderer, header, viewerTitle.c_str(), false, headerActionReserveWidth());
+    drawHeaderAction();
+''',
+    '''    // Read-only mode deliberately has no lock affordance. The action is
+    // exposed only after the pencil opens the active keyboard/editor.
+    TouchHeaderBackButton::draw(renderer, header, viewerTitle.c_str(), false, 0);
+''',
+    "Notes hide lock in read-only viewer",
+)
 viewer = replace_once(
     viewer,
     '''  void drawHeaderAction() override {
@@ -26,20 +47,20 @@ viewer = replace_once(
 
   void drawHeaderAction() override {
     // Generic Notes text fields (title/search) reserve no header action.
-    // Never draw the lock there; it belongs only to the actual note content editor/viewer.
+    // This method is therefore reached only by the active note-content editor.
     if (headerActionReserveWidth() <= 0) return;
     if (headerActionLocked()) {
       drawNotesHeaderAction();
     } else {
       Rect iconRect = headerActionRect();
-      // The padlock artwork is visually top-heavy; nudge only the drawing,
-      // not its touch target, so it shares the title's perceived baseline.
-      iconRect.y += 6;
+      // Build 150 used +6 px and was too low; +3 px keeps the artwork
+      // between the original high position and that build's low position.
+      iconRect.y += 3;
       drawOpenLockLight(iconRect);
     }
   }
 ''',
-    "Notes title/search lock suppression and exact lock-state hook",
+    "Notes editor-only lock action and balanced alignment",
 )
 viewer_path.write_text(viewer)
 
@@ -62,7 +83,7 @@ core = replace_once(
 
 # The content editor knows the exact on-disk path. Use that instead of deriving
 # lock state from the displayed title (which is ambiguous for duplicate titles
-# or sanitised filenames), and align only the visual icon 6 px lower.
+# or sanitised filenames), and apply the same +3 px visual correction.
 core = replace_once(
     core,
     '''  int headerActionReserveWidth() const override { return kLockButtonWidth; }
@@ -75,7 +96,7 @@ core = replace_once(
 
   void drawHeaderAction() override {
     Rect iconRect = lockButtonRect();
-    iconRect.y += 6;
+    iconRect.y += 3;
     drawLockIcon(renderer, iconRect, true);
   }
 ''',
@@ -144,4 +165,4 @@ core = replace_once(
 )
 
 core_path.write_text(core)
-print("Applied Notes title visibility, lock alignment, exact-path state, and reliable unlock fixes.")
+print("Applied editor-only Notes lock action, balanced icon alignment, exact-path state, and reliable unlock fixes.")
