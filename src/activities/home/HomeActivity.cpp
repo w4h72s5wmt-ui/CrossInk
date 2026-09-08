@@ -37,6 +37,7 @@
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
 #include "NotesActivity.h"
+#include "RssNewsActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -64,6 +65,7 @@ enum class HomeMenuAction {
   Bookmarks,
   Notes,
   Minesweeper,
+  RssNews,
   FileTransfer,
   Settings,
 };
@@ -75,7 +77,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 10;
+  static constexpr int kCapacity = 11;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -283,6 +285,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
 
   items.push({tr(STR_NOTES), NoteIcon, HomeMenuAction::Notes});
   items.push({"Demineur", MinesweeperIcon, HomeMenuAction::Minesweeper});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
@@ -309,6 +312,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
 
   items.push({tr(STR_NOTES), NoteIcon, HomeMenuAction::Notes});
   items.push({"Demineur", MinesweeperIcon, HomeMenuAction::Minesweeper});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   return items;
 }
@@ -1559,6 +1563,9 @@ void HomeActivity::loop() {
           case HomeMenuAction::Minesweeper:
             onMinesweeperOpen();
             break;
+          case HomeMenuAction::RssNews:
+            onRssNewsOpen();
+            break;
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
@@ -1820,6 +1827,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Minesweeper:
         onMinesweeperOpen();
+        break;
+      case HomeMenuAction::RssNews:
+        onRssNewsOpen();
         break;
       case HomeMenuAction::FileTransfer:
         onFileTransferOpen();
@@ -2357,6 +2367,10 @@ void HomeActivity::onNotesOpen() {
 
 void HomeActivity::onMinesweeperOpen() {
   startActivityForResult(std::make_unique<MinesweeperActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+
+void HomeActivity::onRssNewsOpen() {
+  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput), [](const ActivityResult&) {});
 }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }

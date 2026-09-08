@@ -1,0 +1,36 @@
+name: Apply RSS Offline Patch
+
+on:
+  push:
+    branches:
+      - feat/rss-news-reader
+    paths:
+      - tools/apply_rss_offline_patch.py
+      - tools/run_rss_offline_patch.py
+      - .github/workflows/apply-rss-offline-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/rss-news-reader
+
+      - name: Apply readable RSS source patch
+        run: python tools/run_rss_offline_patch.py
+
+      - name: Commit patched RSS sources
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/activities/home/RssNewsActivity.h src/activities/home/RssNewsActivity.cpp
+          if git diff --cached --quiet; then
+            echo "No RSS source changes to commit"
+            exit 0
+          fi
+          git commit -m "feat(rss): offline article bodies and reader typography"
+          git push origin HEAD:feat/rss-news-reader
