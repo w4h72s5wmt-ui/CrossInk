@@ -115,11 +115,22 @@ cpp = replace_once(
     "RSS release list metadata storage",
 )
 
+# Anchor the insertion to the list-item allocation block. The generated RSS
+# source has more than one displayOrderStorage check, so matching that line on
+# its own is intentionally avoided.
 cpp = replace_once(
     cpp,
-    """  if (!displayOrderStorage) {
+    """  } else if (!listItems) {
+    listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
+  }
+
+  if (!displayOrderStorage) {
 """,
-    """  if (!listMetaStorage) {
+    """  } else if (!listItems) {
+    listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
+  }
+
+  if (!listMetaStorage) {
     listMetaStorage = allocateRssBuffer(MAX_ARTICLES * LIST_META_CAPACITY);
     if (!listMetaStorage) {
       LOG_ERR("RSS", "OOM allocating RSS list metadata");
