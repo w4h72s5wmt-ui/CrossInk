@@ -147,6 +147,7 @@ cpp_path.write_text(cpp)
 # Development-only policy: do not carry compatibility code for unpublished
 # formats. Old saves/notes may be discarded during development.
 runpy.run_path("tools/apply_x4_dev_current_formats_only.py", run_name="__main__")
+runpy.run_path("tools/apply_x4_current_formats_compile_fix.py", run_name="__main__")
 
 
 def require(path: str, needle: str, label: str) -> None:
