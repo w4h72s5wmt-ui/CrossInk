@@ -15,6 +15,7 @@ PATCHES = (
     "tools/apply_x4_rss_feed_config_escape_fix.py",
     "tools/apply_x4_rss_readability_layout.py",
     "tools/apply_x4_rss_article_cleanup.py",
+    "tools/apply_x4_rss_feed_limits.py",
 )
 
 for patch in PATCHES:
@@ -211,5 +212,13 @@ require("src/activities/home/RssNewsActivity.cpp", "RssArticleCache::remove(arti
         "RSS stale article body pruning missing")
 require("src/activities/home/RssNewsActivity.cpp", "Purged article bodies for obsolete feed configuration",
         "RSS obsolete feed body cleanup missing")
+require("src/activities/home/RssNewsActivity.h", "uint16_t syncLimit = 30;",
+        "RSS per-feed sync limit missing")
+require("src/activities/home/RssNewsActivity.h", "uint16_t historyLimit = 100;",
+        "RSS per-feed history limit missing")
+require("src/activities/home/RssNewsActivity.cpp", "RssParser parser(feedItems, syncLimit);",
+        "RSS per-feed sync limit not applied")
+require("src/activities/home/RssNewsActivity.cpp", "mergedCount < historyLimit",
+        "RSS per-feed history limit not applied")
 
 print("Applied and validated combined X4 Pro Notes/Minesweeper/RSS overlay.")
