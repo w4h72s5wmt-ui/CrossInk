@@ -14,6 +14,17 @@ viewer_path = Path("src/activities/home/NotesViewerKeyboardBase.h")
 viewer = viewer_path.read_text()
 viewer = replace_once(
     viewer,
+    '''#include "components/TouchHeaderBackButton.h"
+#include "fontIds.h"
+''',
+    '''#include "components/TouchHeaderBackButton.h"
+#include "components/UIScale.h"
+#include "fontIds.h"
+''',
+    "Notes baseline alignment UI scale include",
+)
+viewer = replace_once(
+    viewer,
     '''      if (pointIn(headerActionRect(), tx, ty)) {
         handleHeaderActionTap(tx, ty);
         return;
@@ -52,15 +63,35 @@ viewer = replace_once(
     if (headerActionLocked()) {
       drawNotesHeaderAction();
     } else {
-      Rect iconRect = headerActionRect();
-      // The header already aligns title and controls in the same vertical lane.
-      // Keep only the small optical correction needed by the padlock artwork.
-      iconRect.y += 2;
-      drawOpenLockLight(iconRect);
+      drawOpenLockLight(lockArtworkRectOnTitleBaseline(headerActionRect()));
     }
   }
+
+  Rect lockArtworkRectOnTitleBaseline(Rect rect) const {
+    // Use the exact same title-baseline calculation as the touch header. The
+    // open and closed padlocks both have a 16px body, so placing the body's
+    // bottom edge on the title baseline gives them identical vertical alignment
+    // without moving the much larger touch target.
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    const auto headerLayout = TouchHeaderBackButton::layout(header);
+    const int iconBottom = headerLayout.iconRect.y +
+                           (headerLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2;
+    const int availableOffset = std::max(0, header.y + header.height - iconBottom);
+    const int titleOffset =
+        std::clamp(TouchHeaderBackButton::TITLE_VERTICAL_OFFSET, 0, availableOffset);
+    const auto scale = uiScaleSpec();
+    const int titleBaselineY =
+        headerLayout.iconRect.y + titleOffset +
+        std::max(0, (headerLayout.iconRect.height - renderer.getLineHeight(scale.titleFontId)) / 2) +
+        renderer.getFontAscenderSize(scale.titleFontId);
+
+    constexpr int lockBodyHeight = 16;
+    const int currentBodyBottomY = rect.y + rect.height / 2 + lockBodyHeight - 1;
+    rect.y += titleBaselineY - currentBodyBottomY;
+    return rect;
+  }
 ''',
-    "Notes editor-only lock action and title-baseline alignment",
+    "Notes editor-only lock action and exact title-baseline alignment",
 )
 viewer_path.write_text(viewer)
 
@@ -83,7 +114,7 @@ core = replace_once(
 
 # The content editor knows the exact on-disk path. Use that instead of deriving
 # lock state from the displayed title (which is ambiguous for duplicate titles
-# or sanitised filenames), and apply the same optical alignment correction.
+# or sanitised filenames), and align the lock artwork to the real title baseline.
 core = replace_once(
     core,
     '''  int headerActionReserveWidth() const override { return kLockButtonWidth; }
@@ -95,12 +126,10 @@ core = replace_once(
   bool headerActionLocked() const override { return noteLockedByPath(path); }
 
   void drawHeaderAction() override {
-    Rect iconRect = lockButtonRect();
-    iconRect.y += 2;
-    drawLockIcon(renderer, iconRect, true);
+    drawLockIcon(renderer, lockArtworkRectOnTitleBaseline(lockButtonRect()), true);
   }
 ''',
-    "Notes exact-path lock state and title-baseline alignment",
+    "Notes exact-path lock state and exact title-baseline alignment",
 )
 
 # Unlock through a temporary plaintext file and keep the encrypted original as
@@ -164,5 +193,10 @@ core = replace_once(
     "Notes transactional unlock",
 )
 
+if "iconRect.y += 2" in viewer or "iconRect.y += 2" in core:
+    raise RuntimeError("Notes lock still uses a hard-coded vertical pixel offset")
+if "lockArtworkRectOnTitleBaseline" not in viewer or "lockArtworkRectOnTitleBaseline(lockButtonRect())" not in core:
+    raise RuntimeError("Notes lock exact title-baseline alignment is missing")
+
 core_path.write_text(core)
-print("Applied editor-only Notes lock action, title-baseline alignment, exact-path state, and reliable unlock fixes.")
+print("Applied editor-only Notes lock action, exact title-baseline alignment, exact-path state, and reliable unlock fixes.")
