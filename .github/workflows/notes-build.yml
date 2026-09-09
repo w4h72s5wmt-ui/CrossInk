@@ -60,6 +60,9 @@ jobs:
       - name: Apply retained RSS feeds.txt direct-parser optimization
         run: python3 tools/apply_x4_rss_flash_optimization.py
 
+      - name: Consolidate RSS publisher cleanup rules
+        run: python3 tools/apply_x4_rss_profile_table_optimization.py
+
       - name: Apply RSS exit lifecycle fix
         run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
 
