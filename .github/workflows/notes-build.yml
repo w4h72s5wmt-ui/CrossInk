@@ -1,4 +1,4 @@
-name: CrossInk Notes + Demineur X4 Pro
+name: CrossInk Notes + Demineur + 2048 X4 Pro
 
 on:
   push:
@@ -50,6 +50,9 @@ jobs:
 
       - name: Apply consolidated Notes + Minesweeper overlay
         run: python3 tools/apply_x4_notes_minesweeper_consolidated.py
+
+      - name: Apply X4 Pro 2048 menu + launcher integration
+        run: python3 tools/apply_x4_2048_integration.py
 
       - name: Apply editable RSS cleanup rules overlay
         run: python3 tools/apply_x4_rss_external_cleanup_rules.py
