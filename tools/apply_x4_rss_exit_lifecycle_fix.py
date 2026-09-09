@@ -8,15 +8,22 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-# 1) RSS: release shared renderer SD-font caches and pop back to the Home/app menu on normal Back.
+# 1) RSS: release rebuildable global font caches and pop back to the Home/app menu on normal Back.
 rss_path = Path("src/activities/home/RssNewsActivity.cpp")
 rss = rss_path.read_text()
 
 rss = replace_once(
     rss,
+    '#include <GfxRenderer.h>\n',
+    '#include <FontCacheManager.h>\n#include <GfxRenderer.h>\n',
+    "RSS FontCacheManager include",
+)
+
+rss = replace_once(
+    rss,
     '''void RssNewsActivity::onExit() {\n  Activity::onExit();\n  uiReady = false;\n''',
-    '''void RssNewsActivity::onExit() {\n  // Match the EPUB reader's proven low-memory cleanup path. The glyph/advance\n  // caches that affect contiguous PSRAM belong to the renderer, not merely to\n  // SdCardFontSystem's loader/registry state.\n  const int readerFontId = SETTINGS.getReaderFontId();\n  if (renderer.isSdCardFont(readerFontId)) {\n    renderer.releaseSdCardFontForLowMemory(readerFontId);\n  }\n  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n  uiReady = false;\n''',
-    "RSS exit renderer font-cache cleanup",
+    '''void RssNewsActivity::onExit() {\n  // The first RSS article render can lazily allocate FontDecompressor's\n  // grow-only compressed-font hot-group buffer. It is fully rebuildable but,\n  // if left resident after RSS exits, a ~12 KB allocation can split the large\n  // contiguous PSRAM arena. On this branch FontCacheManager::clearCache()\n  // clears FontDecompressor first and then the registered SD-font caches.\n  if (auto* fcm = renderer.getFontCacheManager()) {\n    fcm->clearCache();\n  }\n  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n  uiReady = false;\n''',
+    "RSS exit font/decompressor cleanup",
 )
 
 rss = replace_once(
@@ -110,7 +117,8 @@ main_path.write_text(main)
 
 # Assertions keep this overlay readable and fail CI if upstream structure changes.
 checks = {
-    "RSS renderer font cleanup": "renderer.releaseSdCardFontForLowMemory(readerFontId);",
+    "RSS FontCacheManager include": "#include <FontCacheManager.h>",
+    "RSS font/decompressor cleanup": "fcm->clearCache();",
     "RSS normal pop": "finish();",
     "RSS network menu reboot": "silentRestartAfterNetworkToRssMenu();",
     "RSS Home enum": "RSS_NEWS",
@@ -121,4 +129,4 @@ for label, needle in checks.items():
     if needle not in combined:
         raise RuntimeError(f"{label}: verification failed")
 
-print("Applied RSS exit lifecycle fix (renderer font-cache cleanup + app-menu return + post-WiFi menu restore).")
+print("Applied RSS exit lifecycle fix (FontDecompressor cache cleanup + app-menu return + post-WiFi menu restore).")
