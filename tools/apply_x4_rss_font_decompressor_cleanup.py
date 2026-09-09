@@ -21,14 +21,14 @@ text = replace_once(
 text = replace_once(
     text,
     '''  writeRssMemoryAudit("exit.00-begin", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n  // Match the EPUB reader's proven low-memory cleanup path.''',
-    '''  writeRssMemoryAudit("exit.00-begin", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n\n  // RSS's first article render can lazily allocate FontDecompressor's global\n  // compressed-font hot-group buffer (~12 KB on the X4 Pro). It is rebuildable\n  // and otherwise survives the Activity, splitting the largest PSRAM arena.\n  // This same cleanup API is already used by the EPUB reader and network flows.\n  if (auto* fcm = renderer.getFontCacheManager()) {\n    fcm->releaseSdFontCaches();\n  }\n  writeRssMemoryAudit("exit.00b-after-global-font-cache-release");\n\n  // Match the EPUB reader's proven low-memory cleanup path.''',
+    '''  writeRssMemoryAudit("exit.00-begin", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n\n  // RSS's first article render can lazily allocate FontDecompressor's global\n  // compressed-font hot-group buffer (~12 KB on the X4 Pro). It is rebuildable\n  // and otherwise survives the Activity, splitting the largest PSRAM arena.\n  // On this branch FontCacheManager::clearCache() clears FontDecompressor first\n  // and then clears the registered SD-font caches.\n  if (auto* fcm = renderer.getFontCacheManager()) {\n    fcm->clearCache();\n  }\n  writeRssMemoryAudit("exit.00b-after-global-font-cache-release");\n\n  // Match the EPUB reader's proven low-memory cleanup path.''',
     "RSS global font cache cleanup",
 )
 
-if "fcm->releaseSdFontCaches();" not in text:
+if "fcm->clearCache();" not in text:
     raise RuntimeError("RSS FontCacheManager cleanup missing")
 if 'writeRssMemoryAudit("exit.00b-after-global-font-cache-release")' not in text:
     raise RuntimeError("RSS cleanup audit checkpoint missing")
 
 path.write_text(text)
-print("Applied RSS FontDecompressor/global font-cache cleanup after deep audit instrumentation.")
+print("Applied branch-compatible RSS FontDecompressor/global font-cache cleanup after deep audit instrumentation.")
