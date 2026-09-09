@@ -1,0 +1,174 @@
+name: X4 Pro Flash Audit - Build 206
+
+on:
+  push:
+    branches: [x4-pro-flash-audit-206]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BASE206_SHA: ffb14e0a4d9fc93fa607c7c5d652884fee1e2c4e
+
+jobs:
+  flash-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact Build 206 sources
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.BASE206_SHA }}
+          submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-flash-audit-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Apply consolidated Notes + Minesweeper overlay
+        run: python3 tools/apply_x4_notes_minesweeper_consolidated.py
+
+      - name: Apply X4 Pro 2048 menu + launcher integration
+        run: python3 tools/apply_x4_2048_integration.py
+
+      - name: Apply editable RSS cleanup rules overlay
+        run: python3 tools/apply_x4_rss_external_cleanup_rules.py
+
+      - name: Apply RSS exit lifecycle fix
+        run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
+
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
+      - name: Build exact Build 206 sources
+        run: |
+          set -euo pipefail
+          pio run -e x4-pro | tee pio-x4-pro-flash-audit.log
+
+      - name: Generate Flash audit report
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELF=.pio/build/x4-pro/firmware.elf
+          REPORT=flash-audit-build-206.txt
+
+          NM="$(find "$HOME/.platformio/packages" -type f \( -name 'xtensa-esp32s3-elf-nm' -o -name 'xtensa-esp-elf-nm' \) -perm -111 | head -n 1 || true)"
+          SIZE="$(find "$HOME/.platformio/packages" -type f \( -name 'xtensa-esp32s3-elf-size' -o -name 'xtensa-esp-elf-size' \) -perm -111 | head -n 1 || true)"
+
+          if [ ! -f "$ELF" ]; then
+            echo "Missing $ELF" >&2
+            exit 1
+          fi
+          if [ -z "$NM" ] || [ -z "$SIZE" ]; then
+            echo "Could not locate Xtensa nm/size tools" >&2
+            exit 1
+          fi
+
+          {
+            echo "CrossInk X4 Pro Flash Audit"
+            echo "Base Build: 206"
+            echo "Base commit: $BASE206_SHA"
+            echo "Generated from exact Build 206 sources and the same app overlays as notes-build.yml"
+            echo
+            echo "=== LINKED ELF SECTIONS ==="
+            "$SIZE" -A "$ELF"
+            echo
+            echo "=== LINKED APP SYMBOLS, SORTED BY SIZE ==="
+            "$NM" -S --size-sort --radix=d --demangle "$ELF" \
+              | grep -E 'RssNewsActivity|RssArticleCache|RssParser|NotesActivity|NotesKeyboardActivity|MinesweeperActivity|Game2048Activity|2048' \
+              || true
+            echo
+            echo "=== TOP 250 LINKED SYMBOLS, ALL FIRMWARE ==="
+            "$NM" -S --size-sort --radix=d --demangle "$ELF" | tail -n 250
+            echo
+            echo "=== APP OBJECT FILE FOOTPRINTS BEFORE LINK ==="
+            while IFS= read -r obj; do
+              echo
+              echo "--- $obj ---"
+              "$SIZE" "$obj" || true
+            done < <(find .pio/build/x4-pro -type f -name '*.o' \
+              | grep -E 'RssNewsActivity|RssArticleCache|RssParser|NotesActivity|NotesKeyboardActivity|MinesweeperActivity|Game2048Activity' \
+              | sort)
+            echo
+            echo "=== MAP FILES PRESENT ==="
+            find .pio/build/x4-pro -maxdepth 2 -type f -name '*.map' -print || true
+          } > "$REPORT"
+
+          python3 - "$NM" "$ELF" >> "$REPORT" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          nm, elf = sys.argv[1:]
+          output = subprocess.check_output(
+              [nm, "-S", "--size-sort", "--radix=d", "--demangle", elf],
+              text=True,
+              errors="replace",
+          )
+
+          groups = {
+              "RSS news activity": re.compile(r"RssNewsActivity"),
+              "RSS article cache": re.compile(r"RssArticleCache"),
+              "RSS parser": re.compile(r"RssParser"),
+              "Notes": re.compile(r"NotesActivity|NotesKeyboardActivity"),
+              "Minesweeper": re.compile(r"MinesweeperActivity"),
+              "2048": re.compile(r"Game2048Activity|2048"),
+          }
+
+          totals = {name: 0 for name in groups}
+          counts = {name: 0 for name in groups}
+          for line in output.splitlines():
+              parts = line.split(None, 3)
+              if len(parts) < 4:
+                  continue
+              try:
+                  size = int(parts[1], 10)
+              except ValueError:
+                  continue
+              symbol = parts[3]
+              for name, pattern in groups.items():
+                  if pattern.search(symbol):
+                      totals[name] += size
+                      counts[name] += 1
+                      break
+
+          print()
+          print("=== LINKED NAMED-SYMBOL TOTALS ===")
+          print("These totals are exact for symbols whose demangled names identify the app; anonymous/local helpers may live outside these buckets.")
+          for name in groups:
+              print(f"{name:24s} {totals[name]:8d} B across {counts[name]:4d} symbols")
+          PY
+
+          echo
+          echo "Flash audit summary:"
+          tail -n 10 "$REPORT"
+
+      - name: Upload Flash audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-flash-audit-build-206
+          path: |
+            flash-audit-build-206.txt
+            pio-x4-pro-flash-audit.log
+            .pio/build/x4-pro/firmware.elf
+            .pio/build/x4-pro/*.map
+          if-no-files-found: warn
+          retention-days: 14
