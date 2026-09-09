@@ -113,7 +113,7 @@ GameGeometry gameGeometry(const GfxRenderer& renderer, const MappedInputManager&
   const int gridTop = scoreBar.y + scoreBar.height + metrics.verticalSpacing;
   const int footerTop = screenHeight - metrics.buttonHintsHeight;
   constexpr int undoHeight = 48;
-  constexpr int undoGap = 10;
+  constexpr int undoGap = 18;
   const int availableHeight = std::max(1, footerTop - gridTop - undoGap - undoHeight - metrics.verticalSpacing);
   const int availableWidth = std::max(1, screenWidth - 2 * metrics.contentSidePadding);
   const int cellSize = std::max(1, std::min(availableWidth / dimension, availableHeight / dimension));
@@ -1104,10 +1104,10 @@ void Game2048Activity::renderGameSurface(const bool drawHints) {
     GUI.drawHeader(renderer, geometry.header, title, nullptr, false);
   }
 
-  renderer.fillRect(geometry.scoreBar.x, geometry.scoreBar.y, geometry.scoreBar.width, geometry.scoreBar.height, false);
-  renderer.drawRect(geometry.scoreBar.x, geometry.scoreBar.y, geometry.scoreBar.width, geometry.scoreBar.height, 1, true);
-  renderer.drawRect(geometry.leftScore.x, geometry.leftScore.y, geometry.leftScore.width, geometry.leftScore.height, 1, true);
-  renderer.drawRect(geometry.rightScore.x, geometry.rightScore.y, geometry.rightScore.width, geometry.rightScore.height, 1, true);
+  renderer.drawRoundedRect(geometry.leftScore.x, geometry.leftScore.y,
+                           geometry.leftScore.width, geometry.leftScore.height, 1, 6, true);
+  renderer.drawRoundedRect(geometry.rightScore.x, geometry.rightScore.y,
+                           geometry.rightScore.width, geometry.rightScore.height, 1, 6, true);
 
   char currentText[32];
   char bestText[32];
@@ -1117,7 +1117,6 @@ void Game2048Activity::renderGameSurface(const bool drawHints) {
   drawCenteredText(renderer, UI_10_FONT_ID, geometry.leftScore, currentText);
   drawCenteredText(renderer, UI_10_FONT_ID, geometry.rightScore, bestText);
 
-  renderer.drawRect(geometry.grid.x, geometry.grid.y, geometry.grid.width + 1, geometry.grid.height + 1, 1, true);
   for (int row = 0; row < dimension; ++row) {
     for (int col = 0; col < dimension; ++col) {
       const int index = row * dimension + col;
@@ -1133,11 +1132,8 @@ void Game2048Activity::renderGameSurface(const bool drawHints) {
     }
   }
 
-  renderer.fillRect(geometry.undoButton.x, geometry.undoButton.y,
-                    geometry.undoButton.width, geometry.undoButton.height, false);
   renderer.drawRoundedRect(geometry.undoButton.x, geometry.undoButton.y,
-                           geometry.undoButton.width, geometry.undoButton.height,
-                           undoCount_ > 0 ? 2 : 1, 6, true);
+                           geometry.undoButton.width, geometry.undoButton.height, 1, 6, true);
   char undoText[40];
   std::snprintf(undoText, sizeof(undoText), "Annuler un coup sur %d", undoCount_);
   drawCenteredText(renderer, UI_12_FONT_ID, geometry.undoButton, undoText);
