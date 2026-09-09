@@ -8,15 +8,15 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-# 1) RSS: release shared SD-font state and pop back to the Home/app menu on normal Back.
+# 1) RSS: release shared renderer SD-font caches and pop back to the Home/app menu on normal Back.
 rss_path = Path("src/activities/home/RssNewsActivity.cpp")
 rss = rss_path.read_text()
 
 rss = replace_once(
     rss,
     '''void RssNewsActivity::onExit() {\n  Activity::onExit();\n  uiReady = false;\n''',
-    '''void RssNewsActivity::onExit() {\n  // RSS articles use the global reader SD font. Do not leave its renderer-owned\n  // glyph/cache allocations resident after RSS exits: they can split the large\n  // contiguous PSRAM block even though total free PSRAM remains high.\n  sdFontSystem.releaseLoadedFont(renderer);\n  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n  uiReady = false;\n''',
-    "RSS exit font cleanup",
+    '''void RssNewsActivity::onExit() {\n  // Match the EPUB reader's proven low-memory cleanup path. The glyph/advance\n  // caches that affect contiguous PSRAM belong to the renderer, not merely to\n  // SdCardFontSystem's loader/registry state.\n  const int readerFontId = SETTINGS.getReaderFontId();\n  if (renderer.isSdCardFont(readerFontId)) {\n    renderer.releaseSdCardFontForLowMemory(readerFontId);\n  }\n  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n  uiReady = false;\n''',
+    "RSS exit renderer font-cache cleanup",
 )
 
 rss = replace_once(
@@ -110,7 +110,7 @@ main_path.write_text(main)
 
 # Assertions keep this overlay readable and fail CI if upstream structure changes.
 checks = {
-    "RSS font cleanup": "sdFontSystem.releaseLoadedFont(renderer);",
+    "RSS renderer font cleanup": "renderer.releaseSdCardFontForLowMemory(readerFontId);",
     "RSS normal pop": "finish();",
     "RSS network menu reboot": "silentRestartAfterNetworkToRssMenu();",
     "RSS Home enum": "RSS_NEWS",
@@ -121,4 +121,4 @@ for label, needle in checks.items():
     if needle not in combined:
         raise RuntimeError(f"{label}: verification failed")
 
-print("Applied RSS exit lifecycle fix (font cleanup + app-menu return + post-WiFi menu restore).")
+print("Applied RSS exit lifecycle fix (renderer font-cache cleanup + app-menu return + post-WiFi menu restore).")
