@@ -10,6 +10,59 @@
 #include "MappedInputManager.h"
 #include "fontIds.h"
 
+namespace {
+
+// 3x5 numeric glyphs for tile values. Keeping the digits local to the app
+// avoids depending on reader-font/cache state and gives the X4 Pro large,
+// high-contrast numbers with no allocations.
+constexpr uint8_t TILE_DIGITS[10][5] = {
+    {0b111, 0b101, 0b101, 0b101, 0b111},  // 0
+    {0b010, 0b110, 0b010, 0b010, 0b111},  // 1
+    {0b111, 0b001, 0b111, 0b100, 0b111},  // 2
+    {0b111, 0b001, 0b111, 0b001, 0b111},  // 3
+    {0b101, 0b101, 0b111, 0b001, 0b001},  // 4
+    {0b111, 0b100, 0b111, 0b001, 0b111},  // 5
+    {0b111, 0b100, 0b111, 0b101, 0b111},  // 6
+    {0b111, 0b001, 0b001, 0b001, 0b001},  // 7
+    {0b111, 0b101, 0b111, 0b101, 0b111},  // 8
+    {0b111, 0b101, 0b111, 0b001, 0b111},  // 9
+};
+
+void drawTileValue(GfxRenderer& renderer, const int x, const int y, const int width, const int height,
+                   const uint32_t value) {
+  char text[16];
+  std::snprintf(text, sizeof(text), "%lu", static_cast<unsigned long>(value));
+
+  int digitCount = 0;
+  while (digitCount < static_cast<int>(sizeof(text)) && text[digitCount] != '\0') ++digitCount;
+  if (digitCount <= 0) return;
+
+  const int widthUnits = digitCount * 3 + (digitCount - 1);
+  const int padding = std::max(4, std::min(width, height) / 10);
+  const int usableWidth = std::max(1, width - 2 * padding);
+  const int usableHeight = std::max(1, height - 2 * padding);
+  const int pixel = std::max(1, std::min(usableWidth / widthUnits, usableHeight / 5));
+  const int glyphWidth = widthUnits * pixel;
+  const int glyphHeight = 5 * pixel;
+  const int startX = x + (width - glyphWidth) / 2;
+  const int startY = y + (height - glyphHeight) / 2;
+
+  for (int digit = 0; digit < digitCount; ++digit) {
+    const int valueDigit = text[digit] - '0';
+    if (valueDigit < 0 || valueDigit > 9) continue;
+    const int digitX = startX + digit * 4 * pixel;
+    for (int row = 0; row < 5; ++row) {
+      const uint8_t bits = TILE_DIGITS[valueDigit][row];
+      for (int col = 0; col < 3; ++col) {
+        if ((bits & static_cast<uint8_t>(1u << (2 - col))) == 0) continue;
+        renderer.fillRect(digitX + col * pixel, startY + row * pixel, pixel, pixel, true);
+      }
+    }
+  }
+}
+
+}  // namespace
+
 Game2048Activity::Game2048Activity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : Activity("2048", renderer, mappedInput) {}
 
@@ -209,7 +262,7 @@ void Game2048Activity::render(RenderLock&&) {
   const int gridX = (screenWidth - gridSize) / 2;
   const int gridY = headerHeight + margin + std::max(0, (availableHeight - gridSize) / 2);
 
-  renderer.drawText(LEXENDDECA_20_FONT_ID, margin, 12, "2048");
+  renderer.drawText(UI_12_FONT_ID, margin, 18, "2048");
   char scoreText[32];
   std::snprintf(scoreText, sizeof(scoreText), "Score %lu", static_cast<unsigned long>(score_));
   const int scoreWidth = renderer.getTextWidth(UI_12_FONT_ID, scoreText);
@@ -227,12 +280,7 @@ void Game2048Activity::render(RenderLock&&) {
 
       const uint8_t exponent = board_[static_cast<size_t>(index)];
       if (exponent == 0) continue;
-      char valueText[16];
-      std::snprintf(valueText, sizeof(valueText), "%lu", static_cast<unsigned long>(tileValue(exponent)));
-      const int font = tileValue(exponent) < 1000 ? LEXENDDECA_20_FONT_ID : LEXENDDECA_16_FONT_ID;
-      const int textWidth = renderer.getTextWidth(font, valueText);
-      const int textHeight = renderer.getLineHeight(font);
-      renderer.drawText(font, x + (cellSize - textWidth) / 2, y + (cellSize - textHeight) / 2, valueText);
+      drawTileValue(renderer, x + gap, y + gap, inner, inner, tileValue(exponent));
     }
   }
 
