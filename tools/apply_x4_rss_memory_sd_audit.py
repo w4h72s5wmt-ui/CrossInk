@@ -36,9 +36,9 @@ text = replace_once(
 
 text = replace_once(
     text,
-    '''void RssNewsActivity::onExit() {\n  // RSS articles use the global reader SD font. Do not leave its renderer-owned\n  // glyph/cache allocations resident after RSS exits: they can split the large\n  // contiguous PSRAM block even though total free PSRAM remains high.\n  sdFontSystem.releaseLoadedFont(renderer);\n  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n''',
-    '''void RssNewsActivity::onExit() {\n  // Measure immediately around the #180 cleanup. Values are sampled before SD\n  // I/O in writeRssMemoryAudit(), so the audit does not contaminate the sample.\n  writeRssMemoryAudit("before-font-release");\n\n  // RSS articles use the global reader SD font. Do not leave its renderer-owned\n  // glyph/cache allocations resident after RSS exits: they can split the large\n  // contiguous PSRAM block even though total free PSRAM remains high.\n  sdFontSystem.releaseLoadedFont(renderer);\n  sdFontSystem.releaseRegistry();\n\n  writeRssMemoryAudit("after-font-release");\n  Activity::onExit();\n''',
-    "RSS cleanup A/B audit",
+    '''void RssNewsActivity::onExit() {\n  // Match the EPUB reader's proven low-memory cleanup path. The glyph/advance\n  // caches that affect contiguous PSRAM belong to the renderer, not merely to\n  // SdCardFontSystem's loader/registry state.\n  const int readerFontId = SETTINGS.getReaderFontId();\n  if (renderer.isSdCardFont(readerFontId)) {\n    renderer.releaseSdCardFontForLowMemory(readerFontId);\n  }\n  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n''',
+    '''void RssNewsActivity::onExit() {\n  writeRssMemoryAudit("before-renderer-font-release");\n\n  // Match the EPUB reader's proven low-memory cleanup path. The glyph/advance\n  // caches that affect contiguous PSRAM belong to the renderer, not merely to\n  // SdCardFontSystem's loader/registry state.\n  const int readerFontId = SETTINGS.getReaderFontId();\n  if (renderer.isSdCardFont(readerFontId)) {\n    renderer.releaseSdCardFontForLowMemory(readerFontId);\n  }\n  sdFontSystem.releaseRegistry();\n\n  writeRssMemoryAudit("after-renderer-font-release");\n  Activity::onExit();\n''',
+    "RSS renderer cleanup A/B audit",
 )
 
 path.write_text(text)
@@ -48,8 +48,8 @@ checks = {
     "append mode": "O_WRONLY | O_CREAT | O_APPEND",
     "before enter": 'writeRssMemoryAudit("before-enter");',
     "font loaded": 'writeRssMemoryAudit("after-font-load");',
-    "before release": 'writeRssMemoryAudit("before-font-release");',
-    "after release": 'writeRssMemoryAudit("after-font-release");',
+    "before renderer release": 'writeRssMemoryAudit("before-renderer-font-release");',
+    "after renderer release": 'writeRssMemoryAudit("after-renderer-font-release");',
 }
 for label, needle in checks.items():
     if needle not in text:
@@ -59,4 +59,4 @@ for label, needle in checks.items():
 if 'LOG_ERR("RSSMEM"' in text or 'LOG_INF("RSSMEM"' in text or 'LOG_DBG("RSSMEM"' in text:
     raise RuntimeError("RSS memory audit must be SD-only")
 
-print("Applied RSS memory audit: /rss_mem_audit.txt only, no serial audit output.")
+print("Applied RSS memory audit: renderer font-cache A/B to /rss_mem_audit.txt only.")
