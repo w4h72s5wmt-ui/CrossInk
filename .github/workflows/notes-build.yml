@@ -54,6 +54,9 @@ jobs:
       - name: Apply editable RSS cleanup rules overlay
         run: python3 tools/apply_x4_rss_external_cleanup_rules.py
 
+      - name: Apply RSS exit lifecycle fix
+        run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
