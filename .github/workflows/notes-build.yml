@@ -60,8 +60,8 @@ jobs:
       - name: Apply RSS SD-only publisher cleanup
         run: python3 tools/apply_x4_rss_sd_rules_only.py
 
-      - name: Fix RSS SD-only generated helper
-        run: python3 tools/apply_x4_rss_sd_rules_compile_fix.py
+      - name: Apply RSS Figaro authenticated fetch
+        run: python3 tools/apply_x4_rss_figaro_auth.py
 
       - name: Apply RSS exit lifecycle fix
         run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
