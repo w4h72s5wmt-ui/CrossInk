@@ -21,6 +21,7 @@ constexpr size_t RX_BUFFER_SIZE = 4096;
 constexpr size_t TX_BUFFER_SIZE = 1024;
 constexpr int HTTP_TIMEOUT_MS = 15000;
 constexpr uint8_t MAX_REDIRECTS = 5;
+constexpr size_t KEEPALIVE_TAIL_LIMIT = 64U * 1024U;
 constexpr char ARTICLE_START[] = "<article";
 constexpr char ARTICLE_END[] = "</article>";
 
@@ -40,7 +41,9 @@ struct Session {
   const HttpDownloader::CancelCallback* shouldCancel = nullptr;
   bool cancelled = false;
   bool seenArticle = false;
+  bool articleClosed = false;
   bool earlyArticleEnd = false;
+  size_t bytesReceived = 0;
   char tail[sizeof(ARTICLE_END) - 1] = {};
   size_t tailLength = 0;
 };
@@ -179,21 +182,27 @@ bool isRedirect(const int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
+char combinedByteAt(const uint8_t* data, const size_t index) {
+  if (index < session.tailLength) return session.tail[index];
+  return static_cast<char>(data[index - session.tailLength]);
+}
+
 size_t findMarker(const uint8_t* data, const size_t length, const char* marker) {
   if (!data || length == 0 || !marker || !marker[0]) return std::string::npos;
   const size_t markerLength = std::strlen(marker);
-  if (markerLength > sizeof(session.tail) + length) return std::string::npos;
+  const size_t combinedLength = session.tailLength + length;
+  if (markerLength > combinedLength) return std::string::npos;
 
-  char probe[sizeof(session.tail) + RX_BUFFER_SIZE] = {};
-  const size_t prefix = session.tailLength;
-  if (prefix > 0) std::memcpy(probe, session.tail, prefix);
-  const size_t copied = std::min(length, sizeof(probe) - prefix);
-  std::memcpy(probe + prefix, data, copied);
-  const size_t probeLength = prefix + copied;
-  for (size_t i = 0; i + markerLength <= probeLength; ++i) {
-    if (strncasecmp(probe + i, marker, markerLength) == 0) {
-      if (i + markerLength <= prefix) return 0;
-      return i + markerLength - prefix;
+  for (size_t i = 0; i + markerLength <= combinedLength; ++i) {
+    size_t j = 0;
+    while (j < markerLength &&
+           std::tolower(static_cast<unsigned char>(combinedByteAt(data, i + j))) ==
+               std::tolower(static_cast<unsigned char>(marker[j]))) {
+      ++j;
+    }
+    if (j == markerLength) {
+      if (i + markerLength <= session.tailLength) return 0;
+      return i + markerLength - session.tailLength;
     }
   }
   return std::string::npos;
@@ -201,8 +210,16 @@ size_t findMarker(const uint8_t* data, const size_t length, const char* marker) 
 
 void rememberTail(const uint8_t* data, const size_t length) {
   const size_t keep = sizeof(session.tail);
-  session.tailLength = std::min(length, keep);
-  if (session.tailLength > 0) std::memcpy(session.tail, data + length - session.tailLength, session.tailLength);
+  if (length >= keep) {
+    session.tailLength = keep;
+    std::memcpy(session.tail, data + length - keep, keep);
+    return;
+  }
+
+  const size_t oldKeep = std::min(session.tailLength, keep - length);
+  if (oldKeep > 0) std::memmove(session.tail, session.tail + session.tailLength - oldKeep, oldKeep);
+  std::memcpy(session.tail + oldKeep, data, length);
+  session.tailLength = oldKeep + length;
 }
 
 esp_err_t onHttpEvent(esp_http_client_event_t* event) {
@@ -219,10 +236,24 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   const auto* data = static_cast<const uint8_t*>(event->data);
   const size_t length = static_cast<size_t>(event->data_len);
   if (!session.seenArticle && findMarker(data, length, ARTICLE_START) != std::string::npos) session.seenArticle = true;
-  const size_t articleEnd = session.seenArticle ? findMarker(data, length, ARTICLE_END) : std::string::npos;
-  const size_t forwardLength = articleEnd == std::string::npos ? length : std::min(articleEnd, length);
-  if (forwardLength > 0 && !(**session.onData)(data, forwardLength)) return ESP_FAIL;
+  const size_t articleEnd = session.seenArticle && !session.articleClosed ? findMarker(data, length, ARTICLE_END)
+                                                                           : std::string::npos;
+
+  bool cutTail = false;
   if (articleEnd != std::string::npos) {
+    session.articleClosed = true;
+    const int64_t contentLength = esp_http_client_get_content_length(event->client);
+    const size_t bytesAfterChunk = session.bytesReceived + length;
+    const size_t remaining = contentLength > 0 && static_cast<uint64_t>(contentLength) > bytesAfterChunk
+                                 ? static_cast<size_t>(contentLength) - bytesAfterChunk
+                                 : 0;
+    cutTail = contentLength <= 0 || remaining > KEEPALIVE_TAIL_LIMIT;
+  }
+
+  const size_t forwardLength = cutTail ? std::min(articleEnd, length) : length;
+  if (forwardLength > 0 && !(**session.onData)(data, forwardLength)) return ESP_FAIL;
+  session.bytesReceived += length;
+  if (cutTail) {
     session.earlyArticleEnd = true;
     return ESP_FAIL;
   }
@@ -278,7 +309,9 @@ void resetSession() {
   session.shouldCancel = nullptr;
   session.cancelled = false;
   session.seenArticle = false;
+  session.articleClosed = false;
   session.earlyArticleEnd = false;
+  session.bytesReceived = 0;
   session.tailLength = 0;
 }
 
@@ -300,7 +333,9 @@ HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownlo
     session.shouldCancel = &shouldCancel;
     session.cancelled = false;
     session.seenArticle = false;
+    session.articleClosed = false;
     session.earlyArticleEnd = false;
+    session.bytesReceived = 0;
     session.tailLength = 0;
     esp_http_client_set_header(session.client, "Cookie", session.cookie.c_str());
 
@@ -314,8 +349,7 @@ HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownlo
       return HttpDownloader::ABORTED;
     }
     if (session.earlyArticleEnd) {
-      // The response body was intentionally cut after the complete <article>.
-      // Drop this socket because unread HTTP bytes cannot be reused safely.
+      // Unread response bytes make this socket unsafe to reuse.
       dropClient();
       return status == 200 ? HttpDownloader::OK : HttpDownloader::HTTP_ERROR;
     }
