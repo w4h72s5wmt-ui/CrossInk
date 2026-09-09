@@ -9,8 +9,9 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 # -----------------------------------------------------------------------------
-# RSS activity: fine-grained SD-only memory trace.
-# This overlay intentionally runs AFTER apply_x4_rss_exit_lifecycle_fix.py.
+# RSS activity: deep SD-only memory trace.
+# Runs after all functional RSS overlays, so use small stable insertion anchors
+# instead of replacing whole functions that other overlays already reshape.
 # -----------------------------------------------------------------------------
 rss_path = Path("src/activities/home/RssNewsActivity.cpp")
 rss = rss_path.read_text()
@@ -25,56 +26,143 @@ rss = replace_once(
 rss = replace_once(
     rss,
     '''namespace {\nconstexpr fui::ActionId ACTION_ROW = 1;\n''',
-    '''namespace {\nconstexpr fui::ActionId ACTION_ROW = 1;\nconstexpr const char* RSS_MEM_AUDIT_PATH = "/rss_mem_audit.txt";\n\nstruct RssMemSnapshot {\n  size_t heapFree = 0;\n  size_t heapLargest = 0;\n  size_t psramFree = 0;\n  size_t psramLargest = 0;\n  size_t psramAllocated = 0;\n  size_t psramMinimumFree = 0;\n  size_t psramAllocatedBlocks = 0;\n  size_t psramFreeBlocks = 0;\n  size_t psramTotalBlocks = 0;\n};\n\nRssMemSnapshot captureRssMemory() {\n  RssMemSnapshot snapshot;\n#ifndef SIMULATOR\n  snapshot.heapFree = ESP.getFreeHeap();\n  snapshot.heapLargest = ESP.getMaxAllocHeap();\n  snapshot.psramFree = ESP.getFreePsram();\n  snapshot.psramLargest = ESP.getMaxAllocPsram();\n\n  multi_heap_info_t psramInfo{};\n  heap_caps_get_info(&psramInfo, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n  snapshot.psramAllocated = psramInfo.total_allocated_bytes;\n  snapshot.psramMinimumFree = psramInfo.minimum_free_bytes;\n  snapshot.psramAllocatedBlocks = psramInfo.allocated_blocks;\n  snapshot.psramFreeBlocks = psramInfo.free_blocks;\n  snapshot.psramTotalBlocks = psramInfo.total_blocks;\n#endif\n  return snapshot;\n}\n\nvoid appendRssMemorySnapshot(const char* phase, const RssMemSnapshot& snapshot,\n                             const size_t meta1 = 0, const size_t meta2 = 0,\n                             const size_t meta3 = 0, const size_t meta4 = 0) {\n#ifndef SIMULATOR\n  static bool sessionHeaderWritten = false;\n  FsFile file = Storage.open(RSS_MEM_AUDIT_PATH, O_WRONLY | O_CREAT | O_APPEND);\n  if (!file) return;\n\n  if (!sessionHeaderWritten) {\n    static constexpr char header[] = "\\n--- RSS MEM DEEP AUDIT SESSION ---\\n";\n    file.write(reinterpret_cast<const uint8_t*>(header), sizeof(header) - 1);\n    sessionHeaderWritten = true;\n  }\n\n  char line[384];\n  const int length = std::snprintf(\n      line, sizeof(line),\n      "[%lu] %s: heap=%zu largest=%zu psram=%zu psramLargest=%zu pAlloc=%zu pMin=%zu "\n      "pAllocBlocks=%zu pFreeBlocks=%zu pTotalBlocks=%zu m1=%zu m2=%zu m3=%zu m4=%zu\\n",\n      static_cast<unsigned long>(millis()), phase ? phase : "?",\n      snapshot.heapFree, snapshot.heapLargest, snapshot.psramFree, snapshot.psramLargest,\n      snapshot.psramAllocated, snapshot.psramMinimumFree, snapshot.psramAllocatedBlocks,\n      snapshot.psramFreeBlocks, snapshot.psramTotalBlocks, meta1, meta2, meta3, meta4);\n  if (length > 0) {\n    const size_t bytes = std::min(static_cast<size_t>(length), sizeof(line) - 1);\n    file.write(reinterpret_cast<const uint8_t*>(line), bytes);\n  }\n  file.close();\n#else\n  (void)phase;\n  (void)snapshot;\n  (void)meta1;\n  (void)meta2;\n  (void)meta3;\n  (void)meta4;\n#endif\n}\n\nvoid writeRssMemoryAudit(const char* phase, const size_t meta1 = 0, const size_t meta2 = 0,\n                         const size_t meta3 = 0, const size_t meta4 = 0) {\n#ifndef SIMULATOR\n  // Always sample BEFORE SD I/O. The very first call additionally measures the\n  // audit file's own lazy SD/FAT cache impact so we can subtract diagnostic noise.\n  static bool firstWriteChecked = false;\n  const RssMemSnapshot beforeIo = captureRssMemory();\n  appendRssMemorySnapshot(phase, beforeIo, meta1, meta2, meta3, meta4);\n  if (!firstWriteChecked) {\n    firstWriteChecked = true;\n    const RssMemSnapshot afterIo = captureRssMemory();\n    appendRssMemorySnapshot("audit-io-after-first-write", afterIo);\n  }\n#else\n  (void)phase;\n  (void)meta1;\n  (void)meta2;\n  (void)meta3;\n  (void)meta4;\n#endif\n}\n''',
-    "RSS deep SD audit helpers",
+    '''namespace {\nconstexpr fui::ActionId ACTION_ROW = 1;\nconstexpr const char* RSS_MEM_AUDIT_PATH = "/rss_mem_audit.txt";\n\nstruct RssMemSnapshot {\n  size_t heapFree = 0;\n  size_t heapLargest = 0;\n  size_t psramFree = 0;\n  size_t psramLargest = 0;\n  size_t psramAllocated = 0;\n  size_t psramMinimumFree = 0;\n  size_t psramAllocatedBlocks = 0;\n  size_t psramFreeBlocks = 0;\n  size_t psramTotalBlocks = 0;\n};\n\nRssMemSnapshot captureRssMemory() {\n  RssMemSnapshot snapshot;\n#ifndef SIMULATOR\n  snapshot.heapFree = ESP.getFreeHeap();\n  snapshot.heapLargest = ESP.getMaxAllocHeap();\n  snapshot.psramFree = ESP.getFreePsram();\n  snapshot.psramLargest = ESP.getMaxAllocPsram();\n  multi_heap_info_t info{};\n  heap_caps_get_info(&info, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);\n  snapshot.psramAllocated = info.total_allocated_bytes;\n  snapshot.psramMinimumFree = info.minimum_free_bytes;\n  snapshot.psramAllocatedBlocks = info.allocated_blocks;\n  snapshot.psramFreeBlocks = info.free_blocks;\n  snapshot.psramTotalBlocks = info.total_blocks;\n#endif\n  return snapshot;\n}\n\nvoid appendRssMemorySnapshot(const char* phase, const RssMemSnapshot& snapshot,\n                             const size_t meta1 = 0, const size_t meta2 = 0,\n                             const size_t meta3 = 0, const size_t meta4 = 0) {\n#ifndef SIMULATOR\n  static bool sessionHeaderWritten = false;\n  FsFile file = Storage.open(RSS_MEM_AUDIT_PATH, O_WRONLY | O_CREAT | O_APPEND);\n  if (!file) return;\n  if (!sessionHeaderWritten) {\n    static constexpr char header[] = "\\n--- RSS MEM DEEP AUDIT SESSION ---\\n";\n    file.write(reinterpret_cast<const uint8_t*>(header), sizeof(header) - 1);\n    sessionHeaderWritten = true;\n  }\n  char line[384];\n  const int length = std::snprintf(\n      line, sizeof(line),\n      "[%lu] %s: heap=%zu largest=%zu psram=%zu psramLargest=%zu pAlloc=%zu pMin=%zu "\n      "pAllocBlocks=%zu pFreeBlocks=%zu pTotalBlocks=%zu m1=%zu m2=%zu m3=%zu m4=%zu\\n",\n      static_cast<unsigned long>(millis()), phase ? phase : "?", snapshot.heapFree, snapshot.heapLargest,\n      snapshot.psramFree, snapshot.psramLargest, snapshot.psramAllocated, snapshot.psramMinimumFree,\n      snapshot.psramAllocatedBlocks, snapshot.psramFreeBlocks, snapshot.psramTotalBlocks,\n      meta1, meta2, meta3, meta4);\n  if (length > 0) {\n    const size_t bytes = std::min(static_cast<size_t>(length), sizeof(line) - 1);\n    file.write(reinterpret_cast<const uint8_t*>(line), bytes);\n  }\n  file.close();\n#else\n  (void)phase;\n  (void)snapshot;\n  (void)meta1;\n  (void)meta2;\n  (void)meta3;\n  (void)meta4;\n#endif\n}\n\nvoid writeRssMemoryAudit(const char* phase, const size_t meta1 = 0, const size_t meta2 = 0,\n                         const size_t meta3 = 0, const size_t meta4 = 0) {\n#ifndef SIMULATOR\n  // Measure first, write second. The first call also records the lazy FAT/SD\n  // cache cost of creating/appending this diagnostic file itself.\n  static bool firstWriteChecked = false;\n  const RssMemSnapshot beforeIo = captureRssMemory();\n  appendRssMemorySnapshot(phase, beforeIo, meta1, meta2, meta3, meta4);\n  if (!firstWriteChecked) {\n    firstWriteChecked = true;\n    appendRssMemorySnapshot("audit-io-after-first-write", captureRssMemory());\n  }\n#else\n  (void)phase;\n  (void)meta1;\n  (void)meta2;\n  (void)meta3;\n  (void)meta4;\n#endif\n}\n''',
+    "RSS deep audit helpers",
 )
 
+# Entry lifecycle.
 rss = replace_once(
     rss,
     '''void RssNewsActivity::onEnter() {\n  Activity::onEnter();\n  sdFontSystem.releaseLoadedFont(renderer);\n''',
     '''void RssNewsActivity::onEnter() {\n  writeRssMemoryAudit("enter.00-before-activity");\n  Activity::onEnter();\n  writeRssMemoryAudit("enter.01-after-activity");\n  sdFontSystem.releaseLoadedFont(renderer);\n  writeRssMemoryAudit("enter.02-after-loader-release");\n''',
-    "RSS enter trace",
+    "RSS entry lifecycle trace",
 )
 
 rss = replace_once(
     rss,
-    '''  if (!ensureBuffers()) {\n    statusMessage = tr(STR_MEMORY_ERROR);\n  } else {\n    loadCache();\n    rebuildDisplayOrder();\n  }\n  requestUpdate();\n}\n''',
-    '''  writeRssMemoryAudit("enter.03-before-buffers");\n  if (!ensureBuffers()) {\n    statusMessage = tr(STR_MEMORY_ERROR);\n  } else {\n    writeRssMemoryAudit("enter.04-after-buffers");\n    loadCache();\n    writeRssMemoryAudit("enter.05-after-cache-load", articleCount);\n    rebuildDisplayOrder();\n    writeRssMemoryAudit("enter.06-after-display-order", articleCount);\n  }\n  writeRssMemoryAudit("enter.07-before-request-update");\n  requestUpdate();\n}\n''',
-    "RSS enter allocation stages",
+    '''  loadSources();\n  if (!ensureBuffers()) {\n''',
+    '''  writeRssMemoryAudit("enter.03-before-load-sources");\n  loadSources();\n  writeRssMemoryAudit("enter.04-after-load-sources", sourceCount);\n  writeRssMemoryAudit("enter.05-before-buffers");\n  if (!ensureBuffers()) {\n''',
+    "RSS source/buffer entry trace",
 )
 
 rss = replace_once(
     rss,
-    '''void RssNewsActivity::openArticle(const size_t articleIndex) {\n  if (!articles || articleIndex >= articleCount) return;\n  openArticleIndex = articleIndex;\n  const CachedArticle& article = articles[articleIndex];\n\n  sdFontSystem.ensureLoaded(renderer);\n  const int readerFontId = SETTINGS.getReaderFontId();\n  const int margin = std::max(12, static_cast<int>(SETTINGS.screenMarginHorizontal));\n  const int maxWidth = std::max(80, renderer.getScreenWidth() - margin * 2);\n  const auto scale = uiScaleSpec();\n\n  std::string offlineBody;\n  if (!RssArticleCache::load(article.item, offlineBody)) offlineBody = article.item.summary;\n  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);\n  }\n\n  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);\n  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);\n  articleLineOffset = 0;\n  articlePageLines = 8;\n  state = State::ARTICLE;\n  requestUpdate();\n}\n''',
-    '''void RssNewsActivity::openArticle(const size_t articleIndex) {\n  if (!articles || articleIndex >= articleCount) return;\n  writeRssMemoryAudit("article.00-open-begin", articleIndex, articleCount);\n  openArticleIndex = articleIndex;\n  const CachedArticle& article = articles[articleIndex];\n\n  writeRssMemoryAudit("article.01-before-font-loader");\n  sdFontSystem.ensureLoaded(renderer);\n  writeRssMemoryAudit("article.02-after-font-loader");\n  const int readerFontId = SETTINGS.getReaderFontId();\n  const int margin = std::max(12, static_cast<int>(SETTINGS.screenMarginHorizontal));\n  const int maxWidth = std::max(80, renderer.getScreenWidth() - margin * 2);\n  const auto scale = uiScaleSpec();\n\n  std::string offlineBody;\n  writeRssMemoryAudit("article.03-before-body-load");\n  const bool bodyLoaded = RssArticleCache::load(article.item, offlineBody);\n  writeRssMemoryAudit("article.04-after-body-load", offlineBody.size(), offlineBody.capacity(), bodyLoaded ? 1 : 0);\n  if (!bodyLoaded) {\n    offlineBody = article.item.summary;\n    writeRssMemoryAudit("article.05-after-summary-fallback", offlineBody.size(), offlineBody.capacity());\n  }\n\n  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n    writeRssMemoryAudit("article.06-before-font-ready", offlineBody.size(), offlineBody.capacity());\n    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);\n    writeRssMemoryAudit("article.07-after-font-ready", offlineBody.size(), offlineBody.capacity());\n  } else {\n    writeRssMemoryAudit("article.07-font-ready-skipped", offlineBody.size(), offlineBody.capacity());\n  }\n\n  writeRssMemoryAudit("article.08-before-title-wrap", articleTitleLines.size(), articleTitleLines.capacity());\n  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);\n  writeRssMemoryAudit("article.09-after-title-wrap", articleTitleLines.size(), articleTitleLines.capacity());\n\n  writeRssMemoryAudit("article.10-before-body-wrap", articleSummaryLines.size(), articleSummaryLines.capacity(),\n                      offlineBody.size(), offlineBody.capacity());\n  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);\n  writeRssMemoryAudit("article.11-after-body-wrap", articleSummaryLines.size(), articleSummaryLines.capacity(),\n                      offlineBody.size(), offlineBody.capacity());\n\n  articleLineOffset = 0;\n  articlePageLines = 8;\n  state = State::ARTICLE;\n  writeRssMemoryAudit("article.12-before-request-update", articleTitleLines.size(), articleSummaryLines.size(),\n                      offlineBody.size(), offlineBody.capacity());\n  requestUpdate();\n  writeRssMemoryAudit("article.13-open-return", articleTitleLines.size(), articleSummaryLines.size(),\n                      offlineBody.size(), offlineBody.capacity());\n}\n''',
-    "RSS article deep trace",
+    '''  } else {\n    loadCache();\n    rebuildDisplayOrder();\n  }\n  requestUpdate();\n}\n''',
+    '''  } else {\n    writeRssMemoryAudit("enter.06-after-buffers");\n    loadCache();\n    writeRssMemoryAudit("enter.07-after-cache-load", articleCount);\n    rebuildDisplayOrder();\n    writeRssMemoryAudit("enter.08-after-display-order", articleCount);\n  }\n  writeRssMemoryAudit("enter.09-before-request-update");\n  requestUpdate();\n}\n''',
+    "RSS post-buffer entry trace",
+)
+
+# Article opening, broken into small anchors so previous layout overlays cannot
+# invalidate the diagnostic merely by changing unrelated lines.
+rss = replace_once(
+    rss,
+    '''void RssNewsActivity::openArticle(const size_t articleIndex) {\n  if (!articles || articleIndex >= articleCount) return;\n  openArticleIndex = articleIndex;\n''',
+    '''void RssNewsActivity::openArticle(const size_t articleIndex) {\n  if (!articles || articleIndex >= articleCount) return;\n  writeRssMemoryAudit("article.00-open-begin", articleIndex, articleCount);\n  openArticleIndex = articleIndex;\n''',
+    "RSS article begin trace",
 )
 
 rss = replace_once(
     rss,
-    '''void RssNewsActivity::closeArticle() {\n  articleTitleLines.clear();\n  articleSummaryLines.clear();\n  articleLineOffset = 0;\n  articlePageLines = 8;\n  openArticleIndex = MAX_ARTICLES;\n  state = State::LIST;\n  requestUpdate();\n}\n''',
-    '''void RssNewsActivity::closeArticle() {\n  writeRssMemoryAudit("close.00-before-clear", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n  articleTitleLines.clear();\n  articleSummaryLines.clear();\n  writeRssMemoryAudit("close.01-after-clear", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n  articleLineOffset = 0;\n  articlePageLines = 8;\n  openArticleIndex = MAX_ARTICLES;\n  state = State::LIST;\n  writeRssMemoryAudit("close.02-before-request-update");\n  requestUpdate();\n}\n''',
-    "RSS article close trace",
+    '''  sdFontSystem.ensureLoaded(renderer);\n  const int readerFontId = SETTINGS.getReaderFontId();\n''',
+    '''  writeRssMemoryAudit("article.01-before-font-loader");\n  sdFontSystem.ensureLoaded(renderer);\n  writeRssMemoryAudit("article.02-after-font-loader");\n  const int readerFontId = SETTINGS.getReaderFontId();\n''',
+    "RSS font loader trace",
 )
 
 rss = replace_once(
     rss,
-    '''void RssNewsActivity::onExit() {\n  // Match the EPUB reader's proven low-memory cleanup path. The glyph/advance\n  // caches that affect contiguous PSRAM belong to the renderer, not merely to\n  // SdCardFontSystem's loader/registry state.\n  const int readerFontId = SETTINGS.getReaderFontId();\n  if (renderer.isSdCardFont(readerFontId)) {\n    renderer.releaseSdCardFontForLowMemory(readerFontId);\n  }\n  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n  uiReady = false;\n  articleTitleLines.clear();\n  articleSummaryLines.clear();\n  displayOrder = nullptr;\n  listItems = nullptr;\n  feedItems = nullptr;\n  articles = nullptr;\n  displayOrderStorage.reset();\n  listItemStorage.reset();\n  feedStorage.reset();\n  articleStorage.reset();\n''',
-    '''void RssNewsActivity::onExit() {\n  writeRssMemoryAudit("exit.00-begin", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n\n  // Keep the experimental renderer cleanup in this diagnostic build and measure\n  // it precisely; #184 showed it does not account for the persistent split.\n  const int readerFontId = SETTINGS.getReaderFontId();\n  if (renderer.isSdCardFont(readerFontId)) {\n    renderer.releaseSdCardFontForLowMemory(readerFontId);\n  }\n  sdFontSystem.releaseRegistry();\n  writeRssMemoryAudit("exit.01-after-font-cleanup");\n\n  Activity::onExit();\n  writeRssMemoryAudit("exit.02-after-base-exit");\n  uiReady = false;\n  articleTitleLines.clear();\n  articleSummaryLines.clear();\n  writeRssMemoryAudit("exit.03-after-line-clear", articleTitleLines.capacity(), articleSummaryLines.capacity());\n  displayOrder = nullptr;\n  listItems = nullptr;\n  feedItems = nullptr;\n  articles = nullptr;\n\n  displayOrderStorage.reset();\n  writeRssMemoryAudit("exit.04-after-display-order-free");\n  listItemStorage.reset();\n  writeRssMemoryAudit("exit.05-after-list-items-free");\n  feedStorage.reset();\n  writeRssMemoryAudit("exit.06-after-feed-free");\n  articleStorage.reset();\n  writeRssMemoryAudit("exit.07-after-article-free");\n''',
-    "RSS exit deep trace",
+    '''  std::string offlineBody;\n  if (!RssArticleCache::load(article.item, offlineBody)) offlineBody = article.item.summary;\n''',
+    '''  std::string offlineBody;\n  writeRssMemoryAudit("article.03-before-body-load");\n  const bool bodyLoaded = RssArticleCache::load(article.item, offlineBody);\n  writeRssMemoryAudit("article.04-after-body-load", offlineBody.size(), offlineBody.capacity(), bodyLoaded ? 1 : 0);\n  if (!bodyLoaded) {\n    offlineBody = article.item.summary;\n    writeRssMemoryAudit("article.05-after-summary-fallback", offlineBody.size(), offlineBody.capacity());\n  }\n''',
+    "RSS body load trace",
 )
 
 rss = replace_once(
     rss,
-    '''void RssNewsActivity::render(RenderLock&&) {\n  renderer.clearScreen();\n\n  MappedInputManager::Labels labels;\n''',
-    '''void RssNewsActivity::render(RenderLock&&) {\n  const State auditState = state;\n  const RssMemSnapshot renderBegin = captureRssMemory();\n  renderer.clearScreen();\n  const RssMemSnapshot renderAfterClear = captureRssMemory();\n\n  MappedInputManager::Labels labels;\n''',
+    '''  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);\n  }\n''',
+    '''  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n    writeRssMemoryAudit("article.06-before-font-ready", offlineBody.size(), offlineBody.capacity());\n    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);\n    writeRssMemoryAudit("article.07-after-font-ready", offlineBody.size(), offlineBody.capacity());\n  } else {\n    writeRssMemoryAudit("article.07-font-ready-skipped", offlineBody.size(), offlineBody.capacity());\n  }\n''',
+    "RSS font ready trace",
+)
+
+# The readability overlay intentionally changed the title cap from 4 to 3.
+rss = replace_once(
+    rss,
+    '''  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 3);\n''',
+    '''  writeRssMemoryAudit("article.08-before-title-wrap", articleTitleLines.size(), articleTitleLines.capacity());\n  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 3);\n  writeRssMemoryAudit("article.09-after-title-wrap", articleTitleLines.size(), articleTitleLines.capacity());\n''',
+    "RSS title wrap trace",
+)
+
+rss = replace_once(
+    rss,
+    '''  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);\n''',
+    '''  writeRssMemoryAudit("article.10-before-body-wrap", articleSummaryLines.size(), articleSummaryLines.capacity(),\n                      offlineBody.size(), offlineBody.capacity());\n  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);\n  writeRssMemoryAudit("article.11-after-body-wrap", articleSummaryLines.size(), articleSummaryLines.capacity(),\n                      offlineBody.size(), offlineBody.capacity());\n''',
+    "RSS body wrap trace",
+)
+
+rss = replace_once(
+    rss,
+    '''  state = State::ARTICLE;\n  requestUpdate();\n}\n''',
+    '''  state = State::ARTICLE;\n  writeRssMemoryAudit("article.12-before-request-update", articleTitleLines.size(), articleSummaryLines.size(),\n                      offlineBody.size(), offlineBody.capacity());\n  requestUpdate();\n  writeRssMemoryAudit("article.13-open-return", articleTitleLines.size(), articleSummaryLines.size(),\n                      offlineBody.size(), offlineBody.capacity());\n}\n''',
+    "RSS article request trace",
+)
+
+# Article close: clear() preserves vector capacity, which is exactly what this
+# audit needs to prove before we decide whether shrink/reset is worthwhile.
+rss = replace_once(
+    rss,
+    '''void RssNewsActivity::closeArticle() {\n  articleTitleLines.clear();\n  articleSummaryLines.clear();\n''',
+    '''void RssNewsActivity::closeArticle() {\n  writeRssMemoryAudit("close.00-before-clear", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n  articleTitleLines.clear();\n  articleSummaryLines.clear();\n  writeRssMemoryAudit("close.01-after-clear", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n''',
+    "RSS article clear trace",
+)
+
+rss = replace_once(
+    rss,
+    '''  state = State::LIST;\n  requestUpdate();\n}\n\nvoid RssNewsActivity::scrollArticle''',
+    '''  state = State::LIST;\n  writeRssMemoryAudit("close.02-before-request-update");\n  requestUpdate();\n}\n\nvoid RssNewsActivity::scrollArticle''',
+    "RSS article close request trace",
+)
+
+# Exit lifecycle. Readability adds listMetaStorage/listMetaText, so instrument
+# each resource independently rather than replacing the whole function.
+rss = replace_once(
+    rss,
+    '''void RssNewsActivity::onExit() {\n  // Match the EPUB reader's proven low-memory cleanup path.''',
+    '''void RssNewsActivity::onExit() {\n  writeRssMemoryAudit("exit.00-begin", articleTitleLines.size(), articleTitleLines.capacity(),\n                      articleSummaryLines.size(), articleSummaryLines.capacity());\n  // Match the EPUB reader's proven low-memory cleanup path.''',
+    "RSS exit begin trace",
+)
+
+rss = replace_once(
+    rss,
+    '''  sdFontSystem.releaseRegistry();\n\n  Activity::onExit();\n''',
+    '''  sdFontSystem.releaseRegistry();\n  writeRssMemoryAudit("exit.01-after-font-cleanup");\n\n  Activity::onExit();\n  writeRssMemoryAudit("exit.02-after-base-exit");\n''',
+    "RSS exit font/base trace",
+)
+
+rss = replace_once(
+    rss,
+    '''  articleTitleLines.clear();\n  articleSummaryLines.clear();\n  displayOrder = nullptr;\n''',
+    '''  articleTitleLines.clear();\n  articleSummaryLines.clear();\n  writeRssMemoryAudit("exit.03-after-line-clear", articleTitleLines.capacity(), articleSummaryLines.capacity());\n  displayOrder = nullptr;\n''',
+    "RSS exit line vector trace",
+)
+
+rss = replace_once(
+    rss,
+    '''  displayOrderStorage.reset();\n  listMetaStorage.reset();\n  listItemStorage.reset();\n  feedStorage.reset();\n  articleStorage.reset();\n''',
+    '''  displayOrderStorage.reset();\n  writeRssMemoryAudit("exit.04-after-display-order-free");\n  listMetaStorage.reset();\n  writeRssMemoryAudit("exit.05-after-list-meta-free");\n  listItemStorage.reset();\n  writeRssMemoryAudit("exit.06-after-list-items-free");\n  feedStorage.reset();\n  writeRssMemoryAudit("exit.07-after-feed-free");\n  articleStorage.reset();\n  writeRssMemoryAudit("exit.08-after-article-free");\n''',
+    "RSS buffer-by-buffer exit trace",
+)
+
+# Render checkpoints are sampled first and only written after displayBuffer so
+# SD logging cannot perturb the measured renderer stages themselves.
+rss = replace_once(
+    rss,
+    '''void RssNewsActivity::render(RenderLock&&) {\n  renderer.clearScreen();\n''',
+    '''void RssNewsActivity::render(RenderLock&&) {\n  const State auditState = state;\n  const RssMemSnapshot renderBegin = captureRssMemory();\n  renderer.clearScreen();\n  const RssMemSnapshot renderAfterClear = captureRssMemory();\n''',
     "RSS render begin trace",
 )
 
 rss = replace_once(
     rss,
     '''  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);\n\n  uiReady = false;\n  app.render();\n  uiReady = true;\n  renderer.displayBuffer(screenTransitionRefresh.modeFor(static_cast<uint8_t>(state)));\n}\n''',
-    '''  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);\n  const RssMemSnapshot renderAfterHints = captureRssMemory();\n\n  uiReady = false;\n  const RssMemSnapshot renderBeforeApp = captureRssMemory();\n  app.render();\n  const RssMemSnapshot renderAfterApp = captureRssMemory();\n  uiReady = true;\n  renderer.displayBuffer(screenTransitionRefresh.modeFor(static_cast<uint8_t>(state)));\n  const RssMemSnapshot renderAfterDisplay = captureRssMemory();\n\n  // Capture all samples first, then write them. This prevents audit SD I/O from\n  // changing the memory state between the renderer checkpoints themselves.\n  const char* prefix = auditState == State::ARTICLE ? "render-article"\n                       : auditState == State::LIST ? "render-list"\n                                                   : "render-status";\n  char phase[64];\n  std::snprintf(phase, sizeof(phase), "%s.00-begin", prefix);\n  appendRssMemorySnapshot(phase, renderBegin);\n  std::snprintf(phase, sizeof(phase), "%s.01-after-clear", prefix);\n  appendRssMemorySnapshot(phase, renderAfterClear);\n  std::snprintf(phase, sizeof(phase), "%s.02-after-hints", prefix);\n  appendRssMemorySnapshot(phase, renderAfterHints);\n  std::snprintf(phase, sizeof(phase), "%s.03-before-app", prefix);\n  appendRssMemorySnapshot(phase, renderBeforeApp);\n  std::snprintf(phase, sizeof(phase), "%s.04-after-app", prefix);\n  appendRssMemorySnapshot(phase, renderAfterApp);\n  std::snprintf(phase, sizeof(phase), "%s.05-after-display", prefix);\n  appendRssMemorySnapshot(phase, renderAfterDisplay);\n}\n''',
+    '''  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);\n  const RssMemSnapshot renderAfterHints = captureRssMemory();\n\n  uiReady = false;\n  const RssMemSnapshot renderBeforeApp = captureRssMemory();\n  app.render();\n  const RssMemSnapshot renderAfterApp = captureRssMemory();\n  uiReady = true;\n  renderer.displayBuffer(screenTransitionRefresh.modeFor(static_cast<uint8_t>(state)));\n  const RssMemSnapshot renderAfterDisplay = captureRssMemory();\n\n  const char* prefix = auditState == State::ARTICLE ? "render-article"\n                       : auditState == State::LIST ? "render-list"\n                                                   : "render-status";\n  char phase[64];\n  std::snprintf(phase, sizeof(phase), "%s.00-begin", prefix);\n  appendRssMemorySnapshot(phase, renderBegin);\n  std::snprintf(phase, sizeof(phase), "%s.01-after-clear", prefix);\n  appendRssMemorySnapshot(phase, renderAfterClear);\n  std::snprintf(phase, sizeof(phase), "%s.02-after-hints", prefix);\n  appendRssMemorySnapshot(phase, renderAfterHints);\n  std::snprintf(phase, sizeof(phase), "%s.03-before-app", prefix);\n  appendRssMemorySnapshot(phase, renderBeforeApp);\n  std::snprintf(phase, sizeof(phase), "%s.04-after-app", prefix);\n  appendRssMemorySnapshot(phase, renderAfterApp);\n  std::snprintf(phase, sizeof(phase), "%s.05-after-display", prefix);\n  appendRssMemorySnapshot(phase, renderAfterDisplay);\n}\n''',
     "RSS render stage trace",
 )
 
@@ -82,8 +170,8 @@ rss_path.write_text(rss)
 
 
 # -----------------------------------------------------------------------------
-# ActivityManager: prove what happens after RssNews::onExit(), after destruction,
-# after Home is restored, and across the first Home re-render.
+# ActivityManager: capture after RssNews::onExit(), after actual destructor,
+# after Home restoration and around Home's first render.
 # -----------------------------------------------------------------------------
 am_path = Path("src/activities/ActivityManager.cpp")
 am = am_path.read_text()
@@ -105,8 +193,8 @@ am = replace_once(
 am = replace_once(
     am,
     '''      currentActivity->render(std::move(lock));\n      restoredActivityNeedsRender = false;\n''',
-    '''      if (rssAuditAwaitHomeRender && currentActivity->isHomeActivity()) {\n        const RssManagerMemSnapshot beforeHomeRender = captureRssManagerMemory();\n        currentActivity->render(std::move(lock));\n        const RssManagerMemSnapshot afterHomeRender = captureRssManagerMemory();\n        // Write only after both samples were captured so logging cannot affect\n        // the Home-render A/B comparison.\n        appendRssManagerMemory("home-render-before", beforeHomeRender);\n        appendRssManagerMemory("home-render-after", afterHomeRender);\n        rssAuditAwaitHomeRender = false;\n      } else {\n        currentActivity->render(std::move(lock));\n      }\n      restoredActivityNeedsRender = false;\n''',
-    "ActivityManager Home render A/B trace",
+    '''      if (rssAuditAwaitHomeRender && currentActivity->isHomeActivity()) {\n        const RssManagerMemSnapshot beforeHomeRender = captureRssManagerMemory();\n        currentActivity->render(std::move(lock));\n        const RssManagerMemSnapshot afterHomeRender = captureRssManagerMemory();\n        appendRssManagerMemory("home-render-before", beforeHomeRender);\n        appendRssManagerMemory("home-render-after", afterHomeRender);\n        rssAuditAwaitHomeRender = false;\n      } else {\n        currentActivity->render(std::move(lock));\n      }\n      restoredActivityNeedsRender = false;\n''',
+    "ActivityManager Home render trace",
 )
 
 am = replace_once(
@@ -126,26 +214,26 @@ am = replace_once(
 am_path.write_text(am)
 
 
-# Assertions: fail CI loudly if the diagnostic no longer matches the source.
 combined = rss + "\n" + am
 checks = {
     "deep audit header": "RSS MEM DEEP AUDIT SESSION",
-    "audit self impact": 'audit-io-after-first-write',
-    "article body load": 'article.04-after-body-load',
-    "font ready": 'article.07-after-font-ready',
-    "body wrapping": 'article.11-after-body-wrap',
-    "article render": 'render-article',
-    "close trace": 'close.01-after-clear',
-    "buffer-by-buffer exit": 'exit.07-after-article-free',
-    "manager after destroy": 'AM.%s',
-    "home render A/B": 'home-render-after',
+    "audit self impact": "audit-io-after-first-write",
+    "source load trace": "enter.04-after-load-sources",
+    "article body trace": "article.04-after-body-load",
+    "font ready trace": "article.07-after-font-ready",
+    "body wrap trace": "article.11-after-body-wrap",
+    "article render trace": "render-article",
+    "close trace": "close.01-after-clear",
+    "list meta free trace": "exit.05-after-list-meta-free",
+    "article buffer free trace": "exit.08-after-article-free",
+    "manager destroy trace": "after-destroy",
+    "home render trace": "home-render-after",
 }
 for label, needle in checks.items():
     if needle not in combined:
         raise RuntimeError(f"{label}: verification failed")
 
-# SD-only diagnostic: never add RSSMEM serial output.
 if 'LOG_ERR("RSSMEM"' in combined or 'LOG_INF("RSSMEM"' in combined or 'LOG_DBG("RSSMEM"' in combined:
     raise RuntimeError("RSS deep memory audit must remain SD-only")
 
-print("Applied deep RSS PSRAM audit to /rss_mem_audit.txt (SD-only, including ActivityManager destruction/Home render).")
+print("Applied robust deep RSS PSRAM audit to /rss_mem_audit.txt (SD-only).")
