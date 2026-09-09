@@ -21,6 +21,7 @@ constexpr size_t RX_BUFFER_SIZE = 4096;
 constexpr size_t TX_BUFFER_SIZE = 1024;
 constexpr int HTTP_TIMEOUT_MS = 15000;
 constexpr uint8_t MAX_REDIRECTS = 5;
+constexpr char ARTICLE_START[] = "<article";
 constexpr char ARTICLE_END[] = "</article>";
 
 struct ParsedUrl {
@@ -38,6 +39,7 @@ struct Session {
   const HttpDownloader::DataCallback* onData = nullptr;
   const HttpDownloader::CancelCallback* shouldCancel = nullptr;
   bool cancelled = false;
+  bool seenArticle = false;
   bool earlyArticleEnd = false;
   char tail[sizeof(ARTICLE_END) - 1] = {};
   size_t tailLength = 0;
@@ -177,17 +179,19 @@ bool isRedirect(const int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
-size_t findArticleEnd(const uint8_t* data, const size_t length) {
-  if (!data || length == 0) return std::string::npos;
-  constexpr size_t markerLength = sizeof(ARTICLE_END) - 1;
-  char probe[markerLength * 2] = {};
-  const size_t prefix = std::min(session.tailLength, markerLength - 1);
-  std::memcpy(probe, session.tail + session.tailLength - prefix, prefix);
+size_t findMarker(const uint8_t* data, const size_t length, const char* marker) {
+  if (!data || length == 0 || !marker || !marker[0]) return std::string::npos;
+  const size_t markerLength = std::strlen(marker);
+  if (markerLength > sizeof(session.tail) + length) return std::string::npos;
+
+  char probe[sizeof(session.tail) + RX_BUFFER_SIZE] = {};
+  const size_t prefix = session.tailLength;
+  if (prefix > 0) std::memcpy(probe, session.tail, prefix);
   const size_t copied = std::min(length, sizeof(probe) - prefix);
   std::memcpy(probe + prefix, data, copied);
   const size_t probeLength = prefix + copied;
   for (size_t i = 0; i + markerLength <= probeLength; ++i) {
-    if (strncasecmp(probe + i, ARTICLE_END, markerLength) == 0) {
+    if (strncasecmp(probe + i, marker, markerLength) == 0) {
       if (i + markerLength <= prefix) return 0;
       return i + markerLength - prefix;
     }
@@ -196,7 +200,7 @@ size_t findArticleEnd(const uint8_t* data, const size_t length) {
 }
 
 void rememberTail(const uint8_t* data, const size_t length) {
-  constexpr size_t keep = sizeof(ARTICLE_END) - 2;
+  const size_t keep = sizeof(session.tail);
   session.tailLength = std::min(length, keep);
   if (session.tailLength > 0) std::memcpy(session.tail, data + length - session.tailLength, session.tailLength);
 }
@@ -214,7 +218,8 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
 
   const auto* data = static_cast<const uint8_t*>(event->data);
   const size_t length = static_cast<size_t>(event->data_len);
-  const size_t articleEnd = findArticleEnd(data, length);
+  if (!session.seenArticle && findMarker(data, length, ARTICLE_START) != std::string::npos) session.seenArticle = true;
+  const size_t articleEnd = session.seenArticle ? findMarker(data, length, ARTICLE_END) : std::string::npos;
   const size_t forwardLength = articleEnd == std::string::npos ? length : std::min(articleEnd, length);
   if (forwardLength > 0 && !(**session.onData)(data, forwardLength)) return ESP_FAIL;
   if (articleEnd != std::string::npos) {
@@ -226,9 +231,7 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
 }
 
 bool ensureClient(const std::string& url) {
-  if (session.client) {
-    return esp_http_client_set_url(session.client, url.c_str()) == ESP_OK;
-  }
+  if (session.client) return esp_http_client_set_url(session.client, url.c_str()) == ESP_OK;
 
   esp_http_client_config_t config = {};
   config.url = url.c_str();
@@ -268,12 +271,13 @@ uint64_t cacheKeyFor(const std::string& url) {
 
 void resetSession() {
   dropClient();
-  session.cookie.clear();
+  std::string().swap(session.cookie);
   session.cookieLoaded = false;
-  session.redirectLocation.clear();
+  std::string().swap(session.redirectLocation);
   session.onData = nullptr;
   session.shouldCancel = nullptr;
   session.cancelled = false;
+  session.seenArticle = false;
   session.earlyArticleEnd = false;
   session.tailLength = 0;
 }
@@ -295,6 +299,7 @@ HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownlo
     session.onData = &onData;
     session.shouldCancel = &shouldCancel;
     session.cancelled = false;
+    session.seenArticle = false;
     session.earlyArticleEnd = false;
     session.tailLength = 0;
     esp_http_client_set_header(session.client, "Cookie", session.cookie.c_str());
