@@ -1,5 +1,6 @@
 #include "RssFigaroAuth.h"
 
+#include <Arduino.h>
 #include <HalStorage.h>
 #include <WiFi.h>
 #include <esp_crt_bundle.h>
