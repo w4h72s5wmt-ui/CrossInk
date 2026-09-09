@@ -2,7 +2,7 @@ name: CrossInk Notes + Demineur + 2048 X4 Pro
 
 on:
   push:
-    branches: [x4-pro-notes]
+    branches: [x4-pro-notes, x4-pro-2048-dev]
   workflow_dispatch:
 
 permissions:
