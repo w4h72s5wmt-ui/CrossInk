@@ -57,6 +57,9 @@ jobs:
       - name: Apply RSS exit lifecycle fix
         run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
 
+      - name: Apply RSS SD-only memory audit
+        run: python3 tools/apply_x4_rss_memory_sd_audit.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
