@@ -60,6 +60,9 @@ jobs:
       - name: Apply RSS SD-only memory audit
         run: python3 tools/apply_x4_rss_memory_sd_audit.py
 
+      - name: Apply RSS FontDecompressor cleanup validation
+        run: python3 tools/apply_x4_rss_font_decompressor_cleanup.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
