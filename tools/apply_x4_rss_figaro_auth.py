@@ -36,10 +36,22 @@ text = replace_once(text, old_body_path, new_body_path, "RSS authenticated cache
 
 old_fetch = '''  static constexpr HttpDownloader::Transport TRANSPORTS[] = {\n      HttpDownloader::Transport::WOLFSSL,\n      HttpDownloader::Transport::ESP_HTTP,\n  };\n\n  for (size_t attempt = 0; attempt < 2; ++attempt) {\n    if (attempt > 0) LOG_DBG("RSS", "Retrying article with ESP_HTTP: %s", item.link);\n    size_t htmlLength = 0;\n    bool htmlTruncated = false;\n\n    HttpDownloader::DownloadOptions options;\n    options.bufferSize = HTTP_BUFFER_SIZE;\n    options.transport = TRANSPORTS[attempt];\n    options.shouldCancel = shouldCancel;\n    const auto result = HttpDownloader::streamUrl(\n        item.link,\n        [&](const uint8_t* data, const size_t len) {\n          const size_t remaining = MAX_HTML_BYTES - htmlLength;\n          const size_t copyLength = std::min(remaining, len);\n          if (copyLength > 0) {\n            std::memcpy(html + htmlLength, data, copyLength);\n            htmlLength += copyLength;\n          }\n          if (copyLength < len) htmlTruncated = true;\n          return true;\n        },\n        nullptr, "", "", std::move(options));\n'''
 
-new_fetch = '''  static constexpr HttpDownloader::Transport TRANSPORTS[] = {\n      HttpDownloader::Transport::WOLFSSL,\n      HttpDownloader::Transport::ESP_HTTP,\n  };\n  const bool useFigaroAuth = RssFigaroAuth::isConfiguredFor(item.link);\n  const size_t attemptCount = useFigaroAuth ? 3U : 2U;\n\n  for (size_t attempt = 0; attempt < attemptCount; ++attempt) {\n    const bool authenticatedAttempt = useFigaroAuth && attempt == 0;\n    const size_t transportIndex = useFigaroAuth ? attempt - 1U : attempt;\n    const char* transportName = authenticatedAttempt ? "Figaro auth" :\n                                (transportIndex == 0 ? "wolfSSL" : "ESP_HTTP");\n    if (attempt > 0) LOG_DBG("RSS", "Retrying article fetch: %s", item.link);\n    size_t htmlLength = 0;\n    bool htmlTruncated = false;\n\n    const auto receiveChunk = [&](const uint8_t* data, const size_t len) {\n      const size_t remaining = MAX_HTML_BYTES - htmlLength;\n      const size_t copyLength = std::min(remaining, len);\n      if (copyLength > 0) {\n        std::memcpy(html + htmlLength, data, copyLength);\n        htmlLength += copyLength;\n      }\n      if (copyLength < len) htmlTruncated = true;\n      return true;\n    };\n\n    HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;\n    if (authenticatedAttempt) {\n      result = RssFigaroAuth::streamUrl(item.link, receiveChunk, shouldCancel);\n    } else {\n      HttpDownloader::DownloadOptions options;\n      options.bufferSize = HTTP_BUFFER_SIZE;\n      options.transport = TRANSPORTS[transportIndex];\n      options.shouldCancel = shouldCancel;\n      result = HttpDownloader::streamUrl(item.link, receiveChunk, nullptr, "", "", std::move(options));\n    }\n'''
+new_fetch = '''  static constexpr HttpDownloader::Transport TRANSPORTS[] = {\n      HttpDownloader::Transport::WOLFSSL,\n      HttpDownloader::Transport::ESP_HTTP,\n  };\n  const bool useFigaroAuth = RssFigaroAuth::isConfiguredFor(item.link);\n  // Figaro authenticated fetch gets only one anonymous rescue attempt. The\n  // previous 3-attempt path could download the same heavy page three times.\n  const size_t attemptCount = useFigaroAuth ? 2U : 2U;\n\n  for (size_t attempt = 0; attempt < attemptCount; ++attempt) {\n    const bool authenticatedAttempt = useFigaroAuth && attempt == 0;\n    const size_t transportIndex = useFigaroAuth ? 0U : attempt;\n    const char* transportName = authenticatedAttempt ? "Figaro auth" :\n                                (transportIndex == 0 ? "wolfSSL" : "ESP_HTTP");\n    if (attempt > 0) LOG_DBG("RSS", "Retrying article fetch: %s", item.link);\n    size_t htmlLength = 0;\n    bool htmlTruncated = false;\n\n    const auto receiveChunk = [&](const uint8_t* data, const size_t len) {\n      const size_t remaining = MAX_HTML_BYTES - htmlLength;\n      const size_t copyLength = std::min(remaining, len);\n      if (copyLength > 0) {\n        std::memcpy(html + htmlLength, data, copyLength);\n        htmlLength += copyLength;\n      }\n      if (copyLength < len) htmlTruncated = true;\n      return true;\n    };\n\n    HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;\n    if (authenticatedAttempt) {\n      result = RssFigaroAuth::streamUrl(item.link, receiveChunk, shouldCancel);\n    } else {\n      HttpDownloader::DownloadOptions options;\n      options.bufferSize = HTTP_BUFFER_SIZE;\n      options.transport = TRANSPORTS[transportIndex];\n      options.shouldCancel = shouldCancel;\n      result = HttpDownloader::streamUrl(item.link, receiveChunk, nullptr, "", "", std::move(options));\n    }\n'''
 text = replace_once(text, old_fetch, new_fetch, "RSS Figaro authenticated fetch attempt")
 
 text = text.replace('attempt == 0 ? "wolfSSL" : "ESP_HTTP"', 'transportName')
+
+# Once an authenticated HTTP 200 produced a body, an extraction/cleaning issue
+# will not be fixed by downloading the public version of the same article. Keep
+# the RSS fallback offline instead of doing another full page request.
+text = text.replace(
+    '''    if (!extractReadableText(html, htmlLength, text, textLength)) {\n      LOG_ERR("RSS", "Article extraction failed (%s): %s", transportName, item.link);\n      continue;\n    }\n''',
+    '''    if (!extractReadableText(html, htmlLength, text, textLength)) {\n      LOG_ERR("RSS", "Article extraction failed (%s): %s", transportName, item.link);\n      if (authenticatedAttempt) return persistCleanFallback();\n      continue;\n    }\n''',
+)
+text = text.replace(
+    '''    if (textLength < MIN_EXTRACTED_TEXT) {\n      LOG_ERR("RSS", "Article cleaner removed too much text (%s): %s",\n              transportName, item.link);\n      continue;\n    }\n''',
+    '''    if (textLength < MIN_EXTRACTED_TEXT) {\n      LOG_ERR("RSS", "Article cleaner removed too much text (%s): %s",\n              transportName, item.link);\n      if (authenticatedAttempt) return persistCleanFallback();\n      continue;\n    }\n''',
+)
 text = text.replace(
     'LOG_ERR("RSS", "Both article transports failed; using cleaned feed fallback: %s", item.link);',
     'LOG_ERR("RSS", "Article fetch attempts failed; using cleaned feed fallback: %s", item.link);',
@@ -55,4 +67,30 @@ if duplicate in text:
     raise RuntimeError("RSS Build 214 duplicate helper fix was not absorbed")
 
 path.write_text(text)
-print("Applied X4 Pro RSS Figaro authentication with SD session isolation and safe fallback.")
+
+# Bound the lifetime of the RSS-local Figaro HTTP/TLS session to one refresh.
+# This keeps TLS reusable between articles but guarantees that all TLS heap and
+# the cookie string are released before offline reading resumes.
+news_path = Path("src/activities/home/RssNewsActivity.cpp")
+news = news_path.read_text()
+news = replace_once(
+    news,
+    '#include "RssArticleCache.h"\n',
+    '#include "RssArticleCache.h"\n#include "RssFigaroAuth.h"\n',
+    "RSS Figaro refresh session include",
+)
+news = replace_once(
+    news,
+    '''void RssNewsActivity::refreshFeeds() {\n  usedNetwork = true;\n''',
+    '''void RssNewsActivity::refreshFeeds() {\n  RssFigaroAuth::resetSession();\n  struct FigaroSessionScope {\n    ~FigaroSessionScope() { RssFigaroAuth::resetSession(); }\n  } figaroSessionScope;\n  usedNetwork = true;\n''',
+    "RSS Figaro refresh session scope",
+)
+news = replace_once(
+    news,
+    '''void RssNewsActivity::onExit() {\n  Activity::onExit();\n''',
+    '''void RssNewsActivity::onExit() {\n  RssFigaroAuth::resetSession();\n  Activity::onExit();\n''',
+    "RSS Figaro session cleanup on exit",
+)
+news_path.write_text(news)
+
+print("Applied X4 Pro Figaro auth with bounded refresh session and single anonymous rescue.")
