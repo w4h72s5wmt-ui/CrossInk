@@ -155,20 +155,20 @@ core = replace_once(
 
 core = replace_once(
     core,
-    """    removeLockMarker(path);
+    """    if (Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
     requestUpdate(true);
   }
 
   void beginLock() {
 """,
-    """    removeLockMarker(path);
+    """    if (Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
     capturePersistedState();
     requestUpdate(true);
   }
 
   void beginLock() {
 """,
-    "Notes unlock save digest refresh",
+    "Notes transactional unlock digest refresh",
 )
 
 core = replace_once(
