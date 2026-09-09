@@ -226,9 +226,9 @@ cpp_path.write_text(cpp)
 
 
 # ---------------------------------------------------------------------------
-# Article cleaner: apply file rules on top of the generic cleaner. profile=
-# generic/file/none disables the old URL-derived site profile, so every source-
-# specific behavior can be controlled from feeds.txt without reflashing.
+# Article cleaner: editable rules, clean RSS fallbacks, one local transport
+# retry, and conservative Figaro preamble trimming. Everything stays inside
+# the RSS app; HttpDownloader and the CrossInk core are left untouched.
 # ---------------------------------------------------------------------------
 cache_header_path = Path("src/activities/home/RssArticleCache.h")
 cache_header = cache_header_path.read_text()
@@ -246,6 +246,16 @@ cache_header_path.write_text(cache_header)
 
 cache_cpp_path = Path("src/activities/home/RssArticleCache.cpp")
 cache_cpp = cache_cpp_path.read_text()
+
+# Force automatic refresh of bodies produced by the old fallback/extractor.
+cache_cpp = replace_once(
+    cache_cpp,
+    '''constexpr char BODY_MAGIC[] = "XRSS3\\n";
+''',
+    '''constexpr char BODY_MAGIC[] = "XRSS4\\n";
+''',
+    "RSS clean fallback cache version",
+)
 
 cache_cpp = replace_once(
     cache_cpp,
@@ -281,6 +291,72 @@ rule_helper = r'''bool matchesCleanupRuleList(const char* rules, const char* lin
   return false;
 }
 
+bool isFigaroArticle(const char* articleUrl) {
+  if (!articleUrl || !articleUrl[0]) return false;
+  return rangeContainsInsensitive(articleUrl, 0, std::strlen(articleUrl), "lefigaro.fr");
+}
+
+size_t findCleanupMarker(const char* text, const size_t length, const char* marker, const size_t start = 0) {
+  if (!text || !marker || start >= length) return std::string::npos;
+  const size_t markerLength = std::strlen(marker);
+  if (markerLength == 0 || markerLength > length - start) return std::string::npos;
+  for (size_t i = start; i + markerLength <= length; ++i) {
+    size_t j = 0;
+    while (j < markerLength && asciiEqual(text[i + j], marker[j])) ++j;
+    if (j == markerLength) return i;
+  }
+  return std::string::npos;
+}
+
+// Figaro sometimes flattens title/byline/date/social/topics and the first real
+// paragraph onto one extracted line. Never drop that whole line: locate the
+// seam after the inline "Sujets" list and keep the editorial suffix.
+size_t figaroPreamblePrefix(const char* line, const size_t length) {
+  if (!line || length < 24) return 0;
+  const size_t subjects = findCleanupMarker(line, length, "Sujets");
+  if (subjects != std::string::npos && subjects < 1200) {
+    const size_t scanStart = subjects + std::strlen("Sujets");
+    const size_t scanEnd = std::min(length, subjects + 700);
+    size_t separators = 0;
+    for (size_t i = scanStart; i < scanEnd; ++i) {
+      if (line[i] == '-') ++separators;
+      if (i <= scanStart + 6 || separators == 0) continue;
+      const unsigned char previous = static_cast<unsigned char>(line[i - 1]);
+      const unsigned char current = static_cast<unsigned char>(line[i]);
+      const bool previousWord = (previous >= 'a' && previous <= 'z') || previous >= 0x80;
+      const bool startsSentence = (current >= 'A' && current <= 'Z') || current == '"' ||
+                                  (current == 0xc2 && i + 1 < scanEnd &&
+                                   static_cast<unsigned char>(line[i + 1]) == 0xab);
+      if (previousWord && startsSentence) return i;
+    }
+  }
+
+  // Some variants have the social CTA but no topic list. If the browser CTA
+  // is immediately followed by prose, remove only through that fixed phrase.
+  const char* browserMarker = "nouvel onglet)";
+  const size_t browser = findCleanupMarker(line, length, browserMarker);
+  if (browser != std::string::npos && browser < 1000) {
+    size_t after = browser + std::strlen(browserMarker);
+    while (after < length && std::isspace(static_cast<unsigned char>(line[after]))) ++after;
+    if (after < length && findCleanupMarker(line, length, "Sujets", after) != after) return after;
+  }
+  return 0;
+}
+
+bool isStandaloneFigaroNoise(const char* line, const size_t length) {
+  if (!line || length == 0 || length > 260) return false;
+  return lineStartsWithInsensitive(line, length, "Publié le") ||
+         lineStartsWithInsensitive(line, length, "Publie le") ||
+         lineStartsWithInsensitive(line, length, "Mis à jour le") ||
+         lineStartsWithInsensitive(line, length, "Mis a jour le") ||
+         lineStartsWithInsensitive(line, length, "Réservé aux abonnés") ||
+         lineStartsWithInsensitive(line, length, "Reserve aux abonnes") ||
+         lineStartsWithInsensitive(line, length, "Suivre sur Google") ||
+         lineStartsWithInsensitive(line, length, "Retrouvez-nous") ||
+         lineStartsWithInsensitive(line, length, "Retrouvez nous") ||
+         (length < 180 && lineStartsWithInsensitive(line, length, "Sujets"));
+}
+
 '''
 cache_cpp = replace_once(
     cache_cpp,
@@ -288,7 +364,7 @@ cache_cpp = replace_once(
 ''',
     rule_helper + '''bool isFollowCallToAction(const char* line, const size_t length, const char* sourceName) {
 ''',
-    "RSS cleanup rule matcher",
+    "RSS cleanup/Figaro helpers",
 )
 
 cache_cpp = replace_once(
@@ -310,42 +386,281 @@ cache_cpp = replace_once(
 ''',
     "RSS configurable source profile selection",
 )
-cache_cpp = replace_once(
-    cache_cpp,
-    '''      if (isSourceStopLine(profile, text + start, lineLength, keptLines)) break;
-      if (!looksLikeNoiseLine(text + start, lineLength, articleTitle, articleSummary, sourceName, profile, nearStart)) {
-''',
-    '''      if (isSourceStopLine(profile, text + start, lineLength, keptLines) ||
-          (keptLines >= 2 && matchesCleanupRuleList(stopRules, text + start, lineLength))) {
-        break;
-      }
-      const bool fileDrop = matchesCleanupRuleList(dropRules, text + start, lineLength) ||
-                            (nearStart && matchesCleanupRuleList(dropStartRules, text + start, lineLength));
-      if (!fileDrop &&
-          !looksLikeNoiseLine(text + start, lineLength, articleTitle, articleSummary, sourceName, profile, nearStart)) {
-''',
-    "RSS apply editable cleanup rules",
-)
 
 cache_cpp = replace_once(
     cache_cpp,
-    '''CacheResult ensureCached(const RssItem& item, const char* sourceName, const CancelCallback& shouldCancel) {
+    '''    const size_t lineLength = end - start;
+
+    if (lineLength == 0) {
+      if (write > 0) pendingBlank = true;
+    } else {
+      const bool nearStart = keptLines < 8;
+      if (isSourceStopLine(profile, text + start, lineLength, keptLines)) break;
+      if (!looksLikeNoiseLine(text + start, lineLength, articleTitle, articleSummary, sourceName, profile, nearStart)) {
 ''',
-    '''CacheResult ensureCached(const RssItem& item, const char* sourceName, const char* dropRules,
-                        const char* dropStartRules, const char* stopRules, const bool builtInProfile,
-                        const CancelCallback& shouldCancel) {
+    '''    size_t lineLength = end - start;
+
+    if (lineLength == 0) {
+      if (write > 0) pendingBlank = true;
+    } else {
+      const bool nearStart = keptLines < 8;
+      if (nearStart && isFigaroArticle(articleUrl)) {
+        const size_t prefix = figaroPreamblePrefix(text + start, lineLength);
+        if (prefix > 0 && prefix < lineLength) {
+          start += prefix;
+          lineLength -= prefix;
+          while (lineLength > 0 && std::isspace(static_cast<unsigned char>(text[start]))) {
+            ++start;
+            --lineLength;
+          }
+        }
+      }
+      if (lineLength > 0 &&
+          (isSourceStopLine(profile, text + start, lineLength, keptLines) ||
+           (keptLines >= 2 && matchesCleanupRuleList(stopRules, text + start, lineLength)))) {
+        break;
+      }
+      const bool fileDrop = lineLength == 0 || matchesCleanupRuleList(dropRules, text + start, lineLength) ||
+                            (nearStart && matchesCleanupRuleList(dropStartRules, text + start, lineLength)) ||
+                            (nearStart && isFigaroArticle(articleUrl) &&
+                             isStandaloneFigaroNoise(text + start, lineLength));
+      if (!fileDrop &&
+          !looksLikeNoiseLine(text + start, lineLength, articleTitle, articleSummary, sourceName, profile, nearStart)) {
 ''',
-    "RSS editable cleanup ensureCached signature",
+    "RSS apply editable cleanup rules and preserve Figaro body suffix",
 )
+
+# Sanitize RSS summaries before they are persisted as a fallback. The old code
+# wrote item.summary verbatim, which exposed <p>, links and feed CTAs in the
+# reader whenever full-page extraction failed.
+fallback_helpers = r'''size_t sanitizeFallbackMarkup(char* text, const size_t length) {
+  if (!text || length == 0) return 0;
+  size_t read = 0;
+  size_t write = 0;
+  while (read < length) {
+    if (text[read] == '<') {
+      const size_t tagEnd = findInsensitive(text, length, ">", read + 1);
+      if (tagEnd == std::string::npos) {
+        appendChar(text, write, text[read++]);
+        continue;
+      }
+      char tagName[24] = {};
+      bool closing = false;
+      bool selfClosing = false;
+      const size_t tagLength = parseTagName(text, read, tagEnd, tagName, sizeof(tagName), closing, selfClosing);
+      if (tagLength > 0) {
+        if (tagEquals(tagName, "br") || tagEquals(tagName, "li") || tagEquals(tagName, "tr") ||
+            tagEquals(tagName, "dt") || tagEquals(tagName, "dd")) {
+          appendLineBreak(text, write);
+        } else if (isParagraphTag(tagName)) {
+          appendParagraphBreak(text, write);
+        }
+      }
+      read = tagEnd + 1;
+      continue;
+    }
+    if (text[read] == '&') {
+      read = decodeEntity(text, length, read, text, write);
+      continue;
+    }
+    const unsigned char c = static_cast<unsigned char>(text[read]);
+    if (c == '\r' || c == '\n' || c == '\t' || c == '\f' || c == ' ') {
+      appendSpace(text, write);
+      ++read;
+      continue;
+    }
+    if (c < 0x20) {
+      ++read;
+      continue;
+    }
+    appendChar(text, write, text[read++]);
+  }
+  while (write > 0 && (text[write - 1] == ' ' || text[write - 1] == '\n')) --write;
+  text[write] = '\0';
+  return write;
+}
+
+size_t removeFallbackUrls(char* text, const size_t length) {
+  if (!text || length == 0) return 0;
+  size_t read = 0;
+  size_t write = 0;
+  while (read < length) {
+    const bool url = startsWithInsensitive(text, length, read, "http://") ||
+                     startsWithInsensitive(text, length, read, "https://") ||
+                     startsWithInsensitive(text, length, read, "www.");
+    if (url) {
+      while (read < length && !std::isspace(static_cast<unsigned char>(text[read]))) ++read;
+      while (write > 0 && text[write - 1] == ' ') --write;
+      if (read < length && write > 0) appendSpace(text, write);
+      continue;
+    }
+    text[write++] = text[read++];
+  }
+  while (write > 0 && std::isspace(static_cast<unsigned char>(text[write - 1]))) --write;
+  text[write] = '\0';
+  return write;
+}
+
+size_t fallbackCutoff(const char* text, const size_t length, const char* articleUrl) {
+  if (!text || length == 0 || !articleUrl) return length;
+  const size_t urlLength = std::strlen(articleUrl);
+  const bool frandroid = rangeContainsInsensitive(articleUrl, 0, urlLength, "frandroid.com");
+  const bool scienceVie = rangeContainsInsensitive(articleUrl, 0, urlLength, "science-et-vie.com");
+  const bool figaro = rangeContainsInsensitive(articleUrl, 0, urlLength, "lefigaro.fr");
+  if (!frandroid && !scienceVie && !figaro) return length;
+
+  size_t cutoff = length;
+  auto consider = [&](const char* marker) {
+    const size_t found = findCleanupMarker(text, length, marker);
+    if (found != std::string::npos) cutoff = std::min(cutoff, found);
+  };
+  consider("[Lire la suite]");
+  if (frandroid) {
+    consider("Lire la suite");
+    consider("Pour ne rater aucun bon plan");
+    consider("WhatsApp Frandroid");
+  }
+  if (scienceVie) {
+    consider("Pour lire la suite");
+    consider("Cet article est réservé à nos abonnés");
+    consider("Cet article est reserve a nos abonnes");
+    consider("Je m'abonne");
+  }
+  if (figaro) {
+    consider("Pour continuer la lecture");
+    consider("Cet article est réservé aux abonnés");
+    consider("Cet article est reserve aux abonnes");
+  }
+  while (cutoff > 0 && std::isspace(static_cast<unsigned char>(text[cutoff - 1]))) --cutoff;
+  return cutoff;
+}
+
+'''
 cache_cpp = replace_once(
     cache_cpp,
-    '''  textLength = cleanExtractedText(text, textLength, item.title, item.summary, sourceName, item.link);
+    '''bool persistFallback(const RssItem& item) {
+  const size_t length = std::strlen(item.summary);
+  return length > 0 && writeTextFile(bodyPath(item), item.summary, length);
+}
 ''',
-    '''  textLength = cleanExtractedText(text, textLength, item.title, item.summary, sourceName, item.link,
-                                      dropRules, dropStartRules, stopRules, builtInProfile);
+    fallback_helpers + r'''bool persistFallback(const RssItem& item, const char* sourceName, const char* dropRules,
+                     const char* dropStartRules, const char* stopRules, const bool builtInProfile) {
+  const size_t sourceLength = std::strlen(item.summary);
+  if (sourceLength == 0) return false;
+
+  auto fallbackStorage = allocateBuffer(sourceLength + 1);
+  if (!fallbackStorage) return false;
+  char* text = reinterpret_cast<char*>(fallbackStorage.get());
+  std::memcpy(text, item.summary, sourceLength);
+  text[sourceLength] = '\0';
+
+  size_t textLength = sanitizeFallbackMarkup(text, sourceLength);
+  textLength = removeFallbackUrls(text, textLength);
+  textLength = fallbackCutoff(text, textLength, item.link);
+  text[textLength] = '\0';
+  textLength = cleanExtractedText(text, textLength, item.title, nullptr, sourceName, item.link,
+                                  dropRules, dropStartRules, stopRules, builtInProfile);
+  return textLength > 0 && writeTextFile(bodyPath(item), text, textLength);
+}
 ''',
-    "RSS editable cleanup post-processing call",
+    "RSS sanitized fallback persistence",
 )
+
+# Replace the final cache routine as one coherent block. It reuses the same
+# X4 Pro buffers, retries only inside RSS, and never changes HttpDownloader.
+ensure_cached = r'''CacheResult ensureCached(const RssItem& item, const char* sourceName, const char* dropRules,
+                        const char* dropStartRules, const char* stopRules, const bool builtInProfile,
+                        const CancelCallback& shouldCancel) {
+  const std::string path = bodyPath(item);
+  if (bodyCacheIsCurrent(path)) return CacheResult::READY;
+  if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
+  if (shouldCancel && shouldCancel()) return CacheResult::CANCELLED;
+
+  const auto persistCleanFallback = [&]() {
+    return persistFallback(item, sourceName, dropRules, dropStartRules, stopRules, builtInProfile)
+               ? CacheResult::FALLBACK_READY
+               : CacheResult::FAILED;
+  };
+  if (!item.link[0]) return persistCleanFallback();
+
+  auto htmlStorage = allocateBuffer(MAX_HTML_BYTES + 1);
+  auto textStorage = allocateBuffer(MAX_TEXT_BYTES + 1);
+  if (!htmlStorage || !textStorage) {
+    LOG_ERR("RSS", "OOM allocating article extraction buffers");
+    return persistCleanFallback();
+  }
+
+  char* html = reinterpret_cast<char*>(htmlStorage.get());
+  char* text = reinterpret_cast<char*>(textStorage.get());
+  static constexpr HttpDownloader::Transport TRANSPORTS[] = {
+      HttpDownloader::Transport::WOLFSSL,
+      HttpDownloader::Transport::ESP_HTTP,
+  };
+
+  for (size_t attempt = 0; attempt < 2; ++attempt) {
+    if (attempt > 0) LOG_DBG("RSS", "Retrying article with ESP_HTTP: %s", item.link);
+    size_t htmlLength = 0;
+    bool htmlTruncated = false;
+
+    HttpDownloader::DownloadOptions options;
+    options.bufferSize = HTTP_BUFFER_SIZE;
+    options.transport = TRANSPORTS[attempt];
+    options.shouldCancel = shouldCancel;
+    const auto result = HttpDownloader::streamUrl(
+        item.link,
+        [&](const uint8_t* data, const size_t len) {
+          const size_t remaining = MAX_HTML_BYTES - htmlLength;
+          const size_t copyLength = std::min(remaining, len);
+          if (copyLength > 0) {
+            std::memcpy(html + htmlLength, data, copyLength);
+            htmlLength += copyLength;
+          }
+          if (copyLength < len) htmlTruncated = true;
+          return true;
+        },
+        nullptr, "", "", std::move(options));
+
+    if (result == HttpDownloader::ABORTED && shouldCancel && shouldCancel()) return CacheResult::CANCELLED;
+    if (result != HttpDownloader::OK || htmlLength == 0) {
+      LOG_ERR("RSS", "Article fetch failed (%s): %s", attempt == 0 ? "wolfSSL" : "ESP_HTTP", item.link);
+      continue;
+    }
+    html[htmlLength] = '\0';
+
+    size_t textLength = 0;
+    if (!extractReadableText(html, htmlLength, text, textLength)) {
+      LOG_ERR("RSS", "Article extraction failed (%s): %s", attempt == 0 ? "wolfSSL" : "ESP_HTTP", item.link);
+      continue;
+    }
+    textLength = cleanExtractedText(text, textLength, item.title, item.summary, sourceName, item.link,
+                                    dropRules, dropStartRules, stopRules, builtInProfile);
+    if (textLength < MIN_EXTRACTED_TEXT) {
+      LOG_ERR("RSS", "Article cleaner removed too much text (%s): %s",
+              attempt == 0 ? "wolfSSL" : "ESP_HTTP", item.link);
+      continue;
+    }
+    if (htmlTruncated) LOG_DBG("RSS", "HTML truncated safely for %s", item.link);
+
+    if (!writeTextFile(path, text, textLength)) {
+      LOG_ERR("RSS", "Could not persist article body: %s", item.link);
+      return persistCleanFallback();
+    }
+    return CacheResult::READY;
+  }
+
+  LOG_ERR("RSS", "Both article transports failed; using cleaned feed fallback: %s", item.link);
+  return persistCleanFallback();
+}
+
+'''
+cache_cpp = replace_section(
+    cache_cpp,
+    "CacheResult ensureCached(const RssItem& item, const char* sourceName, const CancelCallback& shouldCancel) {\n",
+    "bool load(const RssItem& item, std::string& outText) {\n",
+    ensure_cached,
+    "RSS local retry and clean fallback cache routine",
+)
+
 cache_cpp_path.write_text(cache_cpp)
 
 news_path = Path("src/activities/home/RssNewsActivity.cpp")
@@ -372,11 +687,15 @@ if 'key == "drop"' not in cpp or 'key == "dropstart"' not in cpp or 'key == "sto
     raise RuntimeError("RSS editable cleanup parser missing")
 if "for (const char c : sources[i].dropRules) mix(c);" not in cpp:
     raise RuntimeError("RSS cleanup rules do not invalidate stale cache")
-if "matchesCleanupRuleList" not in cache_cpp:
-    raise RuntimeError("RSS cleanup rule matcher missing")
+if 'constexpr char BODY_MAGIC[] = "XRSS4\\n";' not in cache_cpp:
+    raise RuntimeError("RSS clean fallback cache version missing")
+if "matchesCleanupRuleList" not in cache_cpp or "figaroPreamblePrefix" not in cache_cpp:
+    raise RuntimeError("RSS cleanup/Figaro helpers missing")
+if "sanitizeFallbackMarkup" not in cache_cpp or "Both article transports failed" not in cache_cpp:
+    raise RuntimeError("RSS clean fallback/retry logic missing")
 if "sourceCleanupProfile(articleUrl, builtInProfile)" not in cache_cpp:
     raise RuntimeError("RSS built-in profile toggle missing")
 if "sources[sourceIndex].dropStartRules.c_str()" not in news:
     raise RuntimeError("RSS cleanup rules are not passed to article cache")
 
-print("Applied editable per-feed RSS cleanup rules from feeds.txt.")
+print("Applied editable RSS cleanup with clean fallback, local HTTP retry and Figaro preamble trimming.")
