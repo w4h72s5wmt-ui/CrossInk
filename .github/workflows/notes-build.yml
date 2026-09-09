@@ -57,11 +57,8 @@ jobs:
       - name: Apply editable RSS cleanup rules overlay
         run: python3 tools/apply_x4_rss_external_cleanup_rules.py
 
-      - name: Apply retained RSS feeds.txt direct-parser optimization
-        run: python3 tools/apply_x4_rss_flash_optimization.py
-
-      - name: Consolidate RSS publisher cleanup rules
-        run: python3 tools/apply_x4_rss_profile_table_optimization.py
+      - name: Apply RSS SD-only publisher cleanup
+        run: python3 tools/apply_x4_rss_sd_rules_only.py
 
       - name: Apply RSS exit lifecycle fix
         run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
