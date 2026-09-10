@@ -171,7 +171,7 @@ uint64_t fnv1a64(const std::string& text) {
 
 bool cancelRequested() {
   if (!session.shouldCancel || !*session.shouldCancel) return false;
-  if ((**session.shouldCancel)()) {
+  if ((*session.shouldCancel)()) {
     session.cancelled = true;
     return true;
   }
@@ -251,7 +251,7 @@ esp_err_t onHttpEvent(esp_http_client_event_t* event) {
   }
 
   const size_t forwardLength = cutTail ? std::min(articleEnd, length) : length;
-  if (forwardLength > 0 && !(**session.onData)(data, forwardLength)) return ESP_FAIL;
+  if (forwardLength > 0 && !(*session.onData)(data, forwardLength)) return ESP_FAIL;
   session.bytesReceived += length;
   if (cutTail) {
     session.earlyArticleEnd = true;
