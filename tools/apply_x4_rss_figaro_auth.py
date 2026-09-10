@@ -16,27 +16,34 @@ def replace_section(text: str, start: str, end: str, replacement: str, label: st
     return text[:first] + replacement + text[last:]
 
 
-# This is the existing Figaro integration step, not another stacked overlay.
-# Keep the network implementation in RssFigaroAuth.cpp and replace the cache
-# routine coherently after the existing SD-only cleanup integration.
+# Existing RSS integration step. Implementations live in the app's .inc files;
+# replace old generated implementations, do not layer wrappers around them.
 path = Path("src/activities/home/RssArticleCache.cpp")
 text = path.read_text()
-
-# Absorb the old Build 214 duplicate-signature correction here.
 duplicate = (
     "bool isFollowCallToAction(const char* line, const size_t length, const char* sourceName) {\n" * 2
 )
-if text.count(duplicate) == 1:
-    text = text.replace(duplicate, duplicate[:len(duplicate) // 2], 1)
-elif text.count(duplicate) != 0:
-    raise RuntimeError("RSS duplicated helper signature has unexpected shape")
-
+text = replace_once(text, duplicate, duplicate[:len(duplicate) // 2], "RSS duplicate signature")
 text = replace_once(
-    text,
-    '#include "network/HttpDownloader.h"\n',
-    '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n',
-    "RSS Figaro auth include",
+    text, '#include "network/HttpDownloader.h"\n',
+    '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n', "RSS Figaro auth include",
 )
+text = replace_once(text, 'constexpr char BODY_MAGIC[] = "XRSS4\\n";',
+                    'constexpr char BODY_MAGIC[] = "XRSS5\\n";', "RSS body-only cache version")
+
+text = replace_section(text, "bool isNoiseContainer(", "size_t decodeEntity(", "", "remove substring HTML filter")
+text = replace_section(
+    text, "bool extractReadableText(", "bool normalizedLineEquals(",
+    '#include "RssArticleHtml.inc"\n\n', "RSS bounded HTML extraction",
+)
+text = replace_once(
+    text, '  const bool valid = file.read(marker, BODY_MAGIC_BYTES) == static_cast<int>(BODY_MAGIC_BYTES) &&\n',
+    '  const bool valid = file.size() > BODY_MAGIC_BYTES && file.size() <= BODY_MAGIC_BYTES + MAX_TEXT_BYTES &&\n'
+    '                     file.read(marker, BODY_MAGIC_BYTES) == static_cast<int>(BODY_MAGIC_BYTES) &&\n',
+    "RSS reject empty/oversized cached bodies",
+)
+text = replace_section(text, "bool persistFallback(const RssItem& item,", "}  // namespace\n",
+                       "", "remove summary file persistence")
 
 old_body_path = '''std::string bodyPath(const RssItem& item) {
   uint64_t hash = fnv1a64(item.link);
@@ -60,152 +67,69 @@ new_body_path = '''std::string bodyPath(const RssItem& item) {
   char name[64];
 '''
 text = replace_once(text, old_body_path, new_body_path, "RSS authenticated cache namespace")
-
-ensure_cached = r'''CacheResult ensureCached(const RssItem& item, const char* sourceName, const char* dropRules,
-                        const char* dropStartRules, const char* stopRules,
-                        const CancelCallback& shouldCancel) {
-  const bool useFigaroAuth = RssFigaroAuth::isConfiguredFor(item.link);
-  const std::string path = bodyPath(item);
-  if (bodyCacheIsCurrent(path)) return CacheResult::READY;
-  if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
-  if (shouldCancel && shouldCancel()) return CacheResult::CANCELLED;
-
-  // Guard every failure path, including allocation, extraction and SD writes.
-  // AUTH must never persist a public RSS summary under an authenticated key.
-  const auto persistCleanFallback = [&]() {
-    if (useFigaroAuth) {
-      LOG_ERR("RSS", "Figaro AUTH failed; no public fallback cached: %s", item.link);
-      return CacheResult::FAILED;
-    }
-    return persistFallback(item, sourceName, dropRules, dropStartRules, stopRules)
-               ? CacheResult::FALLBACK_READY
-               : CacheResult::FAILED;
-  };
-  if (!item.link[0]) return persistCleanFallback();
-
-  auto htmlStorage = allocateBuffer(MAX_HTML_BYTES + 1);
-  auto textStorage = allocateBuffer(MAX_TEXT_BYTES + 1);
-  if (!htmlStorage || !textStorage) {
-    LOG_ERR("RSS", "OOM allocating article extraction buffers");
-    return persistCleanFallback();
-  }
-
-  char* html = reinterpret_cast<char*>(htmlStorage.get());
-  char* text = reinterpret_cast<char*>(textStorage.get());
-  static constexpr HttpDownloader::Transport TRANSPORTS[] = {
-      HttpDownloader::Transport::WOLFSSL,
-      HttpDownloader::Transport::ESP_HTTP,
-  };
-  const size_t attemptCount = useFigaroAuth ? 1U : 2U;
-
-  for (size_t attempt = 0; attempt < attemptCount; ++attempt) {
-    const char* transportName = useFigaroAuth ? "Figaro auth" : (attempt == 0 ? "wolfSSL" : "ESP_HTTP");
-    if (attempt > 0) LOG_DBG("RSS", "Retrying article with ESP_HTTP: %s", item.link);
-    size_t htmlLength = 0;
-    bool htmlTruncated = false;
-
-    const auto receiveChunk = [&](const uint8_t* data, const size_t len) {
-      const size_t remaining = MAX_HTML_BYTES - htmlLength;
-      if (len > remaining) {
-        htmlTruncated = true;
-        if (useFigaroAuth) return false;
-      }
-      const size_t copyLength = std::min(remaining, len);
-      if (copyLength > 0) {
-        std::memcpy(html + htmlLength, data, copyLength);
-        htmlLength += copyLength;
-      }
-      return true;
-    };
-
-    HttpDownloader::DownloadError result;
-    if (useFigaroAuth) {
-      result = RssFigaroAuth::streamUrl(item.link, receiveChunk, shouldCancel);
-    } else {
-      HttpDownloader::DownloadOptions options;
-      options.bufferSize = HTTP_BUFFER_SIZE;
-      options.transport = TRANSPORTS[attempt];
-      options.shouldCancel = shouldCancel;
-      result = HttpDownloader::streamUrl(item.link, receiveChunk, nullptr, "", "", std::move(options));
-    }
-
-    if (result == HttpDownloader::ABORTED) return CacheResult::CANCELLED;
-    if (result != HttpDownloader::OK || htmlLength == 0 || (useFigaroAuth && htmlTruncated)) {
-      LOG_ERR("RSS", "Article fetch failed (%s, truncated=%d): %s", transportName, htmlTruncated, item.link);
-      continue;
-    }
-    html[htmlLength] = '\0';
-
-    size_t textLength = 0;
-    if (!extractReadableText(html, htmlLength, text, textLength)) {
-      LOG_ERR("RSS", "Article extraction failed (%s): %s", transportName, item.link);
-      continue;
-    }
-    if (useFigaroAuth && textLength >= MAX_TEXT_BYTES) {
-      LOG_ERR("RSS", "Figaro AUTH exceeds text capacity; not cached: %s", item.link);
-      return CacheResult::FAILED;
-    }
-    textLength = cleanExtractedText(text, textLength, item.title, item.summary, sourceName, item.link,
-                                    dropRules, dropStartRules, stopRules);
-    if (textLength < MIN_EXTRACTED_TEXT) {
-      LOG_ERR("RSS", "Article cleaner removed too much text (%s): %s", transportName, item.link);
-      continue;
-    }
-    if (htmlTruncated) LOG_DBG("RSS", "HTML truncated safely for %s", item.link);
-
-    if (!writeTextFile(path, text, textLength)) {
-      LOG_ERR("RSS", "Could not persist article body: %s", item.link);
-      return persistCleanFallback();
-    }
-    return CacheResult::READY;
-  }
-
-  return persistCleanFallback();
-}
-
-'''
 text = replace_section(
-    text,
-    "CacheResult ensureCached(const RssItem& item, const char* sourceName, const char* dropRules,\n",
-    "bool load(const RssItem& item, std::string& outText) {\n",
-    ensure_cached,
-    "RSS strict authenticated cache routine",
+    text, "CacheResult ensureCached(", "}  // namespace RssArticleCache",
+    '#include "RssArticleCachePolicy.inc"\n\n', "RSS body-only cache and explicit fallback policy",
 )
-
-for required in (
-    '#include "RssFigaroAuth.h"',
-    "RssFigaroAuth::cacheKeyFor(item.link)",
-    "RssFigaroAuth::streamUrl(item.link, receiveChunk, shouldCancel)",
-    "const size_t attemptCount = useFigaroAuth ? 1U : 2U;",
-    "Figaro AUTH failed; no public fallback cached",
-):
-    if required not in text:
-        raise RuntimeError(f"RSS Figaro integration missing: {required}")
-if duplicate in text:
-    raise RuntimeError("RSS Build 214 duplicate helper fix was not absorbed")
+if duplicate in text or "bool persistFallback(" in text:
+    raise RuntimeError("RSS obsolete generated implementation remains")
+for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc"):
+    if not (path.parent / name).is_file() or f'#include "{name}"' not in text:
+        raise RuntimeError(f"Missing RSS-local implementation: {name}")
 path.write_text(text)
 
-# Keep the existing refresh-scoped lifetime: no TLS or cookie retained while
-# reading offline, including when refresh exits through cancellation/failure.
-news_path = Path("src/activities/home/RssNewsActivity.cpp")
+header_path = path.with_suffix(".h")
+header = header_path.read_text()
+header = replace_once(
+    header, "// If extraction/networking fails, the feed-provided body is persisted instead.\n",
+    "// A failure leaves no body file; the feed summary remains in RSS metadata\n"
+    "// and a subsequent manual refresh retries this article.\n", "RSS cache contract",
+)
+header = replace_once(
+    header,
+    "// Loads the cached offline body. Returns false when no dedicated body file is\n"
+    "// available; callers can still fall back to item.summary for legacy entries.\n"
+    "bool load(const RssItem& item, std::string& outText);\n",
+    "// Loads a current body (READY), or prepares the feed summary (FALLBACK_READY)\n"
+    "// without persisting it. AUTH never substitutes a public summary.\n"
+    "CacheResult load(const RssItem& item, const char* sourceName, const char* dropRules,\n"
+    "                 const char* dropStartRules, const char* stopRules, std::string& outText);\n",
+    "RSS explicit offline result API",
+)
+header_path.write_text(header)
+
+news_path = path.parent / "RssNewsActivity.cpp"
 news = news_path.read_text()
 news = replace_once(
-    news,
-    '#include "RssArticleCache.h"\n',
-    '#include "RssArticleCache.h"\n#include "RssFigaroAuth.h"\n',
-    "RSS Figaro refresh session include",
+    news, '#include "RssArticleCache.h"\n',
+    '#include "RssArticleCache.h"\n#include "RssFigaroAuth.h"\n', "RSS Figaro refresh session include",
 )
 news = replace_once(
-    news,
-    'void RssNewsActivity::refreshFeeds() {\n',
+    news, 'void RssNewsActivity::refreshFeeds() {\n',
     '''void RssNewsActivity::refreshFeeds() {
   RssFigaroAuth::resetSession();
   struct FigaroSessionScope {
     ~FigaroSessionScope() { RssFigaroAuth::resetSession(); }
   } figaroSessionScope;
-''',
-    "RSS Figaro refresh session scope",
+''', "RSS Figaro refresh session scope",
+)
+news = replace_once(
+    news, '  if (!RssArticleCache::load(article.item, offlineBody)) offlineBody = article.item.summary;\n',
+    r'''  const Source& source = sources[article.sourceIndex];
+  const auto bodyResult = RssArticleCache::load(article.item, source.name.c_str(), source.dropRules.c_str(),
+                                              source.dropStartRules.c_str(), source.stopRules.c_str(), offlineBody);
+  if (bodyResult == RssArticleCache::CacheResult::FALLBACK_READY) {
+    offlineBody.insert(0, "R\u00e9sum\u00e9 du flux uniquement.\nActualise RSS pour r\u00e9essayer l'article.\n\n");
+  } else if (bodyResult != RssArticleCache::CacheResult::READY) {
+    offlineBody = "Article indisponible hors ligne.\nActualise RSS pour r\u00e9essayer.";
+  }
+''', "RSS distinguish article/summary/failure on opening",
+)
+news = replace_once(
+    news, '        if (cacheResult == RssArticleCache::CacheResult::FAILED) refreshHadError = true;\n',
+    '        if (cacheResult == RssArticleCache::CacheResult::FAILED ||\n'
+    '            cacheResult == RssArticleCache::CacheResult::FALLBACK_READY) refreshHadError = true;\n',
+    "RSS summary-only refresh is not a complete fetch",
 )
 news_path.write_text(news)
-
-print("Applied X4 Pro Figaro auth: explicit stream, strict AUTH cache, no anonymous rescue.")
+print("Applied RSS-local HTML extraction, body-only cache and strict Figaro AUTH policy.")

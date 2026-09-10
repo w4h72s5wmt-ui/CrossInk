@@ -60,11 +60,14 @@ jobs:
       - name: Apply RSS SD-only publisher cleanup
         run: python3 tools/apply_x4_rss_sd_rules_only.py
 
-      - name: Apply RSS Figaro authenticated fetch
+      - name: Apply RSS-local extraction/cache and Figaro auth
         run: python3 tools/apply_x4_rss_figaro_auth.py
 
       - name: Apply RSS exit lifecycle fix
         run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
+
+      - name: Test generated RSS cache with ASan and UBSan
+        run: sh tests/rss/run.sh
 
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
