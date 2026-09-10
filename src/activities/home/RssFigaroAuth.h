@@ -16,16 +16,14 @@ bool isConfiguredFor(const std::string& url);
 // caches. Returns 0 only when AUTH is not configured for this URL.
 uint64_t cacheKeyFor(const std::string& url);
 
-// Releases the RSS-local HTTP/TLS session and cookie. Call before/after a
-// refresh. A fully consumed response may reuse its connection.
+// Releases the RSS-local authentication state. Call before/after a refresh.
 void resetSession();
 
-// Uses ESP-IDF's perform() request path, which previously received Figaro
-// responses correctly on X4 Pro, while streaming body chunks directly into the
-// RSS article buffer. Success requires HTTP 200 and at least one complete
-// <article>...</article>. If the transport times out only after that point, the
-// received page is still handed to the editorial-root extractor. Redirects stay
-// restricted to HTTPS Figaro hosts and AUTH never falls back to anonymous mode.
+// X4 Pro-only authenticated Figaro transport. It uses the already-linked
+// wolfSSL stack directly inside the RSS app, validates the DigiCert chain and
+// the requested Figaro hostname before sending the cookie, then streams an
+// HTTP/1.1 response. Redirects remain restricted to HTTPS Figaro hosts and AUTH
+// never falls back to an anonymous request.
 HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownloader::DataCallback& onData,
                                         const HttpDownloader::CancelCallback& shouldCancel);
 
