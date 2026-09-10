@@ -26,7 +26,7 @@ duplicate = (
 text = replace_once(text, duplicate, duplicate[:len(duplicate) // 2], "RSS duplicate signature")
 text = replace_once(
     text, '#include "network/HttpDownloader.h"\n',
-    '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n', "RSS Figaro auth include",
+    '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n', "RSS Figaro auth include",
 )
 text = replace_once(text, 'constexpr char BODY_MAGIC[] = "XRSS4\\n";',
                     'constexpr char BODY_MAGIC[] = "XRSS5\\n";', "RSS body-only cache version")
@@ -102,14 +102,18 @@ news_path = path.parent / "RssNewsActivity.cpp"
 news = news_path.read_text()
 news = replace_once(
     news, '#include "RssArticleCache.h"\n',
-    '#include "RssArticleCache.h"\n#include "RssFigaroAuth.h"\n', "RSS Figaro refresh session include",
+    '#include "RssArticleCache.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n', "RSS Figaro refresh session include",
 )
 news = replace_once(
     news, 'void RssNewsActivity::refreshFeeds() {\n',
     '''void RssNewsActivity::refreshFeeds() {
+  RssFetchDiagnostics::begin();
   RssFigaroAuth::resetSession();
   struct FigaroSessionScope {
-    ~FigaroSessionScope() { RssFigaroAuth::resetSession(); }
+    ~FigaroSessionScope() {
+      RssFigaroAuth::resetSession();
+      RssFetchDiagnostics::end();
+    }
   } figaroSessionScope;
 ''', "RSS Figaro refresh session scope",
 )
@@ -132,4 +136,4 @@ news = replace_once(
     "RSS summary-only refresh is not a complete fetch",
 )
 news_path.write_text(news)
-print("Applied RSS-local HTML extraction, body-only cache and strict Figaro AUTH policy.")
+print("Applied RSS-local extraction, strict AUTH and bounded SD fetch diagnostics.")

@@ -26,10 +26,20 @@ bool buildFallbackText(const RssItem& item, const char* sourceName, const char* 
 CacheResult ensureCached(const RssItem& item, const char* sourceName, const char* dropRules,
                          const char* dropStartRules, const char* stopRules,
                          const CancelCallback& shouldCancel) {
+  RssFetchDiagnostics::Record diagnostic;
+  diagnostic.startedMs = RssFetchDiagnostics::now();
+  const auto report = [&](const char* phase, const int result) {
+    diagnostic.phase = phase;
+    diagnostic.result = result;
+    RssFetchDiagnostics::write(item.link, diagnostic);
+  };
   if (shouldCancel && shouldCancel()) return CacheResult::CANCELLED;
   const bool useFigaroAuth = RssFigaroAuth::isConfiguredFor(item.link);
   const std::string path = bodyPath(item);
-  if (bodyCacheIsCurrent(path)) return CacheResult::READY;
+  if (bodyCacheIsCurrent(path)) {
+    report("cache-hit", HttpDownloader::OK);
+    return CacheResult::READY;
+  }
   if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
 
   const auto unavailable = [&]() {
@@ -40,12 +50,16 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
     LOG_ERR("RSS", "Body unavailable; summary only, retry on manual refresh: %s", item.link);
     return item.summary[0] ? CacheResult::FALLBACK_READY : CacheResult::FAILED;
   };
-  if (!item.link[0]) return unavailable();
+  if (!item.link[0]) {
+    report("no-url", HttpDownloader::HTTP_ERROR);
+    return unavailable();
+  }
 
   auto htmlStorage = allocateBuffer(MAX_HTML_BYTES + 1);
   auto textStorage = allocateBuffer(MAX_TEXT_BYTES + 1);
   if (!htmlStorage || !textStorage) {
     LOG_ERR("RSS", "OOM allocating article extraction buffers");
+    report("buffer-allocation", HttpDownloader::HTTP_ERROR);
     return unavailable();
   }
   char* html = reinterpret_cast<char*>(htmlStorage.get());
@@ -56,9 +70,13 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
   const size_t attemptCount = useFigaroAuth ? 1U : 2U;
   for (size_t attempt = 0; attempt < attemptCount; ++attempt) {
     const char* transportName = useFigaroAuth ? "Figaro auth" : (attempt == 0 ? "wolfSSL" : "ESP_HTTP");
+    diagnostic = RssFetchDiagnostics::Record{};
+    diagnostic.startedMs = RssFetchDiagnostics::now();
+    diagnostic.transport = useFigaroAuth ? "auth-cache" : (attempt == 0 ? "wolfSSL" : "ESP_HTTP");
     size_t htmlLength = 0;
     bool htmlTruncated = false;
     const auto receiveChunk = [&](const uint8_t* data, const size_t len) {
+      diagnostic.received += len;
       if (len > MAX_HTML_BYTES - htmlLength) { htmlTruncated = true; return false; }
       if (len > 0) {
         if (!data) return false;
@@ -77,17 +95,26 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
       options.shouldCancel = shouldCancel;
       result = HttpDownloader::streamUrl(item.link, receiveChunk, nullptr, "", "", std::move(options));
     }
-    if (result == HttpDownloader::ABORTED || (shouldCancel && shouldCancel())) return CacheResult::CANCELLED;
+    diagnostic.stored = htmlLength;
+    diagnostic.truncated = htmlTruncated;
+    if (result == HttpDownloader::ABORTED || (shouldCancel && shouldCancel())) {
+      report("cancelled", HttpDownloader::ABORTED);
+      return CacheResult::CANCELLED;
+    }
     if (result != HttpDownloader::OK || htmlLength == 0 || htmlTruncated) {
       LOG_ERR("RSS", "Fetch failed (%s, result=%d, bytes=%zu, truncated=%d): %s",
               transportName, static_cast<int>(result), htmlLength, htmlTruncated, item.link);
+      report(htmlTruncated ? "html-capacity" : "fetch", result);
       continue;
     }
     html[htmlLength] = '\0';
     size_t textLength = 0;
-    if (!extractReadableText(html, htmlLength, text, textLength) || textLength >= MAX_TEXT_BYTES) {
+    const bool extracted = extractReadableText(html, htmlLength, text, textLength);
+    diagnostic.extracted = textLength;
+    if (!extracted || textLength >= MAX_TEXT_BYTES) {
       LOG_ERR("RSS", "Extraction failed/at capacity (%s, html=%zu, text=%zu): %s",
               transportName, htmlLength, textLength, item.link);
+      report(textLength >= MAX_TEXT_BYTES ? "text-capacity" : "extraction", HttpDownloader::HTTP_ERROR);
       continue;
     }
     const size_t extractedLength = textLength;
@@ -95,18 +122,25 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
     // Keep its first paragraph; real duplicated lines are still deduplicated.
     textLength = cleanExtractedText(text, textLength, item.title, nullptr, sourceName, item.link,
                                     dropRules, dropStartRules, stopRules);
+    diagnostic.cleaned = textLength;
     LOG_DBG("RSS", "Extraction (%s): html=%zu text=%zu cleaned=%zu", transportName, htmlLength,
             extractedLength, textLength);
     if (textLength < MIN_EXTRACTED_TEXT) {
       LOG_ERR("RSS", "Cleaner removed too much text (%s, before=%zu, after=%zu): %s",
               transportName, extractedLength, textLength, item.link);
+      report("cleaner", HttpDownloader::HTTP_ERROR);
       continue;
     }
-    if (shouldCancel && shouldCancel()) return CacheResult::CANCELLED;
+    if (shouldCancel && shouldCancel()) {
+      report("cancelled", HttpDownloader::ABORTED);
+      return CacheResult::CANCELLED;
+    }
     if (!writeTextFile(path, text, textLength)) {
       LOG_ERR("RSS", "Could not persist article body: %s", item.link);
+      report("body-write", HttpDownloader::FILE_ERROR);
       return unavailable();
     }
+    report("body-ready", HttpDownloader::OK);
     return CacheResult::READY;
   }
   return unavailable();

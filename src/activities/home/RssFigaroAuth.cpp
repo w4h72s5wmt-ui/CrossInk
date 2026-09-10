@@ -1,4 +1,5 @@
 #include "RssFigaroAuth.h"
+#include "RssFetchDiagnostics.h"
 
 #include <Arduino.h>
 #include <HalStorage.h>
@@ -189,6 +190,7 @@ bool readCookie(std::string& out) {
   size_t start = 0;
   while (start < out.size() && std::isspace(static_cast<unsigned char>(out[start]))) ++start;
   if (start > 0) out.erase(0, start);
+  if (start > 0) {} 
 
   static constexpr char PREFIX[] = "Cookie:";
   if (out.size() >= sizeof(PREFIX) - 1 && strncasecmp(out.c_str(), PREFIX, sizeof(PREFIX) - 1) == 0) {
@@ -293,10 +295,23 @@ void resetSession() {
 
 HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownloader::DataCallback& onData,
                                         const HttpDownloader::CancelCallback& shouldCancel) {
-  const auto fail = [](const HttpDownloader::DownloadError error) {
-    dropClient();
-    return error;
+  RssFetchDiagnostics::Record diagnostic;
+  diagnostic.startedMs = millis();
+  diagnostic.transport = "figaro-auth";
+  diagnostic.phase = "configuration";
+  const auto finish = [&](const HttpDownloader::DownloadError result, const bool discard) {
+    diagnostic.result = static_cast<int>(result);
+    if (session.client && result != HttpDownloader::OK) {
+      diagnostic.socketError = esp_http_client_get_errno(session.client);
+      esp_http_client_get_and_clear_last_tls_error(session.client, &diagnostic.tlsError, &diagnostic.tlsFlags);
+    }
+    // Record before cleanup loses the transport's last error. No header values
+    // or HTML are handed to the reporter, and a log failure cannot affect result.
+    RssFetchDiagnostics::write(url.c_str(), diagnostic);
+    if (discard) dropClient();
+    return result;
   };
+  const auto fail = [&](const HttpDownloader::DownloadError error) { return finish(error, true); };
   const auto cancelled = [&]() { return shouldCancel && shouldCancel(); };
   if (cancelled()) return fail(HttpDownloader::ABORTED);
   if (!onData || !isAllowedUrl(url) || !ensureCookie()) {
@@ -305,75 +320,113 @@ HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownlo
   }
 
   // X4 Pro scratch lives in PSRAM, not on the activity/task stack.
+  diagnostic.phase = "buffer-allocation";
   auto buffer = makePsramByteBufferNoThrow(READ_CHUNK_SIZE);
   if (!buffer) return fail(HttpDownloader::HTTP_ERROR);
 
   std::string currentUrl = url;
   for (uint8_t hop = 0; hop < MAX_REDIRECTS; ++hop) {
     if (cancelled()) return fail(HttpDownloader::ABORTED);
+    diagnostic.phase = "client-init";
     if (!isAllowedUrl(currentUrl) || !ensureClient(currentUrl)) return fail(HttpDownloader::HTTP_ERROR);
     session.redirectLocation.clear();
     session.encodedResponse = false;
-    if (esp_http_client_set_timeout_ms(session.client, CONNECT_TIMEOUT_MS) != ESP_OK ||
-        esp_http_client_set_header(session.client, "Cookie", session.cookie.c_str()) != ESP_OK ||
-        esp_http_client_open(session.client, 0) != ESP_OK) {
+    diagnostic.phase = "request-setup";
+    esp_err_t error = esp_http_client_set_timeout_ms(session.client, CONNECT_TIMEOUT_MS);
+    if (error == ESP_OK) error = esp_http_client_set_header(session.client, "Cookie", session.cookie.c_str());
+    if (error != ESP_OK) {
+      diagnostic.detail = error;
+      return fail(cancelled() ? HttpDownloader::ABORTED : HttpDownloader::HTTP_ERROR);
+    }
+    diagnostic.phase = "open";
+    uint32_t stageStart = millis();
+    error = esp_http_client_open(session.client, 0);
+    diagnostic.openMs += static_cast<uint32_t>(millis() - stageStart);
+    diagnostic.detail = error;
+    if (error != ESP_OK) {
       LOG_ERR("RSS", "Figaro AUTH: connection/request failed");
       return fail(cancelled() ? HttpDownloader::ABORTED : HttpDownloader::HTTP_ERROR);
     }
 
-    if (esp_http_client_set_timeout_ms(session.client, READ_POLL_MS) != ESP_OK) return fail(HttpDownloader::HTTP_ERROR);
+    diagnostic.phase = "read-setup";
+    error = esp_http_client_set_timeout_ms(session.client, READ_POLL_MS);
+    diagnostic.detail = error;
+    if (error != ESP_OK) return fail(HttpDownloader::HTTP_ERROR);
     session.lastProgressMs = millis();
+    diagnostic.phase = "headers";
+    stageStart = millis();
     int64_t contentLength;
     while (true) {
       if (cancelled()) return fail(HttpDownloader::ABORTED);
       contentLength = esp_http_client_fetch_headers(session.client);
+      diagnostic.detail = contentLength;
       if (contentLength >= 0) break;
       if (contentLength != -ESP_ERR_HTTP_EAGAIN ||
           static_cast<uint32_t>(millis() - session.lastProgressMs) >= IDLE_TIMEOUT_MS) {
+        diagnostic.headersMs += static_cast<uint32_t>(millis() - stageStart);
+        diagnostic.httpStatus = esp_http_client_get_status_code(session.client);
         LOG_ERR("RSS", "Figaro AUTH: headers failed (%lld)", static_cast<long long>(contentLength));
         return fail(HttpDownloader::HTTP_ERROR);
       }
       delay(1);
     }
+    diagnostic.headersMs += static_cast<uint32_t>(millis() - stageStart);
+    diagnostic.expected = contentLength;
     if (cancelled()) return fail(HttpDownloader::ABORTED);
 
     const int status = esp_http_client_get_status_code(session.client);
+    diagnostic.httpStatus = status;
+    diagnostic.encoded = session.encodedResponse;
     if (isRedirect(status)) {
+      diagnostic.phase = "redirect";
       const std::string nextUrl = buildRedirectUrl(currentUrl, session.redirectLocation);
       // Never reuse a socket with an unread redirect body, nor send cookies
       // outside the HTTPS Figaro allowlist.
       dropClient();
-      if (session.redirectLocation.empty() || !isAllowedUrl(nextUrl)) return HttpDownloader::HTTP_ERROR;
+      if (session.redirectLocation.empty() || !isAllowedUrl(nextUrl)) return fail(HttpDownloader::HTTP_ERROR);
       currentUrl = nextUrl;
       continue;
     }
     if (status != 200 || session.encodedResponse) {
+      diagnostic.phase = session.encodedResponse ? "encoded-response" : "http-status";
       LOG_ERR("RSS", "Figaro AUTH: rejected HTTP response (%d, encoded=%d)", status, session.encodedResponse);
       return fail(HttpDownloader::HTTP_ERROR);
     }
 
     ArticleBoundary article;
     size_t bytesReceived = 0;
+    diagnostic.phase = "body";
+    stageStart = millis();
     while (true) {
       if (cancelled()) return fail(HttpDownloader::ABORTED);
       const int read = esp_http_client_read(session.client, reinterpret_cast<char*>(buffer.get()), READ_CHUNK_SIZE);
+      diagnostic.bodyMs = static_cast<uint32_t>(millis() - stageStart);
+      diagnostic.detail = read;
       if (cancelled()) return fail(HttpDownloader::ABORTED);
       if (read > 0) {
         session.lastProgressMs = millis();
         const size_t length = static_cast<size_t>(read);
         const size_t useful = article.consume(buffer.get(), length);
+        diagnostic.received += length;
+        if (article.closed && !diagnostic.articleClosed) {
+          diagnostic.articleClosed = true;
+          diagnostic.articleMs = static_cast<uint32_t>(millis() - diagnostic.startedMs);
+        }
         if (useful > 0 && !onData(buffer.get(), useful)) {
+          diagnostic.phase = "receiver";
           LOG_ERR("RSS", "Figaro AUTH: receiver rejected data");
           return fail(cancelled() ? HttpDownloader::ABORTED : HttpDownloader::HTTP_ERROR);
         }
+        diagnostic.stored += useful;
         bytesReceived += length;
         if (article.closed) {
+          diagnostic.phase = "tail";
           const uint64_t remaining = contentLength > 0 && static_cast<uint64_t>(contentLength) > bytesReceived
                                          ? static_cast<uint64_t>(contentLength) - bytesReceived
                                          : 0;
           if (contentLength <= 0 || remaining > KEEPALIVE_TAIL_LIMIT) {
-            dropClient();
-            return HttpDownloader::OK;
+            diagnostic.phase = "article-end";
+            return finish(HttpDownloader::OK, true);
           }
         }
         continue;
@@ -381,26 +434,31 @@ HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownlo
 
       if (read == 0 && esp_http_client_is_complete_data_received(session.client)) {
         if (!article.closed) {
+          diagnostic.phase = "missing-article-end";
           LOG_ERR("RSS", "Figaro AUTH: response ended before </article> (%zu bytes)", bytesReceived);
           return fail(HttpDownloader::HTTP_ERROR);
         }
-        if (!esp_http_client_is_persistent_connection(session.client)) dropClient();
-        return HttpDownloader::OK;
+        diagnostic.phase = "response-end";
+        return finish(HttpDownloader::OK, !esp_http_client_is_persistent_connection(session.client));
       }
       const bool idle = static_cast<uint32_t>(millis() - session.lastProgressMs) >= IDLE_TIMEOUT_MS;
       if ((read < 0 && read != -ESP_ERR_HTTP_EAGAIN) || idle) {
-        // A failed optional tail drain is harmless only AFTER the full article
-        // has been delivered. Before that, no partial body may enter the cache.
-        dropClient();
-        if (article.closed) return HttpDownloader::OK;
+        // Preserve 225 semantics. The diagnostic now distinguishes a completed
+        // article followed by a tail timeout from an actual failed body fetch.
+        if (article.closed) {
+          diagnostic.phase = idle ? "tail-idle" : "tail-error";
+          return finish(HttpDownloader::OK, true);
+        }
+        diagnostic.phase = idle ? "body-idle" : "body-error";
         LOG_ERR("RSS", "Figaro AUTH: %s before </article> (%zu bytes, read=%d)",
                 idle ? "idle timeout" : "read error", bytesReceived, read);
-        return HttpDownloader::HTTP_ERROR;
+        return fail(HttpDownloader::HTTP_ERROR);
       }
       delay(1);
     }
   }
 
+  diagnostic.phase = "redirect-limit";
   LOG_ERR("RSS", "Figaro AUTH: redirect limit reached");
   return fail(HttpDownloader::HTTP_ERROR);
 }
