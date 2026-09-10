@@ -7,23 +7,23 @@
 
 namespace RssFigaroAuth {
 
-// Returns true only for HTTPS Figaro article URLs when /RSS/figaro_auth.txt
-// exists. The file content is never logged.
+// Returns true for HTTPS Figaro URLs with /RSS/figaro_auth.txt present (or a
+// cookie loaded for this refresh). Invalid files must fail, not enable public
+// fallback. The file content is never logged.
 bool isConfiguredFor(const std::string& url);
 
-// Hashes the validated cookie value for cache namespacing. Returns 0 when no
-// usable Figaro session is available for this URL.
+// Cookie-scoped, versioned AUTH cache key, distinct from public/pre-stream
+// caches. Returns 0 only when AUTH is not configured for this URL.
 uint64_t cacheKeyFor(const std::string& url);
 
-// Releases the RSS-local HTTP/TLS session. Call before/after a refresh so the
-// connection can be reused across Figaro articles without retaining TLS heap
-// while the user reads offline.
+// Releases the RSS-local HTTP/TLS session and cookie. Call before/after a
+// refresh; a fully drained persistent connection can serve the next article.
 void resetSession();
 
-// Streams one authenticated Figaro request through the RSS-local ESP-IDF
-// client. The connection is reused when the response tail is small; if a full
-// <article> ends far before the HTTP body, the useless tail is cut and that
-// connection is discarded. Redirects remain restricted to HTTPS Figaro hosts.
+// Explicit chunk reads with an inactivity timeout, not an overall deadline.
+// Success requires a closing </article>. Large/unknown response tails are
+// discarded with their socket; small tails may be drained for keep-alive.
+// Redirects remain restricted to HTTPS Figaro hosts. No anonymous fallback.
 HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownloader::DataCallback& onData,
                                         const HttpDownloader::CancelCallback& shouldCancel);
 
