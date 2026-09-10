@@ -29,7 +29,7 @@ text = replace_once(
     '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n', "RSS Figaro auth include",
 )
 text = replace_once(text, 'constexpr char BODY_MAGIC[] = "XRSS4\\n";',
-                    'constexpr char BODY_MAGIC[] = "XRSS5\\n";', "RSS body-only cache version")
+                    'constexpr char BODY_MAGIC[] = "XRSS6\\n";', "RSS editorial-root cache version")
 
 text = replace_section(text, "bool isNoiseContainer(", "size_t decodeEntity(", "", "remove substring HTML filter")
 text = replace_section(
@@ -136,4 +136,4 @@ news = replace_once(
     "RSS summary-only refresh is not a complete fetch",
 )
 news_path.write_text(news)
-print("Applied RSS-local extraction, strict AUTH and bounded SD fetch diagnostics.")
+print("Applied RSS-local editorial-root extraction, strict Figaro AUTH and bounded SD diagnostics.")
