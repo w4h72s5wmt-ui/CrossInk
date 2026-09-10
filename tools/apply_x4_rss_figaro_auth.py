@@ -30,6 +30,8 @@ text = replace_once(
 )
 text = replace_once(text, 'constexpr char BODY_MAGIC[] = "XRSS4\\n";',
                     'constexpr char BODY_MAGIC[] = "XRSS6\\n";', "RSS editorial-root cache version")
+text = replace_once(text, 'constexpr size_t MAX_TEXT_BYTES = 48U * 1024U;',
+                    'constexpr size_t MAX_TEXT_BYTES = 64U * 1024U;', "RSS X4 Pro article text capacity")
 
 text = replace_section(text, "bool isNoiseContainer(", "size_t decodeEntity(", "", "remove substring HTML filter")
 text = replace_section(
