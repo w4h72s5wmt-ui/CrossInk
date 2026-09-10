@@ -12,18 +12,19 @@ namespace RssFigaroAuth {
 // fallback. The file content is never logged.
 bool isConfiguredFor(const std::string& url);
 
-// Cookie-scoped, versioned AUTH cache key, distinct from public/pre-stream
+// Cookie-scoped, versioned AUTH cache key, distinct from public/older transport
 // caches. Returns 0 only when AUTH is not configured for this URL.
 uint64_t cacheKeyFor(const std::string& url);
 
 // Releases the RSS-local HTTP/TLS session and cookie. Call before/after a
-// refresh; a fully drained persistent connection can serve the next article.
+// refresh. A fully consumed response may reuse its connection.
 void resetSession();
 
-// Explicit chunk reads with an inactivity timeout, not an overall deadline.
-// Success requires a closing </article>. Large/unknown response tails are
-// discarded with their socket; small tails may be drained for keep-alive.
-// Redirects remain restricted to HTTPS Figaro hosts. No anonymous fallback.
+// Uses ESP-IDF's perform() request path, which is the Figaro transport validated
+// on X4 Pro, while consuming the body through HTTP events. Success requires a
+// closing </article>; page data after it is discarded and its connection closed
+// rather than waiting for an optional response tail. Redirects remain restricted
+// to HTTPS Figaro hosts and AUTH never falls back to an anonymous request.
 HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownloader::DataCallback& onData,
                                         const HttpDownloader::CancelCallback& shouldCancel);
 
