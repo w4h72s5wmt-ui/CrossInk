@@ -177,25 +177,135 @@ size_t htmlElementEnd(const char* html, const size_t length, const HtmlTag& open
   return length;
 }
 
+// Cheap visibility score used only to choose the page's editorial root. It
+// reuses the bounded parser and skips the same noise/raw subtrees as extraction,
+// but never allocates or decodes text. This prevents teaser <article> cards from
+// winning simply because they appear before the real story.
+size_t readableCandidateScore(const char* html, const size_t begin, const size_t end) {
+  size_t score = 0;
+  size_t pos = begin;
+  while (pos < end) {
+    if (html[pos] == '<') {
+      if (startsWithInsensitive(html, end, pos, "<!--")) {
+        const size_t close = findInsensitive(html, end, "-->", pos + 4);
+        pos = close == std::string::npos ? end : close + 3;
+        continue;
+      }
+      HtmlTag tag;
+      tag.start = pos;
+      tag.end = htmlTagEnd(html, end, pos);
+      if (tag.end == std::string::npos) break;
+      const size_t next = tag.end + 1;
+      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
+        pos = next;
+        continue;
+      }
+      if (!tag.closing && htmlRawText(tag.name)) {
+        pos = skipHtmlRaw(html, end, tag);
+        continue;
+      }
+      if (!tag.closing && isNoiseContainer(tag.name, html, tag.start, tag.end)) {
+        if (tag.selfClosing) pos = next;
+        else htmlElementEnd(html, end, tag, pos);
+        continue;
+      }
+      pos = next;
+      continue;
+    }
+    if (html[pos] == '&') {
+      // One entity is roughly one visible character. Skip a short valid-looking
+      // entity so long encoded strings do not inflate a teaser's score.
+      const size_t limit = std::min(end, pos + 12);
+      size_t next = pos + 1;
+      while (next < limit && html[next] != ';' && html[next] != '<' && html[next] != '&' &&
+             !htmlSpace(html[next])) ++next;
+      pos = next < limit && html[next] == ';' ? next + 1 : pos + 1;
+      ++score;
+    } else {
+      const unsigned char c = static_cast<unsigned char>(html[pos++]);
+      if (c >= 0x20 && !htmlSpace(static_cast<char>(c))) ++score;
+    }
+    if (score >= MAX_TEXT_BYTES * 2U) return score;
+  }
+  return score;
+}
+
 void readableHtmlRange(const char* html, const size_t length, size_t& begin, size_t& end) {
   begin = 0;
   end = length;
-  HtmlTag firstMain, firstBody, chosen, tag;
-  bool haveMain = false, haveBody = false, found = false;
+  static constexpr size_t STRONG_ARTICLE_SCORE = 512;
+
+  HtmlTag firstMain, firstBody, bestArticle, tag;
+  bool haveMain = false;
+  bool haveBody = false;
+  bool haveArticle = false;
+  size_t bestArticleEnd = 0;
+  size_t bestArticleScore = 0;
   size_t pos = 0;
   while (nextHtmlTag(html, length, pos, tag)) {
     if (tag.closing) continue;
     if (htmlRawText(tag.name)) { pos = skipHtmlRaw(html, length, tag); continue; }
-    if (tagEquals(tag.name, "article")) { chosen = tag; found = true; break; }
     if (!haveMain && tagEquals(tag.name, "main")) { firstMain = tag; haveMain = true; }
     if (!haveBody && tagEquals(tag.name, "body")) { firstBody = tag; haveBody = true; }
+    if (!tagEquals(tag.name, "article") || tag.selfClosing ||
+        isNoiseContainer(tag.name, html, tag.start, tag.end)) continue;
+
+    size_t after = length;
+    const size_t candidateEnd = htmlElementEnd(html, length, tag, after);
+    if (candidateEnd <= tag.end + 1) continue;
+    const size_t score = readableCandidateScore(html, tag.end + 1, candidateEnd);
+    if (!haveArticle || score > bestArticleScore) {
+      bestArticle = tag;
+      bestArticleEnd = candidateEnd;
+      bestArticleScore = score;
+      haveArticle = true;
+    }
   }
-  if (!found && haveMain) { chosen = firstMain; found = true; }
-  if (!found && haveBody) { chosen = firstBody; found = true; }
-  if (!found) return;
-  begin = chosen.end + 1;
-  size_t after = length;
-  end = htmlElementEnd(html, length, chosen, after);
+
+  // A sizeable <article> is the safest root. Science & Vie/Futura pages also
+  // contain short teaser <article> cards before the story; those stay below the
+  // strong threshold and let <main> compete instead of being cached as a body.
+  if (haveArticle && bestArticleScore >= STRONG_ARTICLE_SCORE) {
+    begin = bestArticle.end + 1;
+    end = bestArticleEnd;
+    return;
+  }
+
+  if (haveMain && !firstMain.selfClosing) {
+    size_t after = length;
+    const size_t mainEnd = htmlElementEnd(html, length, firstMain, after);
+    if (mainEnd > firstMain.end + 1) {
+      const size_t mainScore = readableCandidateScore(html, firstMain.end + 1, mainEnd);
+      if (mainScore >= STRONG_ARTICLE_SCORE && (!haveArticle || mainScore > bestArticleScore)) {
+        begin = firstMain.end + 1;
+        end = mainEnd;
+        return;
+      }
+    }
+  }
+
+  if (haveArticle && bestArticleScore >= MIN_EXTRACTED_TEXT) {
+    begin = bestArticle.end + 1;
+    end = bestArticleEnd;
+    return;
+  }
+
+  if (haveMain && !firstMain.selfClosing) {
+    size_t after = length;
+    const size_t mainEnd = htmlElementEnd(html, length, firstMain, after);
+    if (mainEnd > firstMain.end + 1) {
+      begin = firstMain.end + 1;
+      end = mainEnd;
+      return;
+    }
+  }
+
+  if (haveBody && !firstBody.selfClosing) {
+    size_t after = length;
+    const size_t bodyEnd = htmlElementEnd(html, length, firstBody, after);
+    begin = firstBody.end + 1;
+    end = bodyEnd > begin ? bodyEnd : length;
+  }
 }
 
 bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {
