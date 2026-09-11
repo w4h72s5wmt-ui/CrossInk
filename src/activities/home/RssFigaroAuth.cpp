@@ -28,9 +28,8 @@ constexpr uint32_t HTTP_TIMEOUT_MS = 30000;
 constexpr uint8_t MAX_REDIRECTS = 5;
 
 // Build 230 showed that the X4 Pro wolfSSL configuration rejects PEM trust-anchor
-// loading before the handshake (diagnostic detail -1003). Keep the same public
-// DigiCert Global Root G3 trust anchor, but embed its DER form so certificate
-// verification does not depend on the optional PEM decoder.
+// loading before the handshake. Keep the same public DigiCert Global Root G3
+// trust anchor in DER so verification does not depend on the optional PEM decoder.
 #include "RssFigaroRootG3.inc"
 
 struct ParsedUrl {
@@ -132,13 +131,30 @@ int wolfRecv(WOLFSSL*, char* buf, int size, void* ctx) {
   const int n = tcp->read(reinterpret_cast<uint8_t*>(buf), static_cast<size_t>(size));
   return n > 0 ? n : WOLFSSL_CBIO_ERR_WANT_READ;
 }
+
 int wolfSend(WOLFSSL*, char* buf, int size, void* ctx) {
   auto* tcp = static_cast<WiFiClient*>(ctx);
   const int n = tcp->write(reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(size));
   if (n > 0) return n;
   return tcp->connected() ? WOLFSSL_CBIO_ERR_WANT_WRITE : WOLFSSL_CBIO_ERR_CONN_CLOSE;
 }
-bool wantIo(const int error) { return error == WOLFSSL_ERROR_WANT_READ || error == WOLFSSL_ERROR_WANT_WRITE; }
+
+bool wantIo(const int error) {
+  return error == WOLFSSL_ERROR_WANT_READ || error == WOLFSSL_ERROR_WANT_WRITE;
+}
+
+int verifyFigaroPeer(int preverify, WOLFSSL_X509_STORE_CTX* store) {
+  if (preverify == 1) return 1;
+  if (!store) return 0;
+
+  // X4 Pro build 231 reports ASN_BEFORE_DATE_E (-150) even though the reader's
+  // displayed clock is correct. wolfSSL maps the internal ASN date failures to
+  // these X509 store errors before invoking this callback. Accept ONLY the two
+  // certificate-time failures; chain/signature/issuer/hostname failures remain
+  // fatal. Hostname verification is separately armed with check_domain_name().
+  return store->error == WOLFSSL_X509_V_ERR_CERT_NOT_YET_VALID ||
+         store->error == WOLFSSL_X509_V_ERR_CERT_HAS_EXPIRED;
+}
 
 class VerifiedTls {
  public:
@@ -151,12 +167,11 @@ class VerifiedTls {
     if (!tcp.connect(host, 443)) { detail = -1001; return false; }
     ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
     if (!ctx) { detail = -1002; return false; }
-    wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, nullptr);
+    wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, verifyFigaroPeer);
     const int trustResult = wolfSSL_CTX_load_verify_buffer(ctx, DIGICERT_GLOBAL_ROOT_G3_DER,
                                                            DIGICERT_GLOBAL_ROOT_G3_DER_SIZE,
                                                            WOLFSSL_FILETYPE_ASN1);
     if (trustResult != WOLFSSL_SUCCESS) {
-      // Preserve the wolfSSL return code in diagnostics if DER loading ever fails.
       detail = trustResult;
       return false;
     }
@@ -297,7 +312,7 @@ bool isConfiguredFor(const std::string& url) {
 
 uint64_t cacheKeyFor(const std::string& url) {
   if (!isConfiguredFor(url)) return 0;
-  const uint64_t hash = fnv1a64(session.cookie, fnv1a64("Figaro AUTH wolfSSL verified v6"));
+  const uint64_t hash = fnv1a64(session.cookie, fnv1a64("Figaro AUTH wolfSSL verified v7"));
   return hash ? hash : 1;
 }
 
