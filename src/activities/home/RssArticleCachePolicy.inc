@@ -67,6 +67,35 @@ size_t stripFigaroUiPreamble(char* text, size_t length, const char* articleUrl) 
   return remaining;
 }
 
+// Figaro's share bar can be flattened directly against the first editorial
+// word, e.g. "-Lien copié- Mail- X- MessengerBenjamin...". A line-based feed
+// rule cannot remove that safely because it would also discard "Benjamin...".
+// Require the ordered share labels very near the beginning, cut exactly after
+// "Messenger", and preserve the editorial suffix byte-for-byte.
+size_t stripFigaroSharePrefix(char* text, size_t length, const char* articleUrl) {
+  if (!text || length == 0 || !isFigaroPolicyUrl(articleUrl)) return length;
+
+  const size_t scanLimit = std::min(length, static_cast<size_t>(320));
+  size_t copied = findInsensitive(text, scanLimit, "Lien copié");
+  if (copied == std::string::npos) copied = findInsensitive(text, scanLimit, "Lien copie");
+  if (copied == std::string::npos || copied > 64) return length;
+
+  const size_t mail = findInsensitive(text, scanLimit, "Mail", copied + 4);
+  if (mail == std::string::npos || mail <= copied || mail > copied + 80) return length;
+
+  const size_t messenger = findInsensitive(text, scanLimit, "Messenger", mail + 4);
+  if (messenger == std::string::npos || messenger <= mail || messenger > mail + 96) return length;
+
+  size_t cut = messenger + std::strlen("Messenger");
+  while (cut < length && std::isspace(static_cast<unsigned char>(text[cut]))) ++cut;
+  if (cut >= length) return 0;
+
+  const size_t remaining = length - cut;
+  std::memmove(text, text + cut, remaining);
+  text[remaining] = '\0';
+  return remaining;
+}
+
 bool buildFallbackText(const RssItem& item, const char* sourceName, const char* dropRules,
                        const char* dropStartRules, const char* stopRules, std::string& outText) {
   outText.clear();
@@ -188,6 +217,7 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
     textLength = cleanExtractedText(text, textLength, item.title, nullptr, sourceName, item.link,
                                     dropRules, dropStartRules, stopRules);
     textLength = stripFigaroUiPreamble(text, textLength, item.link);
+    textLength = stripFigaroSharePrefix(text, textLength, item.link);
     diagnostic.cleaned = textLength;
     LOG_DBG("RSS", "Extraction (%s): html=%zu text=%zu cleaned=%zu", transportName, htmlLength,
             extractedLength, textLength);
