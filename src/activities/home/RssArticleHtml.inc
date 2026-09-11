@@ -308,12 +308,26 @@ void readableHtmlRange(const char* html, const size_t length, size_t& begin, siz
   }
 }
 
+bool looksLikeVisibleUrl(const char* text, size_t length) {
+  if (!text || length == 0) return false;
+  size_t start = 0;
+  while (start < length && htmlSpace(text[start])) ++start;
+  while (length > start && htmlSpace(text[length - 1])) --length;
+  if (start >= length) return false;
+  const size_t visible = length - start;
+  return startsWithInsensitive(text + start, visible, 0, "http://") ||
+         startsWithInsensitive(text + start, visible, 0, "https://") ||
+         startsWithInsensitive(text + start, visible, 0, "www.");
+}
+
 bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {
   textLength = 0;
   if (!html || !text || htmlLength == 0) return false;
   size_t begin, end;
   readableHtmlRange(html, htmlLength, begin, end);
   size_t pos = begin;
+  size_t anchorTextStart = 0;
+  bool inAnchor = false;
   while (pos < end && textLength < MAX_TEXT_BYTES) {
     if (html[pos] == '<') {
       if (startsWithInsensitive(html, end, pos, "<!--")) {
@@ -338,6 +352,21 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
         if (tag.selfClosing) pos = next;
         else htmlElementEnd(html, end, tag, pos);
         continue;
+      }
+      if (tagEquals(tag.name, "a")) {
+        if (!tag.closing && !tag.selfClosing && !inAnchor) {
+          inAnchor = true;
+          anchorTextStart = textLength;
+        } else if (tag.closing && inAnchor) {
+          if (looksLikeVisibleUrl(text + anchorTextStart, textLength - anchorTextStart)) {
+            textLength = anchorTextStart;
+            while (textLength > 0 && text[textLength - 1] == ' ' &&
+                   (next < end && htmlSpace(html[next]))) {
+              --textLength;
+            }
+          }
+          inAnchor = false;
+        }
       }
       if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {
         appendLineBreak(text, textLength);
