@@ -93,6 +93,7 @@ class HomeActivity final : public Activity {
   void onSavedItemsOpen();
   void onNotesOpen();
   void onMinesweeperOpen();
+  void onGame2048Open();
   void onRssNewsOpen();
 
   int getMenuItemCount() const;

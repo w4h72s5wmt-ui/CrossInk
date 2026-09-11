@@ -1,6 +1,7 @@
 #include "RssNewsActivity.h"
 
 #include <Arduino.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -16,6 +17,9 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "RssArticleCache.h"
+#include "RssArticleRichText.h"
+#include "RssFigaroAuth.h"
+#include "RssFetchDiagnostics.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -36,6 +40,7 @@ struct CacheHeader {
   uint32_t magic;
   uint16_t version;
   uint16_t count;
+  uint32_t sourceHash;
 };
 
 HeapByteBuffer allocateRssBuffer(const size_t bytes) {
@@ -129,6 +134,49 @@ int64_t publishedDateKey(const char* value) {
   return 0;
 }
 
+std::string trimFeedField(std::string value) {
+  const auto notSpace = [](const unsigned char c) { return !std::isspace(c); };
+  const auto first = std::find_if(value.begin(), value.end(), notSpace);
+  if (first == value.end()) return {};
+  const auto last = std::find_if(value.rbegin(), value.rend(), notSpace).base();
+  return std::string(first, last);
+}
+
+uint16_t parseFeedLimit(const std::string& value, const uint16_t fallback, const uint16_t maximum) {
+  unsigned parsed = 0;
+  char extra = '\0';
+  if (std::sscanf(value.c_str(), "%u%c", &parsed, &extra) != 1 || parsed < 1 || parsed > maximum) return fallback;
+  return static_cast<uint16_t>(parsed);
+}
+
+bool formatPublishedDate(const char* value, char* out, const size_t outSize) {
+  if (!out || outSize == 0) return false;
+  out[0] = '\0';
+  if (!value || !value[0]) return false;
+
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  if (std::sscanf(value, "%4d-%2d-%2d", &year, &month, &day) == 3) {
+    if (year >= 1970 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      std::snprintf(out, outSize, "%02d/%02d/%04d", day, month, year);
+      return true;
+    }
+  }
+
+  char monthText[4] = {};
+  int matched = std::sscanf(value, "%*3s, %2d %3s %4d", &day, monthText, &year);
+  if (matched < 3) matched = std::sscanf(value, "%2d %3s %4d", &day, monthText, &year);
+  if (matched >= 3) {
+    month = monthNumber(monthText);
+    if (year >= 1970 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      std::snprintf(out, outSize, "%02d/%02d/%04d", day, month, year);
+      return true;
+    }
+  }
+  return false;
+}
+
 Rect sortTouchRect(const GfxRenderer& renderer, const MappedInputManager& input) {
   const Rect header = TouchHeaderBackButton::headerRect(renderer, input);
   return Rect{header.x + header.width - SORT_TOUCH_WIDTH, header.y, SORT_TOUCH_WIDTH, header.height};
@@ -164,6 +212,7 @@ void RssNewsActivity::onEnter() {
   app.on(ACTION_ROW, &RssNewsActivity::onRowEvent, this);
   app.setScreen(&RssNewsActivity::rootScreen, this);
 
+  loadSources();
   if (!ensureBuffers()) {
     statusMessage = tr(STR_MEMORY_ERROR);
   } else {
@@ -174,15 +223,27 @@ void RssNewsActivity::onEnter() {
 }
 
 void RssNewsActivity::onExit() {
+  // The first RSS article render can lazily allocate FontDecompressor's
+  // grow-only compressed-font hot-group buffer. It is fully rebuildable but,
+  // if left resident after RSS exits, a ~12 KB allocation can split the large
+  // contiguous PSRAM arena. On this branch FontCacheManager::clearCache()
+  // clears FontDecompressor first and then the registered SD-font caches.
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->clearCache();
+  }
+  sdFontSystem.releaseRegistry();
+
   Activity::onExit();
   uiReady = false;
   articleTitleLines.clear();
   articleSummaryLines.clear();
   displayOrder = nullptr;
+  listMetaText = nullptr;
   listItems = nullptr;
   feedItems = nullptr;
   articles = nullptr;
   displayOrderStorage.reset();
+  listMetaStorage.reset();
   listItemStorage.reset();
   feedStorage.reset();
   articleStorage.reset();
@@ -193,7 +254,9 @@ void RssNewsActivity::onExit() {
       WiFi.disconnect(false);
       delay(30);
     }
-    silentRestartAfterNetwork();
+    // Keep the post-WiFi reboot that defragments the ESP network heap, but
+    // resume with the Home application menu open on RSS instead of plain Home.
+    silentRestartAfterNetworkToRssMenu();
   }
 #endif
 }
@@ -235,6 +298,18 @@ bool RssNewsActivity::ensureBuffers() {
     listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
   }
 
+  if (!listMetaStorage) {
+    listMetaStorage = allocateRssBuffer(MAX_ARTICLES * LIST_META_CAPACITY);
+    if (!listMetaStorage) {
+      LOG_ERR("RSS", "OOM allocating RSS list metadata");
+      return false;
+    }
+    listMetaText = reinterpret_cast<char*>(listMetaStorage.get());
+    std::memset(listMetaText, 0, MAX_ARTICLES * LIST_META_CAPACITY);
+  } else if (!listMetaText) {
+    listMetaText = reinterpret_cast<char*>(listMetaStorage.get());
+  }
+
   if (!displayOrderStorage) {
     displayOrderStorage = allocateRssBuffer(sizeof(uint16_t) * MAX_ARTICLES);
     if (!displayOrderStorage) {
@@ -250,6 +325,220 @@ bool RssNewsActivity::ensureBuffers() {
   return true;
 }
 
+void RssNewsActivity::loadSources() {
+  sourceCount = 0;
+  for (const auto& source : DEFAULT_SOURCES) {
+    if (sourceCount >= MAX_SOURCES) break;
+    sources[sourceCount++] = Source{source.name, source.url, source.syncLimit, source.historyLimit, {}, {}, {}};
+  }
+
+  if (!ensureFeedConfigFile()) {
+    LOG_ERR("RSS", "Could not create/open %s; using built-in feeds", FEEDS_PATH);
+    return;
+  }
+
+  FsFile file;
+  if (!Storage.openFileForRead("RSS", FEEDS_PATH, file)) {
+    LOG_ERR("RSS", "Could not read %s; using built-in feeds", FEEDS_PATH);
+    return;
+  }
+
+  const size_t bytes = std::min(static_cast<size_t>(file.size()), FEED_CONFIG_MAX_BYTES);
+  std::array<char, FEED_CONFIG_MAX_BYTES + 1> buffer{};
+  const int read = bytes > 0 ? file.read(buffer.data(), bytes) : 0;
+  file.close();
+  if (read <= 0) {
+    LOG_ERR("RSS", "Empty RSS feed configuration; using built-in feeds");
+    return;
+  }
+
+  const char* const configBegin = buffer.data();
+  const char* const configEnd = configBegin + static_cast<size_t>(read);
+
+  const auto trimRange = [](const char*& begin, const char*& end) {
+    while (begin < end && std::isspace(static_cast<unsigned char>(*begin))) ++begin;
+    while (end > begin && std::isspace(static_cast<unsigned char>(end[-1]))) --end;
+  };
+  const auto rangeEquals = [](const char* begin, const char* end, const char* literal) {
+    const size_t length = static_cast<size_t>(end - begin);
+    const size_t literalLength = std::strlen(literal);
+    return length == literalLength && std::memcmp(begin, literal, length) == 0;
+  };
+  const auto rangeStartsWith = [](const char* begin, const char* end, const char* literal) {
+    const size_t length = static_cast<size_t>(end - begin);
+    const size_t literalLength = std::strlen(literal);
+    return length >= literalLength && std::memcmp(begin, literal, literalLength) == 0;
+  };
+  const auto parseLimit = [](const char* begin, const char* end, const uint16_t fallback,
+                             const uint16_t maximum) {
+    if (begin >= end) return fallback;
+    if (*begin == '+') ++begin;
+    if (begin >= end) return fallback;
+    unsigned value = 0;
+    for (const char* cursor = begin; cursor < end; ++cursor) {
+      if (*cursor < '0' || *cursor > '9') return fallback;
+      value = value * 10U + static_cast<unsigned>(*cursor - '0');
+      if (value > maximum) return fallback;
+    }
+    return value >= 1U ? static_cast<uint16_t>(value) : fallback;
+  };
+
+  size_t parsedCount = 0;
+  const char* lineBegin = configBegin;
+  while (lineBegin < configEnd && parsedCount < MAX_SOURCES) {
+    const char* lineEnd = lineBegin;
+    while (lineEnd < configEnd && *lineEnd != '\n') ++lineEnd;
+
+    const char* begin = lineBegin;
+    const char* end = lineEnd;
+    trimRange(begin, end);
+    if (begin < end && *begin != '#') {
+      const char* firstSeparator = begin;
+      while (firstSeparator < end && *firstSeparator != '|') ++firstSeparator;
+      if (firstSeparator < end) {
+        const char* secondSeparator = firstSeparator + 1;
+        while (secondSeparator < end && *secondSeparator != '|') ++secondSeparator;
+
+        const char* nameBegin = begin;
+        const char* nameEnd = firstSeparator;
+        const char* urlBegin = firstSeparator + 1;
+        const char* urlEnd = secondSeparator;
+        trimRange(nameBegin, nameEnd);
+        trimRange(urlBegin, urlEnd);
+
+        uint16_t syncLimit = DEFAULT_SYNC_LIMIT;
+        uint16_t historyLimit = DEFAULT_HISTORY_LIMIT;
+        const char* dropBegin = nullptr;
+        const char* dropEnd = nullptr;
+        const char* dropStartBegin = nullptr;
+        const char* dropStartEnd = nullptr;
+        const char* stopBegin = nullptr;
+        const char* stopEnd = nullptr;
+
+        const char* parameterBegin = secondSeparator < end ? secondSeparator + 1 : end;
+        while (parameterBegin < end) {
+          const char* parameterEnd = parameterBegin;
+          while (parameterEnd < end && *parameterEnd != '|') ++parameterEnd;
+          const char* fieldBegin = parameterBegin;
+          const char* fieldEnd = parameterEnd;
+          trimRange(fieldBegin, fieldEnd);
+          const char* equals = fieldBegin;
+          while (equals < fieldEnd && *equals != '=') ++equals;
+          if (equals < fieldEnd) {
+            const char* keyBegin = fieldBegin;
+            const char* keyEnd = equals;
+            const char* valueBegin = equals + 1;
+            const char* valueEnd = fieldEnd;
+            trimRange(keyBegin, keyEnd);
+            trimRange(valueBegin, valueEnd);
+
+            if (rangeEquals(keyBegin, keyEnd, "sync")) {
+              syncLimit = parseLimit(valueBegin, valueEnd, DEFAULT_SYNC_LIMIT,
+                                     static_cast<uint16_t>(ITEMS_PER_SOURCE));
+            } else if (rangeEquals(keyBegin, keyEnd, "history")) {
+              historyLimit = parseLimit(valueBegin, valueEnd, DEFAULT_HISTORY_LIMIT,
+                                        static_cast<uint16_t>(ITEMS_PER_SOURCE));
+            } else if (rangeEquals(keyBegin, keyEnd, "drop")) {
+              dropBegin = valueBegin;
+              dropEnd = valueEnd;
+            } else if (rangeEquals(keyBegin, keyEnd, "dropstart")) {
+              dropStartBegin = valueBegin;
+              dropStartEnd = valueEnd;
+            } else if (rangeEquals(keyBegin, keyEnd, "stop")) {
+              stopBegin = valueBegin;
+              stopEnd = valueEnd;
+            }
+          }
+          parameterBegin = parameterEnd < end ? parameterEnd + 1 : end;
+        }
+
+        const bool supportedUrl = rangeStartsWith(urlBegin, urlEnd, "https://") ||
+                                  rangeStartsWith(urlBegin, urlEnd, "http://");
+        if (nameBegin < nameEnd && supportedUrl) {
+          Source& target = sources[parsedCount++];
+          target.name.assign(nameBegin, static_cast<size_t>(nameEnd - nameBegin));
+          target.url.assign(urlBegin, static_cast<size_t>(urlEnd - urlBegin));
+          target.syncLimit = syncLimit;
+          target.historyLimit = historyLimit;
+          if (dropBegin) target.dropRules.assign(dropBegin, static_cast<size_t>(dropEnd - dropBegin));
+          else target.dropRules.clear();
+          if (dropStartBegin) target.dropStartRules.assign(dropStartBegin, static_cast<size_t>(dropStartEnd - dropStartBegin));
+          else target.dropStartRules.clear();
+          if (stopBegin) target.stopRules.assign(stopBegin, static_cast<size_t>(stopEnd - stopBegin));
+          else target.stopRules.clear();
+        } else {
+          LOG_ERR("RSS", "Ignoring invalid feed line");
+        }
+      } else {
+        LOG_ERR("RSS", "Ignoring feed line without '|'");
+      }
+    }
+    lineBegin = lineEnd < configEnd ? lineEnd + 1 : configEnd;
+  }
+
+  if (parsedCount == 0) {
+    LOG_ERR("RSS", "No valid feeds in %s; using built-in feeds", FEEDS_PATH);
+    return;
+  }
+
+  for (size_t i = parsedCount; i < MAX_SOURCES; ++i) sources[i] = Source{};
+  sourceCount = parsedCount;
+  LOG_DBG("RSS", "Loaded %zu feeds from %s", sourceCount, FEEDS_PATH);
+}
+
+bool RssNewsActivity::ensureFeedConfigFile() {
+  Storage.ensureDirectoryExists(FEEDS_DIR);
+  if (Storage.exists(FEEDS_PATH)) return true;
+
+  std::string content;
+  content.reserve(768);
+  content += "# CrossInk RSS feeds\n";
+  content += "# Name|URL|sync=30|history=100|drop=...|dropstart=...|stop=...\n";
+  content += "# Rules are optional and separated with ';'. Maximum: 8 feeds.\n";
+  for (const auto& source : DEFAULT_SOURCES) {
+    content += source.name;
+    content += '|';
+    content += source.url;
+    content += "|sync=";
+    content += std::to_string(source.syncLimit);
+    content += "|history=";
+    content += std::to_string(source.historyLimit);
+    content += '\n';
+  }
+
+  FsFile file;
+  if (!Storage.openFileForWrite("RSS", FEEDS_PATH, file)) return false;
+  const size_t written = file.write(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+  const bool synced = written == content.size() && file.sync();
+  file.close();
+  if (!synced) {
+    Storage.remove(FEEDS_PATH);
+    return false;
+  }
+  return true;
+}
+
+uint32_t RssNewsActivity::sourceConfigHash() const {
+  uint32_t hash = UINT32_C(2166136261);
+  const auto mix = [&hash](const char c) {
+    hash ^= static_cast<uint8_t>(c);
+    hash *= UINT32_C(16777619);
+  };
+  for (size_t i = 0; i < sourceCount; ++i) {
+    for (const char c : sources[i].name) mix(c);
+    mix('|');
+    for (const char c : sources[i].url) mix(c);
+    mix('|');
+    for (const char c : sources[i].dropRules) mix(c);
+    mix('|');
+    for (const char c : sources[i].dropStartRules) mix(c);
+    mix('|');
+    for (const char c : sources[i].stopRules) mix(c);
+    mix('\n');
+  }
+  return hash;
+}
+
 bool RssNewsActivity::loadCache() {
   articleCount = 0;
   if (!articles || !Storage.exists(CACHE_PATH)) return false;
@@ -259,15 +548,32 @@ bool RssNewsActivity::loadCache() {
 
   CacheHeader header{};
   const bool headerOk = file.read(&header, sizeof(header)) == static_cast<int>(sizeof(header));
-  if (!headerOk || header.magic != CACHE_MAGIC || header.version != CACHE_VERSION || header.count > MAX_ARTICLES) {
+  const bool layoutOk = headerOk && header.magic == CACHE_MAGIC && header.version == CACHE_VERSION &&
+                        header.count <= MAX_ARTICLES;
+  if (!layoutOk) {
     LOG_ERR("RSS", "Ignoring incompatible RSS cache; refresh will rebuild it");
     file.close();
     return false;
   }
 
+  if (header.sourceHash != sourceConfigHash()) {
+    // The source indexes in this cache belong to the previous feeds.txt. Purge
+    // their dedicated bodies before discarding metadata so removed/reordered
+    // sources cannot leave permanent SD orphans.
+    for (uint16_t i = 0; i < header.count; ++i) {
+      CachedArticle stale{};
+      if (file.read(&stale, sizeof(stale)) != static_cast<int>(sizeof(stale))) break;
+      RssArticleCache::remove(stale.item);
+    }
+    file.close();
+    Storage.remove(CACHE_PATH);
+    LOG_DBG("RSS", "Purged article bodies for obsolete feed configuration");
+    return false;
+  }
+
   for (uint16_t i = 0; i < header.count; ++i) {
     CachedArticle article{};
-    if (file.read(&article, sizeof(article)) != static_cast<int>(sizeof(article)) || article.sourceIndex >= SOURCE_COUNT) {
+    if (file.read(&article, sizeof(article)) != static_cast<int>(sizeof(article)) || article.sourceIndex >= sourceCount) {
       LOG_ERR("RSS", "RSS cache truncated or invalid at record %u", static_cast<unsigned>(i));
       articleCount = 0;
       file.close();
@@ -287,7 +593,7 @@ bool RssNewsActivity::saveCache() const {
 
   FsFile file;
   if (!Storage.openFileForWrite("RSS", CACHE_TMP_PATH, file)) return false;
-  const CacheHeader header{CACHE_MAGIC, CACHE_VERSION, static_cast<uint16_t>(articleCount)};
+  const CacheHeader header{CACHE_MAGIC, CACHE_VERSION, static_cast<uint16_t>(articleCount), sourceConfigHash()};
   if (file.write(&header, sizeof(header)) != sizeof(header)) {
     file.close();
     Storage.remove(CACHE_TMP_PATH);
@@ -316,10 +622,11 @@ bool RssNewsActivity::saveCache() const {
 }
 
 void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* items, const size_t count) {
-  if (!articles || !items || sourceIndex >= SOURCE_COUNT) return;
+  if (!articles || !items || sourceIndex >= sourceCount) return;
 
+  const size_t historyLimit = std::clamp<size_t>(sources[sourceIndex].historyLimit, 1, ITEMS_PER_SOURCE);
   size_t mergedCount = 0;
-  const size_t incomingCount = std::min(count, ITEMS_PER_SOURCE);
+  const size_t incomingCount = std::min(count, historyLimit);
   for (size_t i = 0; i < incomingCount; ++i) {
     bool duplicate = false;
     for (size_t j = 0; j < mergedCount; ++j) {
@@ -334,7 +641,7 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
     }
   }
 
-  for (size_t i = 0; i < articleCount && mergedCount < ITEMS_PER_SOURCE; ++i) {
+  for (size_t i = 0; i < articleCount && mergedCount < historyLimit; ++i) {
     if (articles[i].sourceIndex != sourceIndex) continue;
     bool duplicate = false;
     for (size_t j = 0; j < mergedCount; ++j) {
@@ -344,6 +651,31 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
       }
     }
     if (!duplicate) items[mergedCount++] = articles[i].item;
+  }
+
+  // Delete full-text bodies that just fell out of this source's 100-entry
+  // history. A shared URL is kept when another configured source still points
+  // to the same article.
+  for (size_t i = 0; i < articleCount; ++i) {
+    if (articles[i].sourceIndex != sourceIndex) continue;
+    bool retained = false;
+    for (size_t j = 0; j < mergedCount; ++j) {
+      if (sameRssItem(articles[i].item, items[j])) {
+        retained = true;
+        break;
+      }
+    }
+    if (retained) continue;
+
+    bool referencedElsewhere = false;
+    for (size_t j = 0; j < articleCount; ++j) {
+      if (j == i || articles[j].sourceIndex == sourceIndex) continue;
+      if (sameRssItem(articles[i].item, articles[j].item)) {
+        referencedElsewhere = true;
+        break;
+      }
+    }
+    if (!referencedElsewhere) RssArticleCache::remove(articles[i].item);
   }
 
   size_t writeIndex = 0;
@@ -421,8 +753,20 @@ void RssNewsActivity::screenHeader(UiApp::ScreenType& screen) {
       sortStyle.align = fui::TextAlign::Center;
       sortStyle.maxLines = 1;
       const Rect touch = sortTouchRect(renderer, mappedInput);
-      screen.target().text(fui::Rect{static_cast<int16_t>(touch.x), static_cast<int16_t>(touch.y),
-                                     static_cast<int16_t>(touch.width), static_cast<int16_t>(touch.height)},
+      const auto headerLayout = TouchHeaderBackButton::layout(headerRect);
+      const int iconBottom = headerLayout.iconRect.y +
+                             (headerLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2;
+      const int availableOffset = std::max(0, headerRect.y + headerRect.height - iconBottom);
+      const int titleOffset = std::clamp(TouchHeaderBackButton::TITLE_VERTICAL_OFFSET, 0, availableOffset);
+      const auto scale = uiScaleSpec();
+      const int titleBaselineY =
+          headerLayout.iconRect.y + titleOffset +
+          std::max(0, (headerLayout.iconRect.height - renderer.getLineHeight(scale.titleFontId)) / 2) +
+          renderer.getFontAscenderSize(scale.titleFontId);
+      const int sortLineHeight = renderer.getLineHeight(scale.smallFontId);
+      const int sortTop = titleBaselineY - renderer.getFontAscenderSize(scale.smallFontId);
+      screen.target().text(fui::Rect{static_cast<int16_t>(touch.x), static_cast<int16_t>(sortTop),
+                                     static_cast<int16_t>(touch.width), static_cast<int16_t>(sortLineHeight)},
                            sortMode == SortMode::DATE_DESC ? "D v" : "SRC", sortStyle);
     }
     screen.takeTop(static_cast<int16_t>(headerRect.height));
@@ -444,7 +788,8 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
 
   listItems[0] = fui::ListItem{};
   listItems[0].label = tr(STR_UPDATE);
-  listItems[0].value = "RSS";
+  listItems[0].subtitle = nullptr;
+  listItems[0].value = nullptr;
   listItems[0].actionValue = 0;
 
   for (size_t i = 0; i < articleCount; ++i) {
@@ -454,8 +799,15 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
     fui::ListItem& item = listItems[i + 1];
     item = fui::ListItem{};
     item.label = article.item.title;
-    item.subtitle = article.item.published[0] ? article.item.published : nullptr;
-    item.value = SOURCES[article.sourceIndex].name;
+    char* meta = listMetaText + i * LIST_META_CAPACITY;
+    char dateText[16] = {};
+    if (formatPublishedDate(article.item.published, dateText, sizeof(dateText))) {
+      std::snprintf(meta, LIST_META_CAPACITY, "%s - %s", sources[article.sourceIndex].name.c_str(), dateText);
+    } else {
+      std::snprintf(meta, LIST_META_CAPACITY, "%s", sources[article.sourceIndex].name.c_str());
+    }
+    item.subtitle = meta;
+    item.value = nullptr;
     item.actionValue = static_cast<int16_t>(i + 1);
   }
 
@@ -465,8 +817,15 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
   props.selectedIndex = static_cast<int16_t>(selectorIndex);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;
-  props.valueInset = 8;
+  props.valueInset = 0;
   const auto rows = configureUiList(props, screen.theme(), screen.body(), UiListRowType::WithSubtitle);
+  // Strong title / quiet metadata. Keep one title line for deterministic row
+  // height and button navigation; removing the value column gives it the full
+  // usable width instead of squeezing it between source/date decorations.
+  props.labelText.bold = true;
+  props.labelText.maxLines = 1;
+  props.subtitleText.maxLines = 1;
+  props.balanceWrappedLabelWithValue = false;
   visibleRows = rows > 0 ? rows : 1;
   topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(articleCount + 1));
   props.topIndex = static_cast<uint16_t>(topIndex);
@@ -482,11 +841,11 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
 
   const CachedArticle& article = articles[openArticleIndex];
   const auto& theme = screen.theme();
-  fui::TextStyle titleStyle = theme.bodyText;
+  fui::TextStyle titleStyle = theme.titleText;
+  titleStyle.bold = true;
   fui::TextStyle bodyStyle = theme.bodyText;
   fui::TextStyle metaStyle = theme.smallText;
   const int readerFontId = SETTINGS.getReaderFontId();
-  bodyStyle.font = readerFontId;
   const int16_t titleHeight = screen.target().lineHeight(titleStyle.font);
   const int16_t bodyHeight = static_cast<int16_t>(std::max(
       1, static_cast<int>(renderer.getLineHeight(readerFontId) * SETTINGS.getReaderLineCompression() + 0.5f)));
@@ -498,12 +857,20 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
     if (screen.body().height < titleHeight) break;
     screen.target().text(screen.takeTop(titleHeight, theme.spaceXs), line.c_str(), titleStyle);
   }
-  screen.spacer(theme.spaceSm);
-  if (screen.body().height >= metaHeight) {
-    screen.target().text(screen.takeTop(metaHeight, theme.spaceSm), SOURCES[article.sourceIndex].name, metaStyle);
+  screen.spacer(theme.spaceXs);
+  char articleDate[16] = {};
+  char metaLine[96] = {};
+  if (formatPublishedDate(article.item.published, articleDate, sizeof(articleDate))) {
+    std::snprintf(metaLine, sizeof(metaLine), "%s - %s", sources[article.sourceIndex].name.c_str(), articleDate);
+  } else {
+    std::snprintf(metaLine, sizeof(metaLine), "%s", sources[article.sourceIndex].name.c_str());
   }
-  if (article.item.published[0] && screen.body().height >= metaHeight) {
-    screen.target().text(screen.takeTop(metaHeight, theme.spaceMd), article.item.published, metaStyle);
+  if (screen.body().height >= metaHeight) {
+    screen.target().text(screen.takeTop(metaHeight, theme.spaceSm), metaLine, metaStyle);
+  }
+  if (screen.body().height >= 1) {
+    const fui::Rect divider = screen.takeTop(1, theme.spaceMd);
+    screen.target().fill(divider, fui::Paint::solid(fui::Color::Black));
   }
 
   if (articleSummaryLines.empty()) {
@@ -517,7 +884,7 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
     fui::Rect lineRect = screen.takeTop(bodyHeight);
     lineRect.x = static_cast<int16_t>(readerMargin);
     lineRect.width = static_cast<int16_t>(readerWidth);
-    screen.target().text(lineRect, articleSummaryLines[i].c_str(), bodyStyle);
+    RssArticleRichText::drawLine(renderer, readerFontId, lineRect.x, lineRect.y, articleSummaryLines[i], true);
     ++displayedLines;
   }
   articlePageLines = std::max<size_t>(1, displayedLines);
@@ -567,13 +934,22 @@ void RssNewsActivity::openArticle(const size_t articleIndex) {
   const auto scale = uiScaleSpec();
 
   std::string offlineBody;
-  if (!RssArticleCache::load(article.item, offlineBody)) offlineBody = article.item.summary;
-  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {
-    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);
+  const Source& source = sources[article.sourceIndex];
+  const auto bodyResult = RssArticleCache::load(article.item, source.name.c_str(), source.dropRules.c_str(),
+                                              source.dropStartRules.c_str(), source.stopRules.c_str(), offlineBody);
+  if (bodyResult == RssArticleCache::CacheResult::FALLBACK_READY) {
+    offlineBody.insert(0, "R\u00e9sum\u00e9 du flux uniquement.\nActualise RSS pour r\u00e9essayer l'article.\n\n");
+  } else if (bodyResult != RssArticleCache::CacheResult::READY) {
+    offlineBody = "Article indisponible hors ligne.\nActualise RSS pour r\u00e9essayer.";
+  }
+  const std::string visibleBody = RssArticleRichText::visibleText(offlineBody);
+  if (renderer.isSdCardFont(readerFontId) && !visibleBody.empty()) {
+    renderer.ensureSdCardFontReady(readerFontId, visibleBody.c_str(), /*styleMask=*/0x01);
   }
 
-  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);
-  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);
+  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 3);
+  articleSummaryLines = renderer.wrappedText(readerFontId, visibleBody.c_str(), maxWidth, 2000);
+  RssArticleRichText::decorateWrappedLines(offlineBody, articleSummaryLines);
   articleLineOffset = 0;
   articlePageLines = 8;
   state = State::ARTICLE;
@@ -647,10 +1023,11 @@ void RssNewsActivity::onWifiSelectionComplete(const bool connected) {
 
 bool RssNewsActivity::fetchSource(const uint8_t sourceIndex, size_t& outCount, bool& cancelled) {
   outCount = 0;
-  if (!feedItems || sourceIndex >= SOURCE_COUNT) return false;
+  if (!feedItems || sourceIndex >= sourceCount) return false;
   std::memset(feedItems, 0, sizeof(RssItem) * FEED_ITEM_CAPACITY);
 
-  RssParser parser(feedItems, FEED_ITEM_CAPACITY);
+  const size_t syncLimit = std::clamp<size_t>(sources[sourceIndex].syncLimit, 1, FEED_ITEM_CAPACITY);
+  RssParser parser(feedItems, syncLimit);
   HttpDownloader::DownloadOptions options;
   options.bufferSize = HTTP_BUFFER_SIZE;
   options.transport = HttpDownloader::Transport::WOLFSSL;
@@ -669,7 +1046,7 @@ bool RssNewsActivity::fetchSource(const uint8_t sourceIndex, size_t& outCount, b
   };
 
   const auto result = HttpDownloader::streamUrl(
-      SOURCES[sourceIndex].url,
+      sources[sourceIndex].url.c_str(),
       [&parser](const uint8_t* data, const size_t len) { return parser.write(data, len) == len; }, nullptr, "", "",
       std::move(options));
   if (result == HttpDownloader::ABORTED) {
@@ -677,40 +1054,59 @@ bool RssNewsActivity::fetchSource(const uint8_t sourceIndex, size_t& outCount, b
     return false;
   }
   if (result != HttpDownloader::OK) {
-    LOG_ERR("RSS", "Fetch failed for %s", SOURCES[sourceIndex].name);
+    LOG_ERR("RSS", "Fetch failed for %s", sources[sourceIndex].name.c_str());
     return false;
   }
   parser.flush();
   if (!parser) {
-    LOG_ERR("RSS", "Parse failed for %s", SOURCES[sourceIndex].name);
+    LOG_ERR("RSS", "Parse failed for %s", sources[sourceIndex].name.c_str());
     return false;
   }
   outCount = parser.getItemCount();
-  if (parser.wasTruncated()) LOG_DBG("RSS", "%s feed truncated to %zu items", SOURCES[sourceIndex].name, outCount);
+  if (parser.wasTruncated()) LOG_DBG("RSS", "%s feed truncated to %zu items", sources[sourceIndex].name.c_str(), outCount);
   return outCount > 0;
 }
 
 void RssNewsActivity::refreshFeeds() {
+  RssFetchDiagnostics::begin();
+  RssFigaroAuth::resetSession();
+  struct FigaroSessionScope {
+    ~FigaroSessionScope() {
+      RssFigaroAuth::resetSession();
+      RssFetchDiagnostics::end();
+    }
+  } figaroSessionScope;
+  if (sourceCount == 0) {
+    refreshHadError = true;
+    state = State::LIST;
+    statusMessage = "Aucun flux RSS";
+    requestUpdate();
+    return;
+  }
   usedNetwork = true;
   refreshHadError = false;
   goHomeAfterRefreshCancel = false;
   state = State::REFRESHING;
-  statusMessage = SOURCES[0].name;
+  statusMessage = sources[0].name.c_str();
   if (requestUpdateAndWait() != RequestUpdateResult::Rendered) requestUpdate(true);
 
   size_t successfulSources = 0;
   bool cancelled = false;
-  for (uint8_t sourceIndex = 0; sourceIndex < SOURCE_COUNT; ++sourceIndex) {
-    statusMessage = SOURCES[sourceIndex].name;
+  for (uint8_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex) {
+    statusMessage = sources[sourceIndex].name.c_str();
     requestUpdate(true);
 
     size_t fetchedCount = 0;
     if (fetchSource(sourceIndex, fetchedCount, cancelled)) {
+      size_t processedBodies = 0;
       for (size_t itemIndex = 0; itemIndex < fetchedCount; ++itemIndex) {
-        statusMessage = std::string(SOURCES[sourceIndex].name) + " " + std::to_string(itemIndex + 1) + "/" +
+        statusMessage = sources[sourceIndex].name + " " + std::to_string(itemIndex + 1) + "/" +
                         std::to_string(fetchedCount);
         requestUpdate(true);
-        const auto cacheResult = RssArticleCache::ensureCached(feedItems[itemIndex], [this, &cancelled]() {
+        const auto cacheResult = RssArticleCache::ensureCached(
+            feedItems[itemIndex], sources[sourceIndex].name.c_str(), sources[sourceIndex].dropRules.c_str(),
+            sources[sourceIndex].dropStartRules.c_str(), sources[sourceIndex].stopRules.c_str(),
+            [this, &cancelled]() {
           mappedInput.update();
           if (mappedInput.wasHomeGesture()) {
             goHomeAfterRefreshCancel = true;
@@ -723,15 +1119,30 @@ void RssNewsActivity::refreshFeeds() {
           }
           return cancelled;
         });
+        processedBodies = itemIndex + 1;
         if (cacheResult == RssArticleCache::CacheResult::CANCELLED) {
           cancelled = true;
           break;
         }
-        if (cacheResult == RssArticleCache::CacheResult::FAILED) refreshHadError = true;
+        if (cacheResult == RssArticleCache::CacheResult::FAILED ||
+            cacheResult == RssArticleCache::CacheResult::FALLBACK_READY) refreshHadError = true;
       }
       if (!cancelled) {
         mergeSourceArticles(sourceIndex, feedItems, fetchedCount);
         ++successfulSources;
+      } else {
+        // This source was not merged into metadata. Remove any newly-created
+        // body that is not already referenced by the current history.
+        for (size_t i = 0; i < processedBodies; ++i) {
+          bool referenced = false;
+          for (size_t j = 0; j < articleCount; ++j) {
+            if (sameRssItem(feedItems[i], articles[j].item)) {
+              referenced = true;
+              break;
+            }
+          }
+          if (!referenced) RssArticleCache::remove(feedItems[i]);
+        }
       }
     } else if (!cancelled) {
       refreshHadError = true;
@@ -765,13 +1176,13 @@ void RssNewsActivity::refreshFeeds() {
 void RssNewsActivity::seedSimulatorArticles() {
   if (!articles) return;
   articleCount = 0;
-  for (uint8_t sourceIndex = 0; sourceIndex < SOURCE_COUNT; ++sourceIndex) {
+  for (uint8_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex) {
     for (size_t sample = 0; sample < 3; ++sample) {
       CachedArticle& article = articles[articleCount++];
       article = CachedArticle{};
       article.sourceIndex = sourceIndex;
       snprintf(article.item.title, sizeof(article.item.title), "Exemple %u - %s", static_cast<unsigned>(sample + 1),
-               SOURCES[sourceIndex].name);
+               sources[sourceIndex].name.c_str());
       snprintf(article.item.summary, sizeof(article.item.summary),
                "Contenu hors ligne de demonstration pour verifier le cache SD, le tactile et la pagination de lecture.");
       snprintf(article.item.published, sizeof(article.item.published), "2026-09-%02uT12:00:00Z",
@@ -784,7 +1195,12 @@ void RssNewsActivity::loop() {
   if (state == State::WIFI_SELECTION || state == State::REFRESHING) return;
 
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
-    state == State::ARTICLE ? closeArticle() : onGoHome();
+    if (state == State::ARTICLE) {
+      closeArticle();
+    } else {
+      mappedInput.suppressNextBackRelease();
+      finish();
+    }
     return;
   }
 
@@ -825,7 +1241,7 @@ void RssNewsActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    onGoHome();
+    finish();
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {

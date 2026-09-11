@@ -21,12 +21,20 @@ using CancelCallback = std::function<bool()>;
 // from the RSS metadata cache so hundreds of entries do not consume PSRAM.
 std::string bodyPath(const RssItem& item);
 
-// Downloads and extracts readable HTML text when the body is not cached yet.
-// If extraction/networking fails, the feed-provided body is persisted instead.
-CacheResult ensureCached(const RssItem& item, const CancelCallback& shouldCancel);
+// Removes the dedicated offline body for an article. Missing files count as
+// success so callers can prune history without special cases.
+bool remove(const RssItem& item);
 
-// Loads the cached offline body. Returns false when no dedicated body file is
-// available; callers can still fall back to item.summary for legacy entries.
-bool load(const RssItem& item, std::string& outText);
+// Downloads and extracts readable HTML text when the body is not cached yet.
+// A failure leaves no body file; the feed summary remains in RSS metadata
+// and a subsequent manual refresh retries this article.
+CacheResult ensureCached(const RssItem& item, const char* sourceName, const char* dropRules,
+                        const char* dropStartRules, const char* stopRules,
+                        const CancelCallback& shouldCancel);
+
+// Loads a current body (READY), or prepares the feed summary (FALLBACK_READY)
+// without persisting it. AUTH never substitutes a public summary.
+CacheResult load(const RssItem& item, const char* sourceName, const char* dropRules,
+                 const char* dropStartRules, const char* stopRules, std::string& outText);
 
 }  // namespace RssArticleCache

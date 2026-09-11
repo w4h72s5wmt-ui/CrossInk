@@ -5,6 +5,12 @@ bool htmlSpace(const char c) {
   return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
 }
 
+#include "RssHtmlEntities.inc"
+
+constexpr char RSS_LINK_START[] = "\xEE\x80\x80";  // U+E000
+constexpr char RSS_LINK_END[] = "\xEE\x80\x81";    // U+E001
+constexpr size_t RSS_LINK_MARKER_BYTES = 3;
+
 bool htmlEquals(const char* data, const size_t length, const char* literal) {
   const size_t n = std::strlen(literal);
   if (length != n) return false;
@@ -327,6 +333,7 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
   readableHtmlRange(html, htmlLength, begin, end);
   size_t pos = begin;
   size_t anchorTextStart = 0;
+  size_t anchorMarkerStart = 0;
   bool inAnchor = false;
   while (pos < end && textLength < MAX_TEXT_BYTES) {
     if (html[pos] == '<') {
@@ -356,14 +363,20 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
       if (tagEquals(tag.name, "a")) {
         if (!tag.closing && !tag.selfClosing && !inAnchor) {
           inAnchor = true;
+          anchorMarkerStart = textLength;
+          for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_START[i]);
           anchorTextStart = textLength;
         } else if (tag.closing && inAnchor) {
           if (looksLikeVisibleUrl(text + anchorTextStart, textLength - anchorTextStart)) {
-            textLength = anchorTextStart;
+            textLength = anchorMarkerStart;
             while (textLength > 0 && text[textLength - 1] == ' ' &&
                    (next < end && htmlSpace(html[next]))) {
               --textLength;
             }
+          } else if (textLength > anchorTextStart) {
+            for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_END[i]);
+          } else {
+            textLength = anchorMarkerStart;
           }
           inAnchor = false;
         }
@@ -381,7 +394,7 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
       pos = next;
       continue;
     }
-    if (html[pos] == '&') { pos = decodeEntity(html, end, pos, text, textLength); continue; }
+    if (html[pos] == '&') { pos = decodeEntityUtf8(html, end, pos, text, textLength); continue; }
     const unsigned char c = static_cast<unsigned char>(html[pos++]);
     if (htmlSpace(static_cast<char>(c))) appendSpace(text, textLength);
     else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));

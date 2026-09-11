@@ -15,6 +15,7 @@
 #include "SdCardFontSystem.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/TouchHeaderBackButton.h"
+#include "components/UIScale.h"
 #include "fontIds.h"
 
 // Read-only-first decorator used by Notes. Non-multiline entry fields keep the
@@ -57,10 +58,6 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
         finish();
         return;
       }
-      if (pointIn(headerActionRect(), tx, ty)) {
-        handleHeaderActionTap(tx, ty);
-        return;
-      }
       if (pointIn(pencilRect(), tx, ty)) {
         editing = true;
         requestUpdate(true);
@@ -101,8 +98,9 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
 
     renderer.clearScreen();
     const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
-    TouchHeaderBackButton::draw(renderer, header, viewerTitle.c_str(), false, headerActionReserveWidth());
-    drawHeaderAction();
+    // Read-only mode deliberately has no lock affordance. The action is
+    // exposed only after the pencil opens the active keyboard/editor.
+    TouchHeaderBackButton::draw(renderer, header, viewerTitle.c_str(), false, 0);
 
     const size_t firstLine = static_cast<size_t>(viewerPage * viewerLinesPerPage);
     const size_t endLine = std::min(viewerLines.size(), firstLine + static_cast<size_t>(viewerLinesPerPage));
@@ -142,12 +140,41 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
  protected:
   bool viewerEnabled() const { return viewerInputType == InputType::Multiline && headerActionReserveWidth() > 0; }
 
+  virtual bool headerActionLocked() const { return currentNoteLooksLocked(); }
+
   void drawHeaderAction() override {
-    if (currentNoteLooksLocked()) {
+    // Generic Notes text fields (title/search) reserve no header action.
+    // This method is therefore reached only by the active note-content editor.
+    if (headerActionReserveWidth() <= 0) return;
+    if (headerActionLocked()) {
       drawNotesHeaderAction();
     } else {
-      drawOpenLockLight(headerActionRect());
+      drawOpenLockLight(lockArtworkRectOnTitleBaseline(headerActionRect()));
     }
+  }
+
+  Rect lockArtworkRectOnTitleBaseline(Rect rect) const {
+    // Use the exact same title-baseline calculation as the touch header. The
+    // open and closed padlocks both have a 16px body, so placing the body's
+    // bottom edge on the title baseline gives them identical vertical alignment
+    // without moving the much larger touch target.
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    const auto headerLayout = TouchHeaderBackButton::layout(header);
+    const int iconBottom = headerLayout.iconRect.y +
+                           (headerLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2;
+    const int availableOffset = std::max(0, header.y + header.height - iconBottom);
+    const int titleOffset =
+        std::clamp(TouchHeaderBackButton::TITLE_VERTICAL_OFFSET, 0, availableOffset);
+    const auto scale = uiScaleSpec();
+    const int titleBaselineY =
+        headerLayout.iconRect.y + titleOffset +
+        std::max(0, (headerLayout.iconRect.height - renderer.getLineHeight(scale.titleFontId)) / 2) +
+        renderer.getFontAscenderSize(scale.titleFontId);
+
+    constexpr int lockBodyHeight = 16;
+    const int currentBodyBottomY = rect.y + rect.height / 2 + lockBodyHeight - 1;
+    rect.y += titleBaselineY - currentBodyBottomY;
+    return rect;
   }
 
   // NotesActivityCore.inc remaps its historical drawHeaderAction override to
@@ -175,8 +202,14 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
 
   Rect headerActionRect() const {
     const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    const auto backLayout = TouchHeaderBackButton::layout(header);
+    const int controlOffset = std::min(
+        TouchHeaderBackButton::TITLE_VERTICAL_OFFSET,
+        std::max(0, header.y + header.height -
+                        (backLayout.iconRect.y +
+                         (backLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2)));
     const int width = std::max(0, headerActionReserveWidth());
-    return Rect{renderer.getScreenWidth() - width, header.y, width, header.height};
+    return Rect{renderer.getScreenWidth() - width, header.y + controlOffset, width, header.height};
   }
 
   Rect pencilRect() const {
