@@ -101,6 +101,14 @@ void htmlTests() {
   text = extract("<article><p>" + longBody + "</p><p>Conserver &NotARealEntity; intact.</p></article>");
   check(text.find("&NotARealEntity;") != std::string::npos, "unknown entity is not silently deleted");
 
+  text = extract("<article><p>" + longBody + "</p><p>Consultez <a href='https://example.test/tres-longue-adresse?tracking=1'>ce dossier complet</a> pour la suite.</p></article>");
+  check(text.find("ce dossier complet") != std::string::npos && text.find("https://example.test") == std::string::npos,
+        "anchor label preserved while href is discarded");
+  text = extract("<article><p>" + longBody + "</p><p>Source <a href='https://example.test/page'>https://example.test/page?tracking=1</a> fin.</p></article>");
+  check(text.find("https://example.test/page") == std::string::npos && text.find("Source") != std::string::npos &&
+            text.find("fin.") != std::string::npos,
+        "URL used as anchor label is removed");
+
   bool ok = true;
   extract("<article><p>" + std::string(RC::MAX_TEXT_BYTES + 100, 'x') + "</p></article>", &ok);
   check(!ok, "text capacity is not successful extraction");
@@ -152,10 +160,10 @@ void cacheTests() {
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid cache reused");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS7\nAncien corps Figaro avec preambule UI";
+  testFiles[RC::bodyPath(item)] = "XRSS8\nAncien corps avec URLs inutiles";
   H::replies.push_back({page});
-  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS7 pre-cleanup body invalidated");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS8\n", 0) == 0, "XRSS8 body cache version");
+  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS8 URL-bearing body invalidated");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS9\n", 0) == 0, "XRSS9 body cache version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});
