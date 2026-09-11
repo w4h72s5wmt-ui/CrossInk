@@ -1,0 +1,52 @@
+name: X4 Pro 245 Consolidation Audit
+
+on:
+  push:
+    branches:
+      - consolidate-245
+    paths:
+      - .github/workflows/consolidate-245.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flatten-overlays:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout build 244 source
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Apply build 244 overlays once
+        run: |
+          set -euo pipefail
+          python3 tools/apply_x4_notes_minesweeper_consolidated.py
+          python3 tools/apply_x4_2048_integration.py
+          python3 tools/apply_x4_rss_external_cleanup_rules.py
+          python3 tools/apply_x4_rss_sd_rules_only.py
+          python3 tools/apply_x4_rss_figaro_auth.py
+          python3 tools/apply_x4_rss_exit_lifecycle_fix.py
+
+      - name: Validate generated RSS sources
+        run: sh tests/rss/run.sh
+
+      - name: Capture exact flattened diff
+        run: |
+          set -euo pipefail
+          git diff --name-status > consolidation-245-files.txt
+          git diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ > consolidation-245.patch
+          printf '\nFlattened files:\n'
+          cat consolidation-245-files.txt
+
+      - name: Upload consolidation audit
+        uses: actions/upload-artifact@v7
+        with:
+          name: consolidation-245-audit
+          path: |
+            consolidation-245.patch
+            consolidation-245-files.txt
+          if-no-files-found: error
+          retention-days: 7
