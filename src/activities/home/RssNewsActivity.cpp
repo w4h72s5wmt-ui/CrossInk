@@ -625,9 +625,17 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
   if (!articles || !items || sourceIndex >= sourceCount) return;
 
   const size_t historyLimit = std::clamp<size_t>(sources[sourceIndex].historyLimit, 1, ITEMS_PER_SOURCE);
+  const bool requiresCachedBody = RssFigaroAuth::isConfiguredFor(sources[sourceIndex].url);
+  const auto keepHistoryItem = [requiresCachedBody](const RssItem& item) {
+    if (!requiresCachedBody) return true;
+    const std::string path = RssArticleCache::bodyPath(item);
+    return Storage.exists(path.c_str());
+  };
+
   size_t mergedCount = 0;
   const size_t incomingCount = std::min(count, historyLimit);
   for (size_t i = 0; i < incomingCount; ++i) {
+    if (!keepHistoryItem(items[i])) continue;
     bool duplicate = false;
     for (size_t j = 0; j < mergedCount; ++j) {
       if (sameRssItem(items[i], items[j])) {
@@ -642,7 +650,7 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
   }
 
   for (size_t i = 0; i < articleCount && mergedCount < historyLimit; ++i) {
-    if (articles[i].sourceIndex != sourceIndex) continue;
+    if (articles[i].sourceIndex != sourceIndex || !keepHistoryItem(articles[i].item)) continue;
     bool duplicate = false;
     for (size_t j = 0; j < mergedCount; ++j) {
       if (sameRssItem(articles[i].item, items[j])) {
@@ -938,9 +946,9 @@ void RssNewsActivity::openArticle(const size_t articleIndex) {
   const auto bodyResult = RssArticleCache::load(article.item, source.name.c_str(), source.dropRules.c_str(),
                                               source.dropStartRules.c_str(), source.stopRules.c_str(), offlineBody);
   if (bodyResult == RssArticleCache::CacheResult::FALLBACK_READY) {
-    offlineBody.insert(0, "R\u00e9sum\u00e9 du flux uniquement.\nActualise RSS pour r\u00e9essayer l'article.\n\n");
+    offlineBody.insert(0, "Résumé du flux uniquement.\nActualise RSS pour réessayer l'article.\n\n");
   } else if (bodyResult != RssArticleCache::CacheResult::READY) {
-    offlineBody = "Article indisponible hors ligne.\nActualise RSS pour r\u00e9essayer.";
+    offlineBody = "Article indisponible hors ligne.\nActualise RSS pour réessayer.";
   }
   const std::string visibleBody = RssArticleRichText::visibleText(offlineBody);
   if (renderer.isSdCardFont(readerFontId) && !visibleBody.empty()) {
