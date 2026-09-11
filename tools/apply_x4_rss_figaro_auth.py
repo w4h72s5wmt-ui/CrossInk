@@ -203,8 +203,6 @@ news = replace_once(
   }
 ''', "RSS distinguish article/summary/failure on opening",
 )
-# Patch small stable statements rather than one large block because the load
-# replacement above changes the surrounding source before this point.
 news = replace_once(
     news,
     "  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n",
@@ -227,8 +225,8 @@ news = replace_once(
 )
 news = replace_once(
     news,
-    "    screen.target().text(lineRect, articleSummaryLines[i].c_str(), bodyStyle);\n",
-    "    RssArticleRichText::drawLine(screen.target(), lineRect, articleSummaryLines[i], bodyStyle);\n",
+    "    renderer.drawText(readerFontId, lineRect.x, lineRect.y, articleSummaryLines[i].c_str(), true);\n",
+    "    RssArticleRichText::drawLine(renderer, readerFontId, lineRect.x, lineRect.y, articleSummaryLines[i], true);\n",
     "RSS underline inert link labels",
 )
 news = replace_once(
