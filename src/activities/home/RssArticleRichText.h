@@ -1,0 +1,163 @@
+#pragma once
+
+#include <FreeInkUICore.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstring>
+#include <string>
+#include <vector>
+
+// RSS-only lightweight link markup for X4 Pro articles.
+// HTML href values are never persisted. Two private-use UTF-8 markers surround
+// only the visible <a> label in the article cache. The reader removes those
+// markers before wrapping and draws a 1px underline under the corresponding
+// visible text. This preserves meaning without pretending links are actionable.
+namespace RssArticleRichText {
+inline constexpr char LINK_START[] = "\xEE\x80\x80";  // U+E000
+inline constexpr char LINK_END[] = "\xEE\x80\x81";    // U+E001
+inline constexpr size_t LINK_MARKER_BYTES = 3;
+
+struct Span {
+  size_t begin = 0;
+  size_t end = 0;
+};
+
+inline bool markerAt(const char* data, const size_t length, const size_t pos, const char* marker) {
+  return data && pos + LINK_MARKER_BYTES <= length &&
+         std::memcmp(data + pos, marker, LINK_MARKER_BYTES) == 0;
+}
+
+inline bool markerAt(const std::string& text, const size_t pos, const char* marker) {
+  return markerAt(text.data(), text.size(), pos, marker);
+}
+
+inline bool containsMarkup(const std::string& text) {
+  return text.find(LINK_START) != std::string::npos || text.find(LINK_END) != std::string::npos;
+}
+
+inline void decode(const std::string& marked, std::string& plain, std::vector<Span>& spans) {
+  plain.clear();
+  spans.clear();
+  plain.reserve(marked.size());
+  bool inLink = false;
+  size_t linkStart = 0;
+  size_t pos = 0;
+  while (pos < marked.size()) {
+    if (markerAt(marked, pos, LINK_START)) {
+      if (!inLink) {
+        inLink = true;
+        linkStart = plain.size();
+      }
+      pos += LINK_MARKER_BYTES;
+      continue;
+    }
+    if (markerAt(marked, pos, LINK_END)) {
+      if (inLink && plain.size() > linkStart) spans.push_back(Span{linkStart, plain.size()});
+      inLink = false;
+      pos += LINK_MARKER_BYTES;
+      continue;
+    }
+    plain.push_back(marked[pos++]);
+  }
+  if (inLink && plain.size() > linkStart) spans.push_back(Span{linkStart, plain.size()});
+}
+
+inline std::string visibleText(const std::string& marked) {
+  if (!containsMarkup(marked)) return marked;
+  std::string plain;
+  std::vector<Span> spans;
+  decode(marked, plain, spans);
+  return plain;
+}
+
+inline std::string markedRange(const std::string& plain, const std::vector<Span>& spans,
+                               const size_t begin, const size_t end) {
+  std::string out;
+  out.reserve(end - begin + 12);
+  size_t cursor = begin;
+  for (const Span& span : spans) {
+    if (span.end <= begin) continue;
+    if (span.begin >= end) break;
+    const size_t overlapBegin = std::max(begin, span.begin);
+    const size_t overlapEnd = std::min(end, span.end);
+    if (overlapBegin > cursor) out.append(plain, cursor, overlapBegin - cursor);
+    if (overlapEnd > overlapBegin) {
+      out.append(LINK_START, LINK_MARKER_BYTES);
+      out.append(plain, overlapBegin, overlapEnd - overlapBegin);
+      out.append(LINK_END, LINK_MARKER_BYTES);
+    }
+    cursor = std::max(cursor, overlapEnd);
+  }
+  if (cursor < end) out.append(plain, cursor, end - cursor);
+  return out;
+}
+
+// Keep CrossInk's existing renderer.wrappedText() result byte-for-byte, then
+// re-attach link spans to each visual line. This avoids introducing a second
+// wrapping algorithm or changing pagination/line breaks for ordinary prose.
+inline void decorateWrappedLines(const std::string& marked, std::vector<std::string>& lines) {
+  if (!containsMarkup(marked) || lines.empty()) return;
+  std::string plain;
+  std::vector<Span> spans;
+  decode(marked, plain, spans);
+  if (spans.empty()) return;
+
+  size_t searchFrom = 0;
+  for (std::string& line : lines) {
+    if (line.empty()) continue;
+    size_t begin = plain.find(line, searchFrom);
+    if (begin == std::string::npos) begin = plain.find(line);
+    if (begin == std::string::npos) continue;
+    const size_t end = begin + line.size();
+    line = markedRange(plain, spans, begin, end);
+    searchFrom = end;
+  }
+}
+
+inline void drawLine(freeink::ui::DrawTarget& target, const freeink::ui::Rect rect,
+                     const std::string& marked, freeink::ui::TextStyle style) {
+  if (!containsMarkup(marked)) {
+    target.text(rect, marked.c_str(), style);
+    return;
+  }
+
+  style.align = freeink::ui::TextAlign::Left;
+  style.maxLines = 1;
+  int16_t x = rect.x;
+  bool underlined = false;
+  size_t pos = 0;
+  while (pos < marked.size() && x < rect.right()) {
+    if (markerAt(marked, pos, LINK_START)) {
+      underlined = true;
+      pos += LINK_MARKER_BYTES;
+      continue;
+    }
+    if (markerAt(marked, pos, LINK_END)) {
+      underlined = false;
+      pos += LINK_MARKER_BYTES;
+      continue;
+    }
+
+    size_t end = pos;
+    while (end < marked.size() && !markerAt(marked, end, LINK_START) && !markerAt(marked, end, LINK_END)) ++end;
+    if (end == pos) {
+      ++pos;
+      continue;
+    }
+    const std::string segment = marked.substr(pos, end - pos);
+    const int16_t measured = target.measureText(style.font, segment.c_str(), style).width;
+    const int16_t width = std::max<int16_t>(0, std::min<int16_t>(measured, rect.right() - x));
+    if (width > 0) {
+      target.text(freeink::ui::Rect{x, rect.y, width, rect.height}, segment.c_str(), style);
+      if (underlined) {
+        const int16_t y = static_cast<int16_t>(rect.bottom() - 1);
+        target.line(freeink::ui::Point{x, y}, freeink::ui::Point{static_cast<int16_t>(x + width - 1), y}, 1,
+                    freeink::ui::Paint::solid(style.color));
+      }
+      x = static_cast<int16_t>(x + width);
+    }
+    pos = end;
+  }
+}
+}  // namespace RssArticleRichText
