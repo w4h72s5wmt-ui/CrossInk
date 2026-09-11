@@ -2,11 +2,13 @@
 #include "RssFetchDiagnostics.h"
 
 #include <Arduino.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <WiFiClient.h>
 #include <strings.h>
+#include <sys/time.h>
 #include <wolfssl/ssl.h>
 
 #include <algorithm>
@@ -26,6 +28,7 @@ constexpr uint32_t TCP_TIMEOUT_MS = 15000;
 constexpr uint32_t TLS_TIMEOUT_MS = 20000;
 constexpr uint32_t HTTP_TIMEOUT_MS = 30000;
 constexpr uint8_t MAX_REDIRECTS = 5;
+constexpr uint16_t MIN_TLS_CLOCK_YEAR = 2024;
 
 // Build 230 showed that the X4 Pro wolfSSL configuration rejects PEM trust-anchor
 // loading before the handshake. Keep the same public DigiCert Global Root G3
@@ -124,6 +127,49 @@ bool isRedirectStatus(const int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
+// Gregorian civil date -> days since 1970-01-01. This keeps the Figaro path
+// independent of timezone state and avoids mktime()/TZ conversions: the X4 Pro
+// RTC exposed by HalClock is already stored in UTC.
+int64_t daysFromCivil(int year, const unsigned month, const unsigned day) {
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(year - era * 400);
+  const unsigned doy = (153U * (month + (month > 2 ? static_cast<unsigned>(-3) : 9U)) + 2U) / 5U + day - 1U;
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+bool syncSystemClockFromRtc(int& detail) {
+  uint16_t year = 0;
+  uint8_t month = 0, day = 0, hour = 0, minute = 0;
+  if (!halClock.getDateTime(year, month, day, hour, minute)) {
+    detail = -1006;
+    return false;
+  }
+  if (year < MIN_TLS_CLOCK_YEAR || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 ||
+      minute > 59) {
+    detail = -1007;
+    return false;
+  }
+
+  const int64_t epoch = daysFromCivil(static_cast<int>(year), month, day) * 86400LL +
+                        static_cast<int64_t>(hour) * 3600LL + static_cast<int64_t>(minute) * 60LL;
+  if (epoch <= 0) {
+    detail = -1007;
+    return false;
+  }
+
+  timeval tv{};
+  tv.tv_sec = static_cast<time_t>(epoch);
+  tv.tv_usec = 0;
+  if (settimeofday(&tv, nullptr) != 0) {
+    detail = -1008;
+    return false;
+  }
+  detail = 0;
+  return true;
+}
+
 int wolfRecv(WOLFSSL*, char* buf, int size, void* ctx) {
   auto* tcp = static_cast<WiFiClient*>(ctx);
   if (!tcp->connected() && tcp->available() == 0) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
@@ -143,31 +189,24 @@ bool wantIo(const int error) {
   return error == WOLFSSL_ERROR_WANT_READ || error == WOLFSSL_ERROR_WANT_WRITE;
 }
 
-int verifyFigaroPeer(int preverify, WOLFSSL_X509_STORE_CTX* store) {
-  if (preverify == 1) return 1;
-  if (!store) return 0;
-
-  // X4 Pro build 231 reports ASN_BEFORE_DATE_E (-150) even though the reader's
-  // displayed clock is correct. wolfSSL maps the internal ASN date failures to
-  // these X509 store errors before invoking this callback. Accept ONLY the two
-  // certificate-time failures; chain/signature/issuer/hostname failures remain
-  // fatal. Hostname verification is separately armed with check_domain_name().
-  return store->error == WOLFSSL_X509_V_ERR_CERT_NOT_YET_VALID ||
-         store->error == WOLFSSL_X509_V_ERR_CERT_HAS_EXPIRED;
-}
-
 class VerifiedTls {
  public:
   ~VerifiedTls() { close(); }
 
   bool connect(const char* host, int& detail) {
     close();
+    // wolfSSL validates the trust anchor while it is loaded, before the peer
+    // verify callback can run. Build 233 proved libc time was stale there even
+    // while the X4 Pro RTC/UI date was correct. Seed libc from that existing UTC
+    // RTC first, then keep normal strict certificate date verification.
+    if (!syncSystemClockFromRtc(detail)) return false;
+
     tcp.setConnectionTimeout(TCP_TIMEOUT_MS);
     tcp.setTimeout(HTTP_TIMEOUT_MS);
     if (!tcp.connect(host, 443)) { detail = -1001; return false; }
     ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
     if (!ctx) { detail = -1002; return false; }
-    wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, verifyFigaroPeer);
+    wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, nullptr);
     const int trustResult = wolfSSL_CTX_load_verify_buffer(ctx, DIGICERT_GLOBAL_ROOT_G3_DER,
                                                            DIGICERT_GLOBAL_ROOT_G3_DER_SIZE,
                                                            WOLFSSL_FILETYPE_ASN1);
@@ -312,7 +351,7 @@ bool isConfiguredFor(const std::string& url) {
 
 uint64_t cacheKeyFor(const std::string& url) {
   if (!isConfiguredFor(url)) return 0;
-  const uint64_t hash = fnv1a64(session.cookie, fnv1a64("Figaro AUTH wolfSSL verified v7"));
+  const uint64_t hash = fnv1a64(session.cookie, fnv1a64("Figaro AUTH wolfSSL RTC v8"));
   return hash ? hash : 1;
 }
 
