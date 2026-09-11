@@ -61,6 +61,12 @@ new_body_path = '''std::string bodyPath(const RssItem& item) {
     hash = fnv1a64(item.title, hash);
     hash = fnv1a64(item.published, hash);
   }
+  // One-time cache namespace shift for the Figaro share-prefix cleanup.
+  static constexpr uint8_t BODY_NAMESPACE[] = {'S', 'H', 'R', '1'};
+  for (const uint8_t byte : BODY_NAMESPACE) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
   const uint64_t authKey = RssFigaroAuth::cacheKeyFor(item.link);
   for (size_t i = 0; authKey != 0 && i < sizeof(authKey); ++i) {
     hash ^= static_cast<uint8_t>(authKey >> (i * 8U));
@@ -68,7 +74,7 @@ new_body_path = '''std::string bodyPath(const RssItem& item) {
   }
   char name[64];
 '''
-text = replace_once(text, old_body_path, new_body_path, "RSS authenticated cache namespace")
+text = replace_once(text, old_body_path, new_body_path, "RSS Figaro-share cache namespace")
 text = replace_section(
     text, "CacheResult ensureCached(", "}  // namespace RssArticleCache",
     '#include "RssArticleCachePolicy.inc"\n\n', "RSS body-only cache and explicit fallback policy",
@@ -237,8 +243,6 @@ news = replace_once(
 )
 news_path.write_text(news)
 
-# The host regression test is run against this generated cache, so keep its
-# cache-version fixture synchronized with the intentional XRSS10 invalidation.
 test_path = Path("tests/rss/test_article_cache.cpp")
 test = test_path.read_text()
 test = replace_once(test, 'testFiles[RC::bodyPath(item)] = "XRSS8\\nAncien corps avec URLs inutiles";',
@@ -251,4 +255,4 @@ test = replace_once(test, 'rfind("XRSS9\\n", 0) == 0, "XRSS9 body cache version"
                     "RSS current rich-link cache fixture")
 test_path.write_text(test)
 
-print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH, XRSS10 inert-link markup and bounded SD diagnostics.")
+print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH, XRSS10 inert-link markup, share-cleanup namespace and bounded SD diagnostics.")
