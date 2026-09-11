@@ -1,4 +1,4 @@
-name: X4 Pro 245 Consolidation Audit
+name: X4 Pro 245 Direct Source Verification
 
 on:
   push:
@@ -9,57 +9,58 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  flatten-overlays:
+  verify-direct-build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout build 244 source
+      - name: Checkout consolidated sources
         uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      - name: Apply build 244 overlays once
-        run: |
-          set -euo pipefail
-          python3 tools/apply_x4_notes_minesweeper_consolidated.py
-          python3 tools/apply_x4_2048_integration.py
-          python3 tools/apply_x4_rss_external_cleanup_rules.py
-          python3 tools/apply_x4_rss_sd_rules_only.py
-          python3 tools/apply_x4_rss_figaro_auth.py
-          python3 tools/apply_x4_rss_exit_lifecycle_fix.py
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
 
-      - name: Validate generated RSS sources
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-245-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Validate RSS tests directly from source
         run: sh tests/rss/run.sh
 
-      - name: Capture exact flattened diff
+      - name: Build X4 Pro directly from consolidated source
         run: |
           set -euo pipefail
-          git diff --name-status > consolidation-245-files.txt
-          git diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ > consolidation-245.patch
-          printf '\nFlattened files:\n'
-          cat consolidation-245-files.txt
+          pio run -e x4-pro -t clean
+          pio run -e x4-pro | tee pio-x4-pro-245.log
 
-      - name: Commit flattened source
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src tests
-          if git diff --cached --quiet; then
-            echo "No generated source changes to commit."
-            exit 0
-          fi
-          git commit -m "refactor(x4): consolidate build 244 generated app sources"
-          git push origin HEAD:consolidate-245
-
-      - name: Upload consolidation audit
+      - name: Upload verification firmware
         uses: actions/upload-artifact@v7
         with:
-          name: consolidation-245-audit
-          path: |
-            consolidation-245.patch
-            consolidation-245-files.txt
+          name: firmware-x4-pro-consolidated-245
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
-          retention-days: 7
+
+      - name: Upload verification log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-consolidated-245-log
+          path: pio-x4-pro-245.log
+          if-no-files-found: ignore
