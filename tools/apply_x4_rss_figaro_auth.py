@@ -83,19 +83,24 @@ for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc"):
         raise RuntimeError(f"Missing generated RSS include: {name}")
 path.write_text(text)
 
-# The HTML parser is app-owned source. Wire UTF-8 decoding and RSS-local inert
-# link markup directly into extraction. href values are never copied. A visible
-# URL used as the anchor label is dropped; normal linked words are marker-wrapped
-# so the reader can underline them without retaining the destination.
+# Keep the extraction implementation self-contained inside RssArticleCache's
+# namespace. Do not include the rich-text UI header here: it pulls standard/UI
+# headers and RssArticleHtml.inc is included from inside an anonymous namespace.
 html_path = path.parent / "RssArticleHtml.inc"
 html = html_path.read_text()
 html_space = """bool htmlSpace(const char c) {
   return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\f';
 }
 """
-html = replace_once(html, html_space,
-                    html_space + '\n#include "RssHtmlEntities.inc"\n#include "RssArticleRichText.h"\n',
-                    "RSS UTF-8/link markup includes")
+link_markers = '''
+#include "RssHtmlEntities.inc"
+
+constexpr char RSS_LINK_START[] = "\\xEE\\x80\\x80";  // U+E000
+constexpr char RSS_LINK_END[] = "\\xEE\\x80\\x81";    // U+E001
+constexpr size_t RSS_LINK_MARKER_BYTES = 3;
+'''
+html = replace_once(html, html_space, html_space + link_markers,
+                    "RSS UTF-8 decoder and local link markers")
 html = replace_once(html, "decodeEntity(html, end, pos, text, textLength)",
                     "decodeEntityUtf8(html, end, pos, text, textLength)",
                     "RSS UTF-8 HTML entity decoder call")
@@ -125,8 +130,7 @@ new_anchor = '''      if (tagEquals(tag.name, "a")) {
         if (!tag.closing && !tag.selfClosing && !inAnchor) {
           inAnchor = true;
           anchorMarkerStart = textLength;
-          for (size_t i = 0; i < RssArticleRichText::LINK_MARKER_BYTES; ++i)
-            appendChar(text, textLength, RssArticleRichText::LINK_START[i]);
+          for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_START[i]);
           anchorTextStart = textLength;
         } else if (tag.closing && inAnchor) {
           if (looksLikeVisibleUrl(text + anchorTextStart, textLength - anchorTextStart)) {
@@ -136,8 +140,7 @@ new_anchor = '''      if (tagEquals(tag.name, "a")) {
               --textLength;
             }
           } else if (textLength > anchorTextStart) {
-            for (size_t i = 0; i < RssArticleRichText::LINK_MARKER_BYTES; ++i)
-              appendChar(text, textLength, RssArticleRichText::LINK_END[i]);
+            for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_END[i]);
           } else {
             textLength = anchorMarkerStart;
           }
@@ -200,21 +203,27 @@ news = replace_once(
   }
 ''', "RSS distinguish article/summary/failure on opening",
 )
+# Patch small stable statements rather than one large block because the load
+# replacement above changes the surrounding source before this point.
 news = replace_once(
     news,
-    "  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n"
-    "    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);\n"
-    "  }\n\n"
-    "  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);\n"
-    "  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);\n",
+    "  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n",
     "  const std::string visibleBody = RssArticleRichText::visibleText(offlineBody);\n"
-    "  if (renderer.isSdCardFont(readerFontId) && !visibleBody.empty()) {\n"
-    "    renderer.ensureSdCardFontReady(readerFontId, visibleBody.c_str(), /*styleMask=*/0x01);\n"
-    "  }\n\n"
-    "  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);\n"
+    "  if (renderer.isSdCardFont(readerFontId) && !visibleBody.empty()) {\n",
+    "RSS visible body before SD font preparation",
+)
+news = replace_once(
+    news,
+    "    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);\n",
+    "    renderer.ensureSdCardFontReady(readerFontId, visibleBody.c_str(), /*styleMask=*/0x01);\n",
+    "RSS hide link markers from font preparation",
+)
+news = replace_once(
+    news,
+    "  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);\n",
     "  articleSummaryLines = renderer.wrappedText(readerFontId, visibleBody.c_str(), maxWidth, 2000);\n"
     "  RssArticleRichText::decorateWrappedLines(offlineBody, articleSummaryLines);\n",
-    "RSS preserve wrapping while decorating linked words",
+    "RSS preserve native wrapping and decorate link labels",
 )
 news = replace_once(
     news,
