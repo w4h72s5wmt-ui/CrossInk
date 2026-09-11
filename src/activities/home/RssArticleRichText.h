@@ -1,6 +1,6 @@
 #pragma once
 
-#include <FreeInkUICore.h>
+#include <GfxRenderer.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -93,9 +93,9 @@ inline std::string markedRange(const std::string& plain, const std::vector<Span>
   return out;
 }
 
-// Keep CrossInk's existing renderer.wrappedText() result byte-for-byte, then
-// re-attach link spans to each visual line. This avoids introducing a second
-// wrapping algorithm or changing pagination/line breaks for ordinary prose.
+// Keep the existing renderer.wrappedText() result byte-for-byte, then reattach
+// the link spans to the visual lines. Ordinary prose therefore keeps exactly
+// the same wrapping and pagination as before.
 inline void decorateWrappedLines(const std::string& marked, std::vector<std::string>& lines) {
   if (!containsMarkup(marked) || lines.empty()) return;
   std::string plain;
@@ -115,19 +115,20 @@ inline void decorateWrappedLines(const std::string& marked, std::vector<std::str
   }
 }
 
-inline void drawLine(freeink::ui::DrawTarget& target, const freeink::ui::Rect rect,
-                     const std::string& marked, freeink::ui::TextStyle style) {
+// Render with the same GfxRenderer/font path as the normal RSS body. This is
+// important for the user's selected SD reader font: width and drawing must use
+// identical metrics or the underline would drift away from the linked words.
+inline void drawLine(GfxRenderer& renderer, const int fontId, const int x, const int y,
+                     const std::string& marked, const bool black = true) {
   if (!containsMarkup(marked)) {
-    target.text(rect, marked.c_str(), style);
+    renderer.drawText(fontId, x, y, marked.c_str(), black);
     return;
   }
 
-  style.align = freeink::ui::TextAlign::Left;
-  style.maxLines = 1;
-  int16_t x = rect.x;
+  int cursorX = x;
   bool underlined = false;
   size_t pos = 0;
-  while (pos < marked.size() && x < rect.right()) {
+  while (pos < marked.size()) {
     if (markerAt(marked, pos, LINK_START)) {
       underlined = true;
       pos += LINK_MARKER_BYTES;
@@ -145,18 +146,15 @@ inline void drawLine(freeink::ui::DrawTarget& target, const freeink::ui::Rect re
       ++pos;
       continue;
     }
+
     const std::string segment = marked.substr(pos, end - pos);
-    const int16_t measured = target.measureText(style.font, segment.c_str(), style).width;
-    const int16_t width = std::max<int16_t>(0, std::min<int16_t>(measured, rect.right() - x));
-    if (width > 0) {
-      target.text(freeink::ui::Rect{x, rect.y, width, rect.height}, segment.c_str(), style);
-      if (underlined) {
-        const int16_t y = static_cast<int16_t>(rect.bottom() - 1);
-        target.line(freeink::ui::Point{x, y}, freeink::ui::Point{static_cast<int16_t>(x + width - 1), y}, 1,
-                    freeink::ui::Paint::solid(style.color));
-      }
-      x = static_cast<int16_t>(x + width);
+    renderer.drawText(fontId, cursorX, y, segment.c_str(), black);
+    const int width = renderer.getTextWidth(fontId, segment.c_str());
+    if (underlined && width > 0) {
+      const int underlineY = y + std::max(1, renderer.getLineHeight(fontId) - 2);
+      renderer.drawLine(cursorX, underlineY, cursorX + width - 1, underlineY, black);
     }
+    cursorX += width;
     pos = end;
   }
 }
