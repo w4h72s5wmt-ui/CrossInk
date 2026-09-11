@@ -29,7 +29,7 @@ text = replace_once(
     '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n', "RSS Figaro auth include",
 )
 text = replace_once(text, 'constexpr char BODY_MAGIC[] = "XRSS4\\n";',
-                    'constexpr char BODY_MAGIC[] = "XRSS6\\n";', "RSS editorial-root cache version")
+                    'constexpr char BODY_MAGIC[] = "XRSS7\\n";', "RSS UTF-8 cache version")
 text = replace_once(text, 'constexpr size_t MAX_TEXT_BYTES = 48U * 1024U;',
                     'constexpr size_t MAX_TEXT_BYTES = 64U * 1024U;', "RSS X4 Pro article text capacity")
 
@@ -75,10 +75,28 @@ text = replace_section(
 )
 if duplicate in text or "bool persistFallback(" in text:
     raise RuntimeError("RSS obsolete generated implementation remains")
-for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc"):
-    if not (path.parent / name).is_file() or f'#include "{name}"' not in text:
+for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc", "RssHtmlEntities.inc"):
+    if not (path.parent / name).is_file():
         raise RuntimeError(f"Missing RSS-local implementation: {name}")
+for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc"):
+    if f'#include "{name}"' not in text:
+        raise RuntimeError(f"Missing generated RSS include: {name}")
 path.write_text(text)
+
+# The HTML parser is app-owned source. Wire the UTF-8 entity implementation into
+# this generated build directly rather than adding another runtime wrapper.
+html_path = path.parent / "RssArticleHtml.inc"
+html = html_path.read_text()
+html_space = """bool htmlSpace(const char c) {
+  return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\f';
+}
+"""
+html = replace_once(html, html_space, html_space + '\n#include "RssHtmlEntities.inc"\n',
+                    "RSS UTF-8 HTML entity decoder include")
+html = replace_once(html, "decodeEntity(html, end, pos, text, textLength)",
+                    "decodeEntityUtf8(html, end, pos, text, textLength)",
+                    "RSS UTF-8 HTML entity decoder call")
+html_path.write_text(html)
 
 header_path = path.with_suffix(".h")
 header = header_path.read_text()
@@ -138,4 +156,4 @@ news = replace_once(
     "RSS summary-only refresh is not a complete fetch",
 )
 news_path.write_text(news)
-print("Applied RSS-local editorial-root extraction, strict Figaro AUTH and bounded SD diagnostics.")
+print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH and bounded SD diagnostics.")
