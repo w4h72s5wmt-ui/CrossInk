@@ -92,6 +92,17 @@ void htmlTests() {
   text = extract("<main><p>" + longBody + "</p><p>MAIN_BODY</p></main>");
   check(text.find("MAIN_BODY") != std::string::npos, "main fallback");
 
+  // Regression from build 230: the old decoder accepted only ASCII numeric
+  // entities and replaced named French entities with spaces.
+  text = extract("<article><p>" + longBody + "</p><p>caf&eacute; d&#233;j&agrave; gar&ccedil;on c&oelig;ur l&rsquo;Europe &#x20AC;</p></article>");
+  check(text.find("café déjà garçon cœur l’Europe €") != std::string::npos,
+        "French named/numeric entities decode to UTF-8");
+  text = extract("<article><p>" + longBody + "</p><p>Énergie, déjà, français, cœur — été.</p></article>");
+  check(text.find("Énergie, déjà, français, cœur — été.") != std::string::npos,
+        "direct UTF-8 survives extraction");
+  text = extract("<article><p>" + longBody + "</p><p>Conserver &NotARealEntity; intact.</p></article>");
+  check(text.find("&NotARealEntity;") != std::string::npos, "unknown entity is not silently deleted");
+
   bool ok = true;
   extract("<article><p>" + std::string(RC::MAX_TEXT_BYTES + 100, 'x') + "</p></article>", &ok);
   check(!ok, "text capacity is not successful extraction");
@@ -119,10 +130,10 @@ void cacheTests() {
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid cache reused");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS5\nAncien faux corps de quelques lignes";
+  testFiles[RC::bodyPath(item)] = "XRSS6\nAncien corps avec accents supprimes";
   H::replies.push_back({page});
-  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS5 false body invalidated");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS6\n", 0) == 0, "XRSS6 body cache version");
+  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS6 accent-damaged body invalidated");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS7\n", 0) == 0, "XRSS7 body cache version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});
