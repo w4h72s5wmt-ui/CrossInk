@@ -29,7 +29,7 @@ text = replace_once(
     '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n', "RSS Figaro auth include",
 )
 text = replace_once(text, 'constexpr char BODY_MAGIC[] = "XRSS4\\n";',
-                    'constexpr char BODY_MAGIC[] = "XRSS9\\n";', "RSS URL-free article cache version")
+                    'constexpr char BODY_MAGIC[] = "XRSS10\\n";', "RSS rich-link article cache version")
 text = replace_once(text, 'constexpr size_t MAX_TEXT_BYTES = 48U * 1024U;',
                     'constexpr size_t MAX_TEXT_BYTES = 64U * 1024U;', "RSS X4 Pro article text capacity")
 
@@ -75,7 +75,7 @@ text = replace_section(
 )
 if duplicate in text or "bool persistFallback(" in text:
     raise RuntimeError("RSS obsolete generated implementation remains")
-for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc", "RssHtmlEntities.inc"):
+for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc", "RssHtmlEntities.inc", "RssArticleRichText.h"):
     if not (path.parent / name).is_file():
         raise RuntimeError(f"Missing RSS-local implementation: {name}")
 for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc"):
@@ -83,19 +83,69 @@ for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc"):
         raise RuntimeError(f"Missing generated RSS include: {name}")
 path.write_text(text)
 
-# The HTML parser is app-owned source. Wire the UTF-8 entity implementation into
-# this generated build directly rather than adding another runtime wrapper.
+# The HTML parser is app-owned source. Wire UTF-8 decoding and RSS-local inert
+# link markup directly into extraction. href values are never copied. A visible
+# URL used as the anchor label is dropped; normal linked words are marker-wrapped
+# so the reader can underline them without retaining the destination.
 html_path = path.parent / "RssArticleHtml.inc"
 html = html_path.read_text()
 html_space = """bool htmlSpace(const char c) {
   return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\f';
 }
 """
-html = replace_once(html, html_space, html_space + '\n#include "RssHtmlEntities.inc"\n',
-                    "RSS UTF-8 HTML entity decoder include")
+html = replace_once(html, html_space,
+                    html_space + '\n#include "RssHtmlEntities.inc"\n#include "RssArticleRichText.h"\n',
+                    "RSS UTF-8/link markup includes")
 html = replace_once(html, "decodeEntity(html, end, pos, text, textLength)",
                     "decodeEntityUtf8(html, end, pos, text, textLength)",
                     "RSS UTF-8 HTML entity decoder call")
+html = replace_once(
+    html,
+    "  size_t anchorTextStart = 0;\n  bool inAnchor = false;\n",
+    "  size_t anchorTextStart = 0;\n  size_t anchorMarkerStart = 0;\n  bool inAnchor = false;\n",
+    "RSS link marker state",
+)
+old_anchor = '''      if (tagEquals(tag.name, "a")) {
+        if (!tag.closing && !tag.selfClosing && !inAnchor) {
+          inAnchor = true;
+          anchorTextStart = textLength;
+        } else if (tag.closing && inAnchor) {
+          if (looksLikeVisibleUrl(text + anchorTextStart, textLength - anchorTextStart)) {
+            textLength = anchorTextStart;
+            while (textLength > 0 && text[textLength - 1] == ' ' &&
+                   (next < end && htmlSpace(html[next]))) {
+              --textLength;
+            }
+          }
+          inAnchor = false;
+        }
+      }
+'''
+new_anchor = '''      if (tagEquals(tag.name, "a")) {
+        if (!tag.closing && !tag.selfClosing && !inAnchor) {
+          inAnchor = true;
+          anchorMarkerStart = textLength;
+          for (size_t i = 0; i < RssArticleRichText::LINK_MARKER_BYTES; ++i)
+            appendChar(text, textLength, RssArticleRichText::LINK_START[i]);
+          anchorTextStart = textLength;
+        } else if (tag.closing && inAnchor) {
+          if (looksLikeVisibleUrl(text + anchorTextStart, textLength - anchorTextStart)) {
+            textLength = anchorMarkerStart;
+            while (textLength > 0 && text[textLength - 1] == ' ' &&
+                   (next < end && htmlSpace(html[next]))) {
+              --textLength;
+            }
+          } else if (textLength > anchorTextStart) {
+            for (size_t i = 0; i < RssArticleRichText::LINK_MARKER_BYTES; ++i)
+              appendChar(text, textLength, RssArticleRichText::LINK_END[i]);
+          } else {
+            textLength = anchorMarkerStart;
+          }
+          inAnchor = false;
+        }
+      }
+'''
+html = replace_once(html, old_anchor, new_anchor, "RSS inert link label markup")
 html_path.write_text(html)
 
 header_path = path.with_suffix(".h")
@@ -122,7 +172,8 @@ news_path = path.parent / "RssNewsActivity.cpp"
 news = news_path.read_text()
 news = replace_once(
     news, '#include "RssArticleCache.h"\n',
-    '#include "RssArticleCache.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n', "RSS Figaro refresh session include",
+    '#include "RssArticleCache.h"\n#include "RssArticleRichText.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n',
+    "RSS Figaro refresh and rich-link includes",
 )
 news = replace_once(
     news, 'void RssNewsActivity::refreshFeeds() {\n',
@@ -150,10 +201,32 @@ news = replace_once(
 ''', "RSS distinguish article/summary/failure on opening",
 )
 news = replace_once(
+    news,
+    "  if (renderer.isSdCardFont(readerFontId) && !offlineBody.empty()) {\n"
+    "    renderer.ensureSdCardFontReady(readerFontId, offlineBody.c_str(), /*styleMask=*/0x01);\n"
+    "  }\n\n"
+    "  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);\n"
+    "  articleSummaryLines = renderer.wrappedText(readerFontId, offlineBody.c_str(), maxWidth, 2000);\n",
+    "  const std::string visibleBody = RssArticleRichText::visibleText(offlineBody);\n"
+    "  if (renderer.isSdCardFont(readerFontId) && !visibleBody.empty()) {\n"
+    "    renderer.ensureSdCardFontReady(readerFontId, visibleBody.c_str(), /*styleMask=*/0x01);\n"
+    "  }\n\n"
+    "  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 4);\n"
+    "  articleSummaryLines = renderer.wrappedText(readerFontId, visibleBody.c_str(), maxWidth, 2000);\n"
+    "  RssArticleRichText::decorateWrappedLines(offlineBody, articleSummaryLines);\n",
+    "RSS preserve wrapping while decorating linked words",
+)
+news = replace_once(
+    news,
+    "    screen.target().text(lineRect, articleSummaryLines[i].c_str(), bodyStyle);\n",
+    "    RssArticleRichText::drawLine(screen.target(), lineRect, articleSummaryLines[i], bodyStyle);\n",
+    "RSS underline inert link labels",
+)
+news = replace_once(
     news, '        if (cacheResult == RssArticleCache::CacheResult::FAILED) refreshHadError = true;\n',
     '        if (cacheResult == RssArticleCache::CacheResult::FAILED ||\n'
     '            cacheResult == RssArticleCache::CacheResult::FALLBACK_READY) refreshHadError = true;\n',
     "RSS summary-only refresh is not a complete fetch",
 )
 news_path.write_text(news)
-print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH, XRSS9 URL-free cache and bounded SD diagnostics.")
+print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH, XRSS10 inert-link markup and bounded SD diagnostics.")
