@@ -92,8 +92,6 @@ void htmlTests() {
   text = extract("<main><p>" + longBody + "</p><p>MAIN_BODY</p></main>");
   check(text.find("MAIN_BODY") != std::string::npos, "main fallback");
 
-  // Regression from build 230: the old decoder accepted only ASCII numeric
-  // entities and replaced named French entities with spaces.
   text = extract("<article><p>" + longBody + "</p><p>caf&eacute; d&#233;j&agrave; gar&ccedil;on c&oelig;ur l&rsquo;Europe &#x20AC;</p></article>");
   check(text.find("café déjà garçon cœur l’Europe €") != std::string::npos,
         "French named/numeric entities decode to UTF-8");
@@ -115,6 +113,30 @@ void htmlTests() {
   }
 }
 
+void figaroCleanupTests() {
+  const std::string editorial = "Le premier paragraphe editorial doit rester intact après le nettoyage. " + prose;
+  std::string flattened =
+      "Offrir l'article Vous avez encore 7 articles à offrir ce mois-ci. Vous pourrez à nouveau offrir 10 articles le mois prochain. "
+      "Le contenu n'a pas pu être chargé. Veuillez rafraîchir la page. "
+      "Nouvelle fonctionnalité Avec votre compte, vous pouvez désormais sauvegarder des articles pour les lire plus tard sur tous vos appareils. "
+      "Pour sauvegarder un article vous devez être connecté, vous pourrez ainsi les consulter sur tous vos appareils. Créer un compte Se connecter " + editorial;
+  std::vector<char> buffer(flattened.begin(), flattened.end());
+  buffer.push_back('\0');
+  const size_t cleaned = RC::stripFigaroUiPreamble(buffer.data(), flattened.size(), "https://www.lefigaro.fr/test");
+  const std::string out(buffer.data(), cleaned);
+  check(out.find("Offrir l'article") == std::string::npos, "Figaro flattened gift UI removed");
+  check(out.find("Le contenu n'a pas pu être chargé") == std::string::npos, "Figaro load-error UI removed");
+  check(out.find("Sauvegarder") == std::string::npos, "Figaro save UI removed");
+  check(out.find(editorial) == 0, "Figaro editorial suffix preserved exactly");
+
+  std::string normal = "Une phrase normale sur le fait d'offrir quelque chose. " + prose;
+  std::vector<char> normalBuffer(normal.begin(), normal.end());
+  normalBuffer.push_back('\0');
+  const size_t normalLength = RC::stripFigaroUiPreamble(normalBuffer.data(), normal.size(), "https://www.lefigaro.fr/test");
+  check(normalLength == normal.size() && std::string(normalBuffer.data(), normalLength) == normal,
+        "Figaro prose is not removed without multiple UI markers");
+}
+
 void cacheTests() {
   auto item = makeItem();
   std::string out;
@@ -130,10 +152,10 @@ void cacheTests() {
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid cache reused");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS6\nAncien corps avec accents supprimes";
+  testFiles[RC::bodyPath(item)] = "XRSS7\nAncien corps Figaro avec preambule UI";
   H::replies.push_back({page});
-  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS6 accent-damaged body invalidated");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS7\n", 0) == 0, "XRSS7 body cache version");
+  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS7 pre-cleanup body invalidated");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS8\n", 0) == 0, "XRSS8 body cache version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});
@@ -168,7 +190,7 @@ std::string readFile(const char* path) {
   return std::string(std::istreambuf_iterator<char>(stream), {});
 }
 int main(int argc, char** argv) {
-  htmlTests(); cacheTests();
+  htmlTests(); figaroCleanupTests(); cacheTests();
   if (argc >= 3) {
     auto item = makeItem();
     const auto html = readFile(argv[1]);
