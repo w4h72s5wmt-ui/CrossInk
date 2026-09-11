@@ -27,24 +27,11 @@ constexpr uint32_t TLS_TIMEOUT_MS = 20000;
 constexpr uint32_t HTTP_TIMEOUT_MS = 30000;
 constexpr uint8_t MAX_REDIRECTS = 5;
 
-// Public DigiCert Global Root G3. Figaro's current certificate chain is issued
-// through DigiCert Global G3 TLS ECC SHA384 2020 CA1. The leaf hostname is also
-// checked explicitly by wolfSSL before any authenticated HTTP bytes are sent.
-constexpr char DIGICERT_GLOBAL_ROOT_G3[] = R"PEM(-----BEGIN CERTIFICATE-----
-MIICPzCCAcWgAwIBAgIQBVVWvPJepDU1w6QP1atFcjAKBggqhkjOPQQDAzBhMQsw
-CQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3d3cu
-ZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBHMzAe
-Fw0xMzA4MDExMjAwMDBaFw0zODAxMTUxMjAwMDBaMGExCzAJBgNVBAYTAlVTMRUw
-EwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20x
-IDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IEczMHYwEAYHKoZIzj0CAQYF
-K4EEACIDYgAE3afZu4q4C/sLfyHS8L6+c/MzXRq8NOrexpu80JX28MzQC7phW1FG
-fp4tn+6OYwwX7Adw9c+ELkCDnOg/QW07rdOkFFk2eJ0DQ+4QE2xy3q6Ip6FrtUPO
-Z9wj/wMco+I+o0IwQDAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBhjAd
-BgNVHQ4EFgQUs9tIpPmhxdiuNkHMEWNpYim8S8YwCgYIKoZIzj0EAwMDaAAwZQIx
-AK288mw/EkrRLTnDCgmXc/SINoyIJ7vmiI1Qhadj+Z4y3maTD/HMsQmP3Wyr+mt/
-oAIwOWZbwmSNuJ5Q3KjVSaLtx9zRSX8XAbjIho9OjIgrqJqpisXRAL34VOKa5Vt8
-sycX
------END CERTIFICATE-----)PEM";
+// Build 230 showed that the X4 Pro wolfSSL configuration rejects PEM trust-anchor
+// loading before the handshake (diagnostic detail -1003). Keep the same public
+// DigiCert Global Root G3 trust anchor, but embed its DER form so certificate
+// verification does not depend on the optional PEM decoder.
+#include "RssFigaroRootG3.inc"
 
 struct ParsedUrl {
   std::string host;
@@ -165,9 +152,13 @@ class VerifiedTls {
     ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
     if (!ctx) { detail = -1002; return false; }
     wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, nullptr);
-    if (wolfSSL_CTX_load_verify_buffer(ctx, reinterpret_cast<const unsigned char*>(DIGICERT_GLOBAL_ROOT_G3),
-                                      std::strlen(DIGICERT_GLOBAL_ROOT_G3), WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS) {
-      detail = -1003; return false;
+    const int trustResult = wolfSSL_CTX_load_verify_buffer(ctx, DIGICERT_GLOBAL_ROOT_G3_DER,
+                                                           DIGICERT_GLOBAL_ROOT_G3_DER_SIZE,
+                                                           WOLFSSL_FILETYPE_ASN1);
+    if (trustResult != WOLFSSL_SUCCESS) {
+      // Preserve the wolfSSL return code in diagnostics if DER loading ever fails.
+      detail = trustResult;
+      return false;
     }
     wolfSSL_SetIORecv(ctx, wolfRecv);
     wolfSSL_SetIOSend(ctx, wolfSend);
@@ -306,7 +297,7 @@ bool isConfiguredFor(const std::string& url) {
 
 uint64_t cacheKeyFor(const std::string& url) {
   if (!isConfiguredFor(url)) return 0;
-  const uint64_t hash = fnv1a64(session.cookie, fnv1a64("Figaro AUTH wolfSSL verified v5"));
+  const uint64_t hash = fnv1a64(session.cookie, fnv1a64("Figaro AUTH wolfSSL verified v6"));
   return hash ? hash : 1;
 }
 
