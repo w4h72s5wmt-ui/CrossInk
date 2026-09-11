@@ -1,6 +1,19 @@
 // DigiCert Global Root G3 in DER form (579 bytes).
 // wolfSSL on the X4 Pro build rejects PEM loading at runtime; DER avoids the
 // optional PEM decoder while keeping normal certificate-chain verification.
+#include <wolfssl/wolfcrypt/error-crypt.h>
+
+// Arduino-wolfSSL 5.7.2 is built without the OpenSSL X509 compatibility error
+// names used by desktop wolfSSL. Its verify callback still exposes the native
+// wolfCrypt ASN date errors. Alias only those two names locally so the Figaro
+// verifier can tolerate clock-only failures without weakening any other check.
+#ifndef WOLFSSL_X509_V_ERR_CERT_NOT_YET_VALID
+#define WOLFSSL_X509_V_ERR_CERT_NOT_YET_VALID ASN_BEFORE_DATE_E
+#endif
+#ifndef WOLFSSL_X509_V_ERR_CERT_HAS_EXPIRED
+#define WOLFSSL_X509_V_ERR_CERT_HAS_EXPIRED ASN_AFTER_DATE_E
+#endif
+
 constexpr uint8_t DIGICERT_GLOBAL_ROOT_G3_DER[] = {
   0x30, 0x82, 0x02, 0x3f, 0x30, 0x82, 0x01, 0xc5, 0xa0, 0x03, 0x02, 0x01,
   0x02, 0x02, 0x10, 0x05, 0x55, 0x56, 0xbc, 0xf2, 0x5e, 0xa4, 0x35, 0x35,
