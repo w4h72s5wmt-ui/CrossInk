@@ -3,7 +3,7 @@
 // as named or numeric HTML entities even when the page itself is UTF-8.
 
 bool appendUtf8Codepoint(char* out, size_t& outLength, uint32_t cp) {
-  if (cp == 0x00A0) { // NBSP behaves like ordinary whitespace in reader text.
+  if (cp == 0x00A0) {
     appendSpace(out, outLength);
     return true;
   }
@@ -75,7 +75,7 @@ uint32_t namedHtmlEntityCodepoint(const std::string& entity) {
   return 0;
 }
 
-size_t decodeEntity(const char* data, const size_t length, const size_t pos, char* out, size_t& outLength) {
+size_t decodeEntityUtf8(const char* data, const size_t length, const size_t pos, char* out, size_t& outLength) {
   const size_t semicolon = [&]() {
     const size_t maxEnd = std::min(length, pos + 32);
     for (size_t i = pos + 1; i < maxEnd; ++i) {
@@ -90,7 +90,6 @@ size_t decodeEntity(const char* data, const size_t length, const size_t pos, cha
   }
 
   const std::string entity(data + pos + 1, semicolon - pos - 1);
-  uint32_t codepoint = 0;
   bool decoded = false;
   if (!entity.empty() && entity[0] == '#') {
     const bool hex = entity.size() > 2 && (entity[1] == 'x' || entity[1] == 'X');
@@ -98,16 +97,14 @@ size_t decodeEntity(const char* data, const size_t length, const size_t pos, cha
     char* end = nullptr;
     const unsigned long value = std::strtoul(digits, &end, hex ? 16 : 10);
     if (digits != end && end && *end == '\0' && value <= 0x10FFFFUL) {
-      codepoint = static_cast<uint32_t>(value);
-      decoded = appendUtf8Codepoint(out, outLength, codepoint);
+      decoded = appendUtf8Codepoint(out, outLength, static_cast<uint32_t>(value));
     }
   } else {
-    codepoint = namedHtmlEntityCodepoint(entity);
+    const uint32_t codepoint = namedHtmlEntityCodepoint(entity);
     if (codepoint != 0) decoded = appendUtf8Codepoint(out, outLength, codepoint);
   }
 
   if (!decoded && outLength < MAX_TEXT_BYTES) {
-    // Unknown/invalid entities are preserved instead of silently deleting text.
     const size_t bytes = semicolon - pos + 1;
     if (outLength + bytes > MAX_TEXT_BYTES) {
       outLength = MAX_TEXT_BYTES;
