@@ -46,8 +46,6 @@ size_t stripFigaroUiPreamble(char* text, size_t length, const char* articleUrl) 
     if (found != std::string::npos) cut = std::max(cut, found + std::strlen(marker));
   };
 
-  // Prefer the end of the save/login modal when present. The shorter tails are
-  // fallbacks for authenticated or partially rendered page variants.
   extendThrough("Créer un compte Se connecter");
   extendThrough("Creer un compte Se connecter");
   extendThrough("Pour sauvegarder un article vous devez être connecté, vous pourrez ainsi les consulter sur tous vos appareils.");
@@ -58,6 +56,34 @@ size_t stripFigaroUiPreamble(char* text, size_t length, const char* articleUrl) 
   extendThrough("Veuillez rafraichir la page.");
 
   if (cut <= first || cut >= length) return cut >= length ? 0 : length;
+  while (cut < length && std::isspace(static_cast<unsigned char>(text[cut]))) ++cut;
+  if (cut >= length) return 0;
+
+  const size_t remaining = length - cut;
+  std::memmove(text, text + cut, remaining);
+  text[remaining] = '\0';
+  return remaining;
+}
+
+// Figaro may flatten the share bar directly against the first editorial word,
+// e.g. "-Lien copié- Mail- X- MessengerBenjamin...". A line-based feed rule
+// would delete the article opening too. Require the ordered share labels near
+// the start and cut exactly through "Messenger", preserving the suffix bytes.
+size_t stripFigaroSharePrefix(char* text, size_t length, const char* articleUrl) {
+  if (!text || length == 0 || !isFigaroPolicyUrl(articleUrl)) return length;
+
+  const size_t scanLimit = std::min(length, static_cast<size_t>(320));
+  size_t copied = findInsensitive(text, scanLimit, "Lien copié");
+  if (copied == std::string::npos) copied = findInsensitive(text, scanLimit, "Lien copie");
+  if (copied == std::string::npos || copied > 64) return length;
+
+  const size_t mail = findInsensitive(text, scanLimit, "Mail", copied + 4);
+  if (mail == std::string::npos || mail <= copied || mail > copied + 80) return length;
+
+  const size_t messenger = findInsensitive(text, scanLimit, "Messenger", mail + 4);
+  if (messenger == std::string::npos || messenger <= mail || messenger > mail + 96) return length;
+
+  size_t cut = messenger + std::strlen("Messenger");
   while (cut < length && std::isspace(static_cast<unsigned char>(text[cut]))) ++cut;
   if (cut >= length) return 0;
 
@@ -183,11 +209,10 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
       continue;
     }
     const size_t extractedLength = textLength;
-    // The reader does not display the feed summary alongside a cached body.
-    // Keep its first paragraph; real duplicated lines are still deduplicated.
     textLength = cleanExtractedText(text, textLength, item.title, nullptr, sourceName, item.link,
                                     dropRules, dropStartRules, stopRules);
     textLength = stripFigaroUiPreamble(text, textLength, item.link);
+    textLength = stripFigaroSharePrefix(text, textLength, item.link);
     diagnostic.cleaned = textLength;
     LOG_DBG("RSS", "Extraction (%s): html=%zu text=%zu cleaned=%zu", transportName, htmlLength,
             extractedLength, textLength);
