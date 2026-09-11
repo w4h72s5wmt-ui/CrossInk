@@ -48,25 +48,7 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Apply consolidated Notes + Minesweeper overlay
-        run: python3 tools/apply_x4_notes_minesweeper_consolidated.py
-
-      - name: Apply X4 Pro 2048 menu + launcher integration
-        run: python3 tools/apply_x4_2048_integration.py
-
-      - name: Apply editable RSS cleanup rules overlay
-        run: python3 tools/apply_x4_rss_external_cleanup_rules.py
-
-      - name: Apply RSS SD-only publisher cleanup
-        run: python3 tools/apply_x4_rss_sd_rules_only.py
-
-      - name: Apply RSS-local extraction/cache and Figaro auth
-        run: python3 tools/apply_x4_rss_figaro_auth.py
-
-      - name: Apply RSS exit lifecycle fix
-        run: python3 tools/apply_x4_rss_exit_lifecycle_fix.py
-
-      - name: Test generated RSS cache with ASan and UBSan
+      - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
 
       - name: Clean X4 Pro build output
