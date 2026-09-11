@@ -236,4 +236,19 @@ news = replace_once(
     "RSS summary-only refresh is not a complete fetch",
 )
 news_path.write_text(news)
+
+# The host regression test is run against this generated cache, so keep its
+# cache-version fixture synchronized with the intentional XRSS10 invalidation.
+test_path = Path("tests/rss/test_article_cache.cpp")
+test = test_path.read_text()
+test = replace_once(test, 'testFiles[RC::bodyPath(item)] = "XRSS8\\nAncien corps avec URLs inutiles";',
+                    'testFiles[RC::bodyPath(item)] = "XRSS9\\nAncien corps sans marqueurs de liens";',
+                    "RSS old rich-link cache fixture")
+test = replace_once(test, '"XRSS8 URL-bearing body invalidated"',
+                    '"XRSS9 pre-link-markup body invalidated"', "RSS cache invalidation label")
+test = replace_once(test, 'rfind("XRSS9\\n", 0) == 0, "XRSS9 body cache version"',
+                    'rfind("XRSS10\\n", 0) == 0, "XRSS10 body cache version"',
+                    "RSS current rich-link cache fixture")
+test_path.write_text(test)
+
 print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH, XRSS10 inert-link markup and bounded SD diagnostics.")
