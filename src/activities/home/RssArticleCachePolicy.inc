@@ -79,33 +79,65 @@ size_t stripFigaroUiPreamble(char* text, size_t length, const char* articleUrl) 
   return remaining;
 }
 
-// Figaro can flatten the share bar directly against the first editorial word,
-// e.g. "-Lien copié- Mail- X- MessengerBenjamin...". A line-based feed rule
-// cannot remove that safely because it would also discard "Benjamin...".
-// Require the ordered share labels near the beginning, then cut exactly after
-// "Messenger" and preserve the editorial suffix byte-for-byte.
-size_t stripFigaroSharePrefix(char* text, size_t length, const char* articleUrl) {
+bool isFigaroShareSeparator(const char value) {
+  const unsigned char c = static_cast<unsigned char>(value);
+  return std::isspace(c) || value == '-' || value == ':' || value == '|' || value == '>' || value == '*';
+}
+
+// Figaro can flatten its share bar directly into the editorial text, e.g.
+// "...-Lien copié- Mail- X- MessengerBenjamin...". The block is not always a
+// prefix, so scan the complete extracted body. Once the ordered strong labels
+// are confirmed in a tight range, replace only that UI span with one space and
+// preserve both editorial sides byte-for-byte. Prefix/suffix-only occurrences
+// are removed without leaving a leading/trailing blank.
+size_t stripFigaroShareControls(char* text, size_t length, const char* articleUrl) {
   if (!text || length == 0 || !isFigaroPolicyUrl(articleUrl)) return length;
 
-  const size_t scanLimit = std::min(length, static_cast<size_t>(320));
-  size_t copied = findInsensitive(text, scanLimit, "Lien copié");
-  if (copied == std::string::npos) copied = findInsensitive(text, scanLimit, "Lien copie");
-  if (copied == std::string::npos || copied > 64) return length;
+  size_t searchFrom = 0;
+  while (searchFrom < length) {
+    const size_t copiedAccent = findInsensitive(text, length, "Lien copié", searchFrom);
+    const size_t copiedPlain = findInsensitive(text, length, "Lien copie", searchFrom);
+    size_t copied = copiedAccent;
+    if (copied == std::string::npos ||
+        (copiedPlain != std::string::npos && copiedPlain < copied)) {
+      copied = copiedPlain;
+    }
+    if (copied == std::string::npos) break;
 
-  const size_t mail = findInsensitive(text, scanLimit, "Mail", copied + 4);
-  if (mail == std::string::npos || mail <= copied || mail > copied + 80) return length;
+    const size_t scanEnd = std::min(length, copied + static_cast<size_t>(240));
+    const size_t mail = findInsensitive(text, scanEnd, "Mail", copied + 4);
+    const size_t messenger = mail == std::string::npos
+                                 ? std::string::npos
+                                 : findInsensitive(text, scanEnd, "Messenger", mail + 4);
+    if (mail == std::string::npos || mail <= copied || mail > copied + 80 ||
+        messenger == std::string::npos || messenger <= mail || messenger > mail + 96) {
+      searchFrom = copied + 4;
+      continue;
+    }
 
-  const size_t messenger = findInsensitive(text, scanLimit, "Messenger", mail + 4);
-  if (messenger == std::string::npos || messenger <= mail || messenger > mail + 96) return length;
+    size_t eraseStart = copied;
+    while (eraseStart > 0 && isFigaroShareSeparator(text[eraseStart - 1])) --eraseStart;
 
-  size_t cut = messenger + std::strlen("Messenger");
-  while (cut < length && std::isspace(static_cast<unsigned char>(text[cut]))) ++cut;
-  if (cut >= length) return 0;
+    size_t eraseEnd = messenger + std::strlen("Messenger");
+    while (eraseEnd < length && isFigaroShareSeparator(text[eraseEnd])) ++eraseEnd;
 
-  const size_t remaining = length - cut;
-  std::memmove(text, text + cut, remaining);
-  text[remaining] = '\0';
-  return remaining;
+    const bool hasEditorialPrefix = eraseStart > 0;
+    const bool hasEditorialSuffix = eraseEnd < length;
+    const size_t suffixLength = length - eraseEnd;
+    if (hasEditorialPrefix && hasEditorialSuffix) {
+      text[eraseStart] = ' ';
+      std::memmove(text + eraseStart + 1, text + eraseEnd, suffixLength);
+      length = eraseStart + 1 + suffixLength;
+      text[length] = '\0';
+      searchFrom = eraseStart + 1;
+    } else {
+      std::memmove(text + eraseStart, text + eraseEnd, suffixLength);
+      length = eraseStart + suffixLength;
+      text[length] = '\0';
+      searchFrom = eraseStart;
+    }
+  }
+  return length;
 }
 
 bool buildFallbackText(const RssItem& item, const char* sourceName, const char* dropRules,
@@ -124,6 +156,7 @@ bool buildFallbackText(const RssItem& item, const char* sourceName, const char* 
   text[length] = '\0';
   length = cleanExtractedText(text, length, item.title, nullptr, sourceName, item.link,
                               dropRules, dropStartRules, stopRules);
+  length = stripFigaroShareControls(text, length, item.link);
   outText.assign(text, length);
   return !outText.empty();
 }
@@ -230,7 +263,7 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
     textLength = cleanExtractedText(text, textLength, item.title, nullptr, sourceName, item.link,
                                     dropRules, dropStartRules, stopRules);
     textLength = stripFigaroUiPreamble(text, textLength, item.link);
-    textLength = stripFigaroSharePrefix(text, textLength, item.link);
+    textLength = stripFigaroShareControls(text, textLength, item.link);
     diagnostic.cleaned = textLength;
     LOG_DBG("RSS", "Extraction (%s): html=%zu text=%zu cleaned=%zu", transportName, htmlLength,
             extractedLength, textLength);
@@ -276,7 +309,13 @@ CacheResult load(const RssItem& item, const char* sourceName, const char* dropRu
         outText.append(buffer, static_cast<size_t>(count));
       }
       file.close();
-      if (outText.size() == expected) return CacheResult::READY;
+      if (outText.size() == expected) {
+        if (!outText.empty()) {
+          const size_t cleaned = stripFigaroShareControls(&outText[0], outText.size(), item.link);
+          outText.resize(cleaned);
+        }
+        return CacheResult::READY;
+      }
     } else {
       file.close();
     }
