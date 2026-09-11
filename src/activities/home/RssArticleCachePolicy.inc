@@ -7,6 +7,18 @@ bool isFigaroPolicyUrl(const char* articleUrl) {
   return findInsensitive(articleUrl, std::strlen(articleUrl), "lefigaro.fr") != std::string::npos;
 }
 
+// The Figaro no-response breaker protects one feed from repeatedly waiting on
+// the same provider failure. Scope it to the configured source, not the whole
+// RSS refresh: a timeout in Le Figaro must not poison Le Figaro Horlogerie.
+void prepareFigaroSourceSession(const char* articleUrl, const char* sourceName) {
+  if (!isFigaroPolicyUrl(articleUrl) || !sourceName || !sourceName[0]) return;
+  static uint64_t activeSourceKey = 0;
+  const uint64_t sourceKey = fnv1a64(sourceName);
+  if (sourceKey == activeSourceKey) return;
+  RssFigaroAuth::resetSession();
+  activeSourceKey = sourceKey;
+}
+
 // Figaro injects gift/save/error UI inside the editorial <article>. On some
 // page variants all of that UI is flattened onto one long extracted line, so
 // the normal short-line noise filter cannot remove it. Require multiple strong
@@ -128,6 +140,7 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
     RssFetchDiagnostics::write(item.link, diagnostic);
   };
   if (shouldCancel && shouldCancel()) return CacheResult::CANCELLED;
+  prepareFigaroSourceSession(item.link, sourceName);
   const bool useFigaroAuth = RssFigaroAuth::isConfiguredFor(item.link);
   const std::string path = bodyPath(item);
   if (bodyCacheIsCurrent(path)) {
