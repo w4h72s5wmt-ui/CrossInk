@@ -127,6 +127,16 @@ bool isRedirectStatus(const int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
+bool isLeapYear(const uint16_t year) {
+  return (year % 4U == 0U && year % 100U != 0U) || year % 400U == 0U;
+}
+
+uint8_t daysInMonth(const uint16_t year, const uint8_t month) {
+  static constexpr uint8_t DAYS[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12) return 0;
+  return month == 2 && isLeapYear(year) ? 29 : DAYS[month - 1];
+}
+
 // Gregorian civil date -> days since 1970-01-01. This keeps the Figaro path
 // independent of timezone state and avoids mktime()/TZ conversions: the X4 Pro
 // RTC exposed by HalClock is already stored in UTC.
@@ -134,7 +144,8 @@ int64_t daysFromCivil(int year, const unsigned month, const unsigned day) {
   year -= month <= 2;
   const int era = (year >= 0 ? year : year - 399) / 400;
   const unsigned yoe = static_cast<unsigned>(year - era * 400);
-  const unsigned doy = (153U * (month + (month > 2 ? static_cast<unsigned>(-3) : 9U)) + 2U) / 5U + day - 1U;
+  const int shiftedMonth = static_cast<int>(month) + (month > 2 ? -3 : 9);
+  const unsigned doy = (153U * static_cast<unsigned>(shiftedMonth) + 2U) / 5U + day - 1U;
   const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
   return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
 }
@@ -146,7 +157,8 @@ bool syncSystemClockFromRtc(int& detail) {
     detail = -1006;
     return false;
   }
-  if (year < MIN_TLS_CLOCK_YEAR || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 ||
+  const uint8_t monthDays = daysInMonth(year, month);
+  if (year < MIN_TLS_CLOCK_YEAR || year > 2099 || monthDays == 0 || day < 1 || day > monthDays || hour > 23 ||
       minute > 59) {
     detail = -1007;
     return false;
