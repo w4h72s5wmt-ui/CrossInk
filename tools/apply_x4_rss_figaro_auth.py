@@ -16,8 +16,6 @@ def replace_section(text: str, start: str, end: str, replacement: str, label: st
     return text[:first] + replacement + text[last:]
 
 
-# Existing RSS integration step. Implementations live in the app's .inc files;
-# replace old generated implementations, do not layer wrappers around them.
 path = Path("src/activities/home/RssArticleCache.cpp")
 text = path.read_text()
 duplicate = (
@@ -29,7 +27,7 @@ text = replace_once(
     '#include "network/HttpDownloader.h"\n#include "RssFigaroAuth.h"\n#include "RssFetchDiagnostics.h"\n', "RSS Figaro auth include",
 )
 text = replace_once(text, 'constexpr char BODY_MAGIC[] = "XRSS4\\n";',
-                    'constexpr char BODY_MAGIC[] = "XRSS10\\n";', "RSS Figaro share cleanup cache version")
+                    'constexpr char BODY_MAGIC[] = "XRSS9\\n";', "RSS URL-free article cache version")
 text = replace_once(text, 'constexpr size_t MAX_TEXT_BYTES = 48U * 1024U;',
                     'constexpr size_t MAX_TEXT_BYTES = 64U * 1024U;', "RSS X4 Pro article text capacity")
 
@@ -61,6 +59,13 @@ new_body_path = '''std::string bodyPath(const RssItem& item) {
     hash = fnv1a64(item.title, hash);
     hash = fnv1a64(item.published, hash);
   }
+  // Build-local body namespace: forces one clean refetch after the Figaro share-prefix fix
+  // without changing the XRSS9 body format.
+  static constexpr uint8_t BODY_NAMESPACE[] = {'S', 'H', 'R', '1'};
+  for (const uint8_t byte : BODY_NAMESPACE) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
   const uint64_t authKey = RssFigaroAuth::cacheKeyFor(item.link);
   for (size_t i = 0; authKey != 0 && i < sizeof(authKey); ++i) {
     hash ^= static_cast<uint8_t>(authKey >> (i * 8U));
@@ -68,7 +73,7 @@ new_body_path = '''std::string bodyPath(const RssItem& item) {
   }
   char name[64];
 '''
-text = replace_once(text, old_body_path, new_body_path, "RSS authenticated cache namespace")
+text = replace_once(text, old_body_path, new_body_path, "RSS share-cleanup body namespace")
 text = replace_section(
     text, "CacheResult ensureCached(", "}  // namespace RssArticleCache",
     '#include "RssArticleCachePolicy.inc"\n\n', "RSS body-only cache and explicit fallback policy",
@@ -83,8 +88,6 @@ for name in ("RssArticleHtml.inc", "RssArticleCachePolicy.inc"):
         raise RuntimeError(f"Missing generated RSS include: {name}")
 path.write_text(text)
 
-# The HTML parser is app-owned source. Wire the UTF-8 entity implementation into
-# this generated build directly rather than adding another runtime wrapper.
 html_path = path.parent / "RssArticleHtml.inc"
 html = html_path.read_text()
 html_space = """bool htmlSpace(const char c) {
@@ -156,4 +159,4 @@ news = replace_once(
     "RSS summary-only refresh is not a complete fetch",
 )
 news_path.write_text(news)
-print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH, XRSS10 share cleanup cache and bounded SD diagnostics.")
+print("Applied RSS-local UTF-8 extraction, strict Figaro AUTH, XRSS9 share-cleanup namespace and bounded SD diagnostics.")
