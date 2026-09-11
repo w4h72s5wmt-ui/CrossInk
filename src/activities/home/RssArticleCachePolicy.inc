@@ -2,6 +2,71 @@
 // Only extracted article bodies are persisted. Summaries already exist in
 // RssItem and are prepared on opening, never mistaken for a cached article.
 namespace {
+bool isFigaroPolicyUrl(const char* articleUrl) {
+  if (!articleUrl || !articleUrl[0]) return false;
+  return findInsensitive(articleUrl, std::strlen(articleUrl), "lefigaro.fr") != std::string::npos;
+}
+
+// Figaro injects gift/save/error UI inside the editorial <article>. On some
+// page variants all of that UI is flattened onto one long extracted line, so
+// the normal short-line noise filter cannot remove it. Require multiple strong
+// UI markers near the beginning, then cut only through the last known UI tail
+// and preserve the editorial suffix byte-for-byte.
+size_t stripFigaroUiPreamble(char* text, size_t length, const char* articleUrl) {
+  if (!text || length == 0 || !isFigaroPolicyUrl(articleUrl)) return length;
+
+  const size_t scanLimit = std::min(length, static_cast<size_t>(3200));
+  static constexpr const char* MARKERS[] = {
+      "Offrir l'article",
+      "Vous pourrez à nouveau offrir",
+      "Vous pourrez a nouveau offrir",
+      "articles à offrir ce mois",
+      "articles a offrir ce mois",
+      "Le contenu n'a pas pu être chargé",
+      "Le contenu n'a pas pu etre charge",
+      "Sauvegarder un article",
+      "Nouvelle fonctionnalité",
+      "Nouvelle fonctionnalite",
+      "sauvegarder des articles pour les lire plus tard",
+  };
+
+  size_t first = std::string::npos;
+  size_t hits = 0;
+  for (const char* marker : MARKERS) {
+    const size_t found = findInsensitive(text, scanLimit, marker);
+    if (found == std::string::npos) continue;
+    first = std::min(first, found);
+    ++hits;
+  }
+  if (hits < 2 || first == std::string::npos || first > 1800) return length;
+
+  size_t cut = first;
+  const auto extendThrough = [&](const char* marker) {
+    const size_t found = findInsensitive(text, scanLimit, marker, first);
+    if (found != std::string::npos) cut = std::max(cut, found + std::strlen(marker));
+  };
+
+  // Prefer the end of the save/login modal when present. The shorter tails are
+  // fallbacks for authenticated or partially rendered page variants.
+  extendThrough("Créer un compte Se connecter");
+  extendThrough("Creer un compte Se connecter");
+  extendThrough("Pour sauvegarder un article vous devez être connecté, vous pourrez ainsi les consulter sur tous vos appareils.");
+  extendThrough("Pour sauvegarder un article vous devez etre connecte, vous pourrez ainsi les consulter sur tous vos appareils.");
+  extendThrough("Avec votre compte, vous pouvez désormais sauvegarder des articles pour les lire plus tard sur tous vos appareils.");
+  extendThrough("Avec votre compte, vous pouvez desormais sauvegarder des articles pour les lire plus tard sur tous vos appareils.");
+  extendThrough("Veuillez rafraîchir la page.");
+  extendThrough("Veuillez rafraichir la page.");
+
+  if (cut <= first || cut >= length) return cut >= length ? 0 : length;
+  while (cut < length && std::isspace(static_cast<unsigned char>(text[cut]))) ++cut;
+  if (cut >= length) return 0;
+
+  const size_t remaining = length - cut;
+  std::memmove(text, text + cut, remaining);
+  text[remaining] = '\0';
+  return remaining;
+}
+
 bool buildFallbackText(const RssItem& item, const char* sourceName, const char* dropRules,
                        const char* dropStartRules, const char* stopRules, std::string& outText) {
   outText.clear();
@@ -122,6 +187,7 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
     // Keep its first paragraph; real duplicated lines are still deduplicated.
     textLength = cleanExtractedText(text, textLength, item.title, nullptr, sourceName, item.link,
                                     dropRules, dropStartRules, stopRules);
+    textLength = stripFigaroUiPreamble(text, textLength, item.link);
     diagnostic.cleaned = textLength;
     LOG_DBG("RSS", "Extraction (%s): html=%zu text=%zu cleaned=%zu", transportName, htmlLength,
             extractedLength, textLength);
