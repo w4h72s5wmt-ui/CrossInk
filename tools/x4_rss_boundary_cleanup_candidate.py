@@ -88,6 +88,9 @@ test = test_path.read_text()
 test = replace_once(test, 'rfind("XRSS14\\n", 0) == 0, "full body keeps current marker"',
                     'rfind("XRSS15\\n", 0) == 0, "full body keeps current marker"',
                     "full body marker assertion")
+test = replace_once(test, 'rfind("XRSS14\\n", 0) == 0, "refetched current full body version"',
+                    'rfind("XRSS15\\n", 0) == 0, "refetched current full body version"',
+                    "refetched body marker assertion")
 insert_before = '''  bool ok = true;
   extract("<article><p>" + std::string(RC::MAX_TEXT_BYTES + 100, 'x') + "</p></article>", &ok);'''
 new_tests = r'''  // Screenshot regressions: modern news templates use adjacent inline wrappers
