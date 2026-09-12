@@ -42,6 +42,7 @@ void silentRestartToReader(bool cleanImageBaseOnEntry = false);  // currently-op
 // Network activities use these after releasing Wi-Fi resources. They retain
 // the fast restart but apply the user's frontlight wake preference.
 void silentRestartAfterNetwork();
+void silentRestartAfterNetworkToRssMenu();
 void silentRestartToReaderAfterNetwork(bool cleanImageBaseOnEntry = false);
 // Reboots immediately after an activity releases exclusive raw storage.
 void restartToHomeAfterStorageHandoff();

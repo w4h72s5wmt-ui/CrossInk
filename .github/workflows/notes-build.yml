@@ -35,29 +35,10 @@ jobs:
             ~/.platformio/platforms
           key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
 
-      - name: Cache incremental X4 Pro build
-        uses: actions/cache@v4
-        with:
-          path: |
-            .pio/build/x4-pro
-            .pio/libdeps/x4-pro
-          key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-x4-pro-pio6.1.19-
-
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Apply Notes + Minesweeper overlays without historical RSS bootstrap
-        run: python3 tools/apply_x4_notes_minesweeper_without_rss.py
-
-      - name: Apply X4 Pro 2048 menu + launcher integration
-        run: python3 tools/apply_x4_2048_integration.py
-
-      - name: Apply minimal RSS host bridge
-        run: python3 tools/apply_x4_rss_host_bridge.py
-
-      - name: Test consolidated RSS cache with ASan and UBSan
+      - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
 
       - name: Clean X4 Pro build output
