@@ -20,7 +20,9 @@ constexpr char CACHE_DIR[] = "/.crosspoint/rss_articles";
 // Plain-text cache format marker. Bumping this invalidates old extracted text
 // after the cleaner changes, while keeping files human-readable on the SD card.
 constexpr char BODY_MAGIC[] = "XRSS11\n";
+constexpr char FALLBACK_MAGIC[] = "XRSSF1\n";
 constexpr size_t BODY_MAGIC_BYTES = sizeof(BODY_MAGIC) - 1;
+static_assert(sizeof(FALLBACK_MAGIC) == sizeof(BODY_MAGIC), "RSS body markers must have equal width");
 constexpr size_t MAX_HTML_BYTES = 1536U * 1024U;
 constexpr size_t MAX_TEXT_BYTES = 64U * 1024U;
 constexpr size_t HTTP_BUFFER_SIZE = 4096;
@@ -549,20 +551,28 @@ size_t cleanExtractedText(char* text, const size_t length, const char* articleTi
   return write;
 }
 
-bool bodyCacheIsCurrent(const std::string& path) {
-  if (!Storage.exists(path.c_str())) return false;
+enum class BodyCacheKind : uint8_t { NONE, FULL, FALLBACK };
+
+BodyCacheKind bodyCacheKind(const std::string& path) {
+  if (!Storage.exists(path.c_str())) return BodyCacheKind::NONE;
   FsFile file;
-  if (!Storage.openFileForRead("RSS", path, file)) return false;
+  if (!Storage.openFileForRead("RSS", path, file)) return BodyCacheKind::NONE;
   char marker[BODY_MAGIC_BYTES] = {};
-  const bool valid = file.size() > BODY_MAGIC_BYTES && file.size() <= BODY_MAGIC_BYTES + MAX_TEXT_BYTES &&
-                     file.read(marker, BODY_MAGIC_BYTES) == static_cast<int>(BODY_MAGIC_BYTES) &&
-                     std::memcmp(marker, BODY_MAGIC, BODY_MAGIC_BYTES) == 0;
+  const bool sized = file.size() > BODY_MAGIC_BYTES && file.size() <= BODY_MAGIC_BYTES + MAX_TEXT_BYTES;
+  const bool readMarker = sized && file.read(marker, BODY_MAGIC_BYTES) == static_cast<int>(BODY_MAGIC_BYTES);
   file.close();
-  return valid;
+  if (!readMarker) return BodyCacheKind::NONE;
+  if (std::memcmp(marker, BODY_MAGIC, BODY_MAGIC_BYTES) == 0) return BodyCacheKind::FULL;
+  if (std::memcmp(marker, FALLBACK_MAGIC, BODY_MAGIC_BYTES) == 0) return BodyCacheKind::FALLBACK;
+  return BodyCacheKind::NONE;
 }
 
-bool writeTextFile(const std::string& path, const char* text, const size_t length) {
-  if (!text || length == 0) return false;
+bool bodyCacheIsCurrent(const std::string& path) { return bodyCacheKind(path) == BodyCacheKind::FULL; }
+
+bool bodyCacheIsReadable(const std::string& path) { return bodyCacheKind(path) != BodyCacheKind::NONE; }
+
+bool writeTextFile(const std::string& path, const char* marker, const char* text, const size_t length) {
+  if (!marker || std::strlen(marker) != BODY_MAGIC_BYTES || !text || length == 0) return false;
   Storage.ensureDirectoryExists("/.crosspoint");
   Storage.ensureDirectoryExists(CACHE_DIR);
   const std::string tempPath = path + ".tmp";
@@ -570,7 +580,7 @@ bool writeTextFile(const std::string& path, const char* text, const size_t lengt
 
   FsFile file;
   if (!Storage.openFileForWrite("RSS", tempPath, file)) return false;
-  const size_t markerWritten = file.write(reinterpret_cast<const uint8_t*>(BODY_MAGIC), BODY_MAGIC_BYTES);
+  const size_t markerWritten = file.write(reinterpret_cast<const uint8_t*>(marker), BODY_MAGIC_BYTES);
   const size_t textWritten = file.write(reinterpret_cast<const uint8_t*>(text), length);
   const bool synced = markerWritten == BODY_MAGIC_BYTES && textWritten == length && file.sync();
   file.close();
@@ -684,13 +694,18 @@ size_t fallbackRuleCutoff(const char* text, const size_t length, const char* sto
 
 }  // namespace
 
-std::string bodyPath(const RssItem& item) {
-  uint64_t hash = fnv1a64(item.link);
-  if (!item.link[0]) {
-    hash = fnv1a64(item.title, hash);
-    hash = fnv1a64(item.published, hash);
+ArticleIdentity identityOf(const RssItem& item) { return ArticleIdentity{item.link, item.title, item.published}; }
+
+std::string bodyPath(const ArticleIdentity& identity) {
+  const char* link = identity.link ? identity.link : "";
+  const char* title = identity.title ? identity.title : "";
+  const char* published = identity.published ? identity.published : "";
+  uint64_t hash = fnv1a64(link);
+  if (!link[0]) {
+    hash = fnv1a64(title, hash);
+    hash = fnv1a64(published, hash);
   }
-  const uint64_t authKey = RssFigaroAuth::cacheKeyFor(item.link);
+  const uint64_t authKey = RssFigaroAuth::cacheKeyFor(link);
   for (size_t i = 0; authKey != 0 && i < sizeof(authKey); ++i) {
     hash ^= static_cast<uint8_t>(authKey >> (i * 8U));
     hash *= 1099511628211ULL;
@@ -700,14 +715,24 @@ std::string bodyPath(const RssItem& item) {
   return name;
 }
 
-bool hasCurrentBody(const RssItem& item) { return bodyCacheIsCurrent(bodyPath(item)); }
+std::string bodyPath(const RssItem& item) { return bodyPath(identityOf(item)); }
 
-bool remove(const RssItem& item) {
-  const std::string path = bodyPath(item);
+bool hasCurrentBody(const ArticleIdentity& identity) { return bodyCacheIsCurrent(bodyPath(identity)); }
+
+bool hasCurrentBody(const RssItem& item) { return hasCurrentBody(identityOf(item)); }
+
+bool hasReadableBody(const ArticleIdentity& identity) { return bodyCacheIsReadable(bodyPath(identity)); }
+
+bool hasReadableBody(const RssItem& item) { return hasReadableBody(identityOf(item)); }
+
+bool remove(const ArticleIdentity& identity) {
+  const std::string path = bodyPath(identity);
   if (!Storage.exists(path.c_str())) return true;
   Storage.remove(path.c_str());
   return !Storage.exists(path.c_str());
 }
+
+bool remove(const RssItem& item) { return remove(identityOf(item)); }
 
 #include "RssArticleCachePolicy.inc"
 

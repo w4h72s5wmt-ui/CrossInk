@@ -1,6 +1,7 @@
 // RSS-local fetch/cache policy. Included in namespace RssArticleCache.
-// Only extracted article bodies are persisted. Summaries already exist in
-// RssItem and are prepared on opening, never mistaken for a cached article.
+// Extracted article bodies and sanitized public-feed fallbacks are persisted
+// separately from lightweight history metadata. Full bodies are still retried
+// whenever only a fallback exists.
 namespace {
 bool isFigaroPolicyUrl(const char* articleUrl) {
   if (!articleUrl || !articleUrl[0]) return false;
@@ -176,19 +177,27 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
   prepareFigaroSourceSession(item.link, sourceName);
   const bool useFigaroAuth = RssFigaroAuth::isConfiguredFor(item.link);
   const std::string path = bodyPath(item);
-  if (bodyCacheIsCurrent(path)) {
+  const BodyCacheKind existingCache = bodyCacheKind(path);
+  if (existingCache == BodyCacheKind::FULL) {
     report("cache-hit", HttpDownloader::OK);
     return CacheResult::READY;
   }
-  if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
+  if (existingCache == BodyCacheKind::NONE && Storage.exists(path.c_str())) Storage.remove(path.c_str());
 
   const auto unavailable = [&]() {
     if (useFigaroAuth) {
       LOG_ERR("RSS", "Figaro AUTH failed; no public fallback cached: %s", item.link);
       return CacheResult::FAILED;
     }
-    LOG_ERR("RSS", "Body unavailable; summary only, retry on manual refresh: %s", item.link);
-    return item.summary[0] ? CacheResult::FALLBACK_READY : CacheResult::FAILED;
+    std::string fallbackText;
+    if (buildFallbackText(item, sourceName, dropRules, dropStartRules, stopRules, fallbackText) &&
+        writeTextFile(path, FALLBACK_MAGIC, fallbackText.data(), fallbackText.size())) {
+      LOG_DBG("RSS", "Persisted feed-summary fallback: %s", item.link);
+      return CacheResult::FALLBACK_READY;
+    }
+    if (bodyCacheKind(path) == BodyCacheKind::FALLBACK) return CacheResult::FALLBACK_READY;
+    LOG_ERR("RSS", "Body/fallback unavailable; retry on manual refresh: %s", item.link);
+    return CacheResult::FAILED;
   };
   if (!item.link[0]) {
     report("no-url", HttpDownloader::HTTP_ERROR);
@@ -277,7 +286,7 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
       report("cancelled", HttpDownloader::ABORTED);
       return CacheResult::CANCELLED;
     }
-    if (!writeTextFile(path, text, textLength)) {
+    if (!writeTextFile(path, BODY_MAGIC, text, textLength)) {
       LOG_ERR("RSS", "Could not persist article body: %s", item.link);
       report("body-write", HttpDownloader::FILE_ERROR);
       return unavailable();
@@ -288,34 +297,43 @@ CacheResult ensureCached(const RssItem& item, const char* sourceName, const char
   return unavailable();
 }
 
-CacheResult load(const RssItem& item, const char* sourceName, const char* dropRules,
-                 const char* dropStartRules, const char* stopRules, std::string& outText) {
+CacheResult load(const ArticleIdentity& identity, std::string& outText) {
   outText.clear();
-  const std::string path = bodyPath(item);
+  const std::string path = bodyPath(identity);
+  const BodyCacheKind kind = bodyCacheKind(path);
+  if (kind == BodyCacheKind::NONE) {
+    if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
+    return CacheResult::FAILED;
+  }
+
   FsFile file;
-  if (Storage.exists(path.c_str()) && Storage.openFileForRead("RSS", path, file)) {
-    char marker[BODY_MAGIC_BYTES] = {};
-    const size_t size = static_cast<size_t>(file.size());
-    const bool valid = size > BODY_MAGIC_BYTES && size <= BODY_MAGIC_BYTES + MAX_TEXT_BYTES &&
-                       file.read(marker, BODY_MAGIC_BYTES) == static_cast<int>(BODY_MAGIC_BYTES) &&
-                       std::memcmp(marker, BODY_MAGIC, BODY_MAGIC_BYTES) == 0;
-    if (valid) {
-      const size_t expected = size - BODY_MAGIC_BYTES;
-      char buffer[768];
-      while (outText.size() < expected) {
-        const size_t want = std::min(expected - outText.size(), sizeof(buffer));
-        const int count = file.read(buffer, want);
-        if (count <= 0) break;
-        outText.append(buffer, static_cast<size_t>(count));
-      }
-      file.close();
-      if (outText.size() == expected) return CacheResult::READY;
-    } else {
-      file.close();
-    }
+  if (!Storage.openFileForRead("RSS", path, file)) return CacheResult::FAILED;
+  char marker[BODY_MAGIC_BYTES] = {};
+  const size_t size = static_cast<size_t>(file.size());
+  const bool validSize = size > BODY_MAGIC_BYTES && size <= BODY_MAGIC_BYTES + MAX_TEXT_BYTES;
+  const bool validMarker = validSize &&
+                           file.read(marker, BODY_MAGIC_BYTES) == static_cast<int>(BODY_MAGIC_BYTES);
+  if (!validMarker) {
+    file.close();
+    Storage.remove(path.c_str());
+    return CacheResult::FAILED;
+  }
+
+  const size_t expected = size - BODY_MAGIC_BYTES;
+  char buffer[768];
+  while (outText.size() < expected) {
+    const size_t want = std::min(expected - outText.size(), sizeof(buffer));
+    const int count = file.read(buffer, want);
+    if (count <= 0) break;
+    outText.append(buffer, static_cast<size_t>(count));
+  }
+  file.close();
+  if (outText.size() != expected) {
     outText.clear();
     Storage.remove(path.c_str());
+    return CacheResult::FAILED;
   }
-  return buildFallbackText(item, sourceName, dropRules, dropStartRules, stopRules, outText)
-             ? CacheResult::FALLBACK_READY : CacheResult::FAILED;
+  return kind == BodyCacheKind::FULL ? CacheResult::READY : CacheResult::FALLBACK_READY;
 }
+
+CacheResult load(const RssItem& item, std::string& outText) { return load(identityOf(item), outText); }

@@ -1,50 +1,65 @@
-name: CrossInk X4 Pro RSS metadata freeze
+name: CrossInk Notes + Demineur + 2048 X4 Pro
 
 on:
   push:
-    branches: [x4-pro-rss-metadata-opt]
+    branches: [x4-pro-notes]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  freeze-x4-pro-rss-metadata:
+  build-x4-pro-notes:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout CrossInk sources
         uses: actions/checkout@v6
         with:
           submodules: recursive
-          fetch-depth: 2
 
-      - name: Apply validated RSS metadata candidate
-        run: |
-          python3 tools/fix_x4_rss_metadata_generator.py
-          python3 tools/x4_rss_metadata_opt_candidate.py
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("tests/rss/test_fetch_diagnostics.cpp")
-          text = p.read_text()
-          old = '  check(!Storage.exists(RC::bodyPath(item).c_str()), "capacity failure still leaves no body");\n'
-          new = '  check(RC::hasReadableBody(item) && !RC::hasCurrentBody(item), "capacity failure persists retriable fallback");\n'
-          if text.count(old) != 1:
-              raise SystemExit("diagnostic fallback expectation anchor mismatch")
-          p.write_text(text.replace(old, new, 1))
-          PY
-          git diff --check
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
 
-      - name: Test validated RSS tree
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
 
-      - name: Freeze clean source tree
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
+      - name: Build X4 Pro firmware directly from sources
         run: |
-          git fetch origin x4-pro-notes --depth=1
-          git checkout FETCH_HEAD -- .github/workflows/notes-build.yml
-          git rm -f tools/x4_rss_metadata_opt_candidate.py tools/fix_x4_rss_metadata_generator.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src tests/rss .github/workflows/notes-build.yml
-          git diff --cached --check
-          git diff --cached --stat
-          git commit -m "perf(rss): shrink historical metadata memory"
-          git push --force origin HEAD:x4-pro-rss-metadata-generated
+          set -euo pipefail
+          pio run -e x4-pro | tee pio-x4-pro-notes.log
+
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-build-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-build-${{ github.run_number }}-log
+          path: pio-x4-pro-notes.log
+          if-no-files-found: ignore
