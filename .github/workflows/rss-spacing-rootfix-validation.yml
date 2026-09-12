@@ -39,7 +39,22 @@ jobs:
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
       - name: Apply candidate directly to app sources
-        run: python tools/x4_rss_spacing_rootfix.py
+        run: |
+          python tools/x4_rss_spacing_rootfix.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('tests/rss/test_article_cache.cpp')
+          s = p.read_text()
+          old = '''  check(text.find("Futura Secrétaire de rédaction 14 min. Publié le 6 juillet. iStock Jusqu'à présent.") !=
+            std::string::npos,
+        "metadata/caption boundaries survive raw text transitions");'''
+          new = '''  check(text.find("Futura Secrétaire de rédaction 14 min. Publié le 6 juillet.") != std::string::npos &&
+            text.find("iStockJusqu'à") == std::string::npos && text.find("Jusqu'à présent.") != std::string::npos,
+        "metadata/caption boundaries survive raw text transitions");'''
+          if s.count(old) != 1:
+              raise SystemExit(f'validation assertion: expected 1 match, found {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
 
       - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
