@@ -1,12 +1,12 @@
-name: CrossInk Notes + Demineur + 2048 X4 Pro
+name: CrossInk Missile Command X4 Pro
 
 on:
   push:
-    branches: [x4-pro-notes]
+    branches: [x4-pro-missile-command]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-x4-pro-notes:
@@ -20,6 +20,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
+
+      - name: Integrate Missile Command into Home source
+        run: python tools/integrate_missile_command.py
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -52,7 +55,7 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-build-${{ github.run_number }}
+          name: firmware-x4-pro-missile-command-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -60,6 +63,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-build-${{ github.run_number }}-log
+          name: x4-pro-missile-command-${{ github.run_number }}-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
+
+      - name: Consolidate clean source after successful build
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm tools/integrate_missile_command.py
+          git show 540404358344d77767c268e9858ff6401370201d:.github/workflows/notes-build.yml > .github/workflows/notes-build.yml
+          git add src/activities/home/HomeActivity.cpp src/activities/home/HomeActivity.h .github/workflows/notes-build.yml
+          git commit -m "feat(missile): integrate Missile Command into Home"
+          git push origin HEAD:x4-pro-missile-command
