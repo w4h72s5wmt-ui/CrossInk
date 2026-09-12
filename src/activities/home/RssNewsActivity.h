@@ -58,11 +58,13 @@ class RssNewsActivity final : public Activity {
   static constexpr size_t MAX_ARTICLES = MAX_SOURCES * ITEMS_PER_SOURCE;
   static constexpr size_t FEED_ITEM_CAPACITY = ITEMS_PER_SOURCE;
   static constexpr size_t FEED_CONFIG_MAX_BYTES = 4096;
-  static constexpr size_t LIST_META_CAPACITY = 64;
+  static constexpr size_t LIST_SUBTITLE_CAPACITY = 64;
+  static constexpr size_t LIST_VALUE_CAPACITY = 8;
+  static constexpr size_t LIST_META_CAPACITY = LIST_SUBTITLE_CAPACITY + LIST_VALUE_CAPACITY;
   static constexpr uint32_t CACHE_MAGIC = 0x52535332;  // RSS2
-  // V5 stores lightweight history metadata; old development caches are
-  // intentionally invalidated rather than migrated.
-  static constexpr uint16_t CACHE_VERSION = 5;
+  // V6 adds the one-byte reading-time estimate to lightweight history metadata.
+  // Old development metadata is intentionally invalidated rather than migrated.
+  static constexpr uint16_t CACHE_VERSION = 6;
   static constexpr char CACHE_PATH[] = "/.crosspoint/rss_news.bin";
   static constexpr char CACHE_TMP_PATH[] = "/.crosspoint/rss_news.tmp";
   static constexpr char FEEDS_DIR[] = "/RSS";

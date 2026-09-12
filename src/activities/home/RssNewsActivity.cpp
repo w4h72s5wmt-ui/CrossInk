@@ -174,6 +174,17 @@ Rect sortTouchRect(const GfxRenderer& renderer, const MappedInputManager& input)
   const Rect header = TouchHeaderBackButton::headerRect(renderer, input);
   return Rect{header.x + header.width - SORT_TOUCH_WIDTH, header.y, SORT_TOUCH_WIDTH, header.height};
 }
+
+uint8_t estimateReadingMinutes(const RssItem& item) {
+  std::string cachedText;
+  const auto result = RssArticleCache::load(item, cachedText);
+  if (result != RssArticleCache::CacheResult::READY &&
+      result != RssArticleCache::CacheResult::FALLBACK_READY) {
+    return 0;
+  }
+  const std::string visibleText = RssArticleRichText::visibleText(cachedText);
+  return RssArticleMetadata::readingMinutesForText(visibleText.c_str(), visibleText.size());
+}
 }  // namespace
 
 RssNewsActivity::RssNewsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -682,7 +693,10 @@ bool RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
         break;
       }
     }
-    if (!duplicate) merged[mergedCount++] = RssArticleMetadata::fromItem(sourceIndex, items[i]);
+    if (!duplicate) {
+      merged[mergedCount++] =
+          RssArticleMetadata::fromItem(sourceIndex, items[i], estimateReadingMinutes(items[i]));
+    }
   }
 
   for (size_t i = 0; i < articleCount && mergedCount < historyLimit; ++i) {
@@ -841,14 +855,19 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
     item = fui::ListItem{};
     item.label = article.title;
     char* meta = listMetaText + i * LIST_META_CAPACITY;
+    char* value = meta + LIST_SUBTITLE_CAPACITY;
     char dateText[16] = {};
     if (formatPublishedDate(article.published, dateText, sizeof(dateText))) {
-      std::snprintf(meta, LIST_META_CAPACITY, "%s - %s", sources[article.sourceIndex].name.c_str(), dateText);
+      std::snprintf(meta, LIST_SUBTITLE_CAPACITY, "%s - %s", sources[article.sourceIndex].name.c_str(), dateText);
     } else {
-      std::snprintf(meta, LIST_META_CAPACITY, "%s", sources[article.sourceIndex].name.c_str());
+      std::snprintf(meta, LIST_SUBTITLE_CAPACITY, "%s", sources[article.sourceIndex].name.c_str());
     }
     item.subtitle = meta;
-    item.value = nullptr;
+    value[0] = '\0';
+    if (article.readingMinutes > 0) {
+      std::snprintf(value, LIST_VALUE_CAPACITY, "[%u min]", static_cast<unsigned>(article.readingMinutes));
+    }
+    item.value = value[0] ? value : nullptr;
     item.actionValue = static_cast<int16_t>(i + 1);
   }
 
@@ -858,11 +877,13 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
   props.selectedIndex = static_cast<int16_t>(selectorIndex);
   props.action = ACTION_ROW;
   props.inputMask = fui::InputTouch;
-  props.valueInset = 0;
+  props.valueInset = 2;
+  props.valueText = screen.theme().smallText;
+  props.valueText.bold = true;
   const auto rows = configureUiList(props, screen.theme(), screen.body(), UiListRowType::WithSubtitle);
   // Strong title / quiet metadata. Keep one title line for deterministic row
-  // height and button navigation; removing the value column gives it the full
-  // usable width instead of squeezing it between source/date decorations.
+  // height and button navigation; the compact trailing value is reserved for
+  // the reading-time cartouche and does not affect subtitle width.
   props.labelText.bold = true;
   props.labelText.maxLines = 1;
   props.subtitleText.maxLines = 1;
@@ -1233,6 +1254,7 @@ void RssNewsActivity::seedSimulatorArticles() {
       CachedArticle& article = articles[articleCount++];
       article = CachedArticle{};
       article.sourceIndex = sourceIndex;
+      article.readingMinutes = static_cast<uint8_t>(sample + 1);
       snprintf(article.title, sizeof(article.title), "Exemple %u - %s", static_cast<unsigned>(sample + 1),
                sources[sourceIndex].name.c_str());
       snprintf(article.published, sizeof(article.published), "2026-09-%02uT12:00:00Z",
