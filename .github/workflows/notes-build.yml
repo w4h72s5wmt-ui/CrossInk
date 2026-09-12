@@ -44,6 +44,19 @@ jobs:
           git diff --check
           git diff --stat
 
+      - name: Freeze clean source tree
+        run: |
+          git fetch --depth=1 origin 3d896fb4377f58516a893c302b2e89bdbaaf28af
+          git checkout 3d896fb4377f58516a893c302b2e89bdbaaf28af -- .github/workflows/notes-build.yml
+          git rm tools/x4_opt_candidate.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests/rss/test_article_cache.cpp .github/workflows/notes-build.yml
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m "perf(x4): optimize RSS memory and native app exit"
+          git push --force origin HEAD:x4-pro-opt-generated
+
       - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
 
@@ -54,17 +67,6 @@ jobs:
         run: |
           set -euo pipefail
           pio run -e x4-pro | tee pio-x4-pro-notes.log
-
-      - name: Freeze validated source tree
-        run: |
-          git checkout 3d896fb4377f58516a893c302b2e89bdbaaf28af -- .github/workflows/notes-build.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src tests/rss/test_article_cache.cpp
-          git diff --cached --check
-          git diff --cached --stat
-          git commit -m "perf(x4): optimize RSS memory and native app exit"
-          git push --force origin HEAD:x4-pro-opt-generated
 
       - name: Upload X4 Pro candidate firmware
         uses: actions/upload-artifact@v7
