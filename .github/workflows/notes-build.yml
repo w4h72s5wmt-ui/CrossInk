@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
-          fetch-depth: 2
+          fetch-depth: 4
 
       - uses: actions/setup-python@v6
         with:
@@ -46,7 +46,7 @@ jobs:
           git checkout b62b3be6fb167e41eb44eddb2b64ca89883231d9 -- .github/workflows/notes-build.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/activities/home/RssNewsActivity.cpp .github/workflows/notes-build.yml tools/x4_rss_scrollbar_candidate.py
+          git add -A src/activities/home/RssNewsActivity.cpp .github/workflows/notes-build.yml tools/x4_rss_scrollbar_candidate.py
           git commit -m "feat(rss): add article scroll indicator"
           git push origin HEAD:x4-pro-rss-scrollbar
 
