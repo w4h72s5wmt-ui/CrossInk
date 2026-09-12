@@ -49,6 +49,7 @@ class MissileCommandActivity final : public Activity {
     int16_t x = 0;
     int16_t y = 0;
     uint8_t phase = 0;
+    uint8_t phaseTicks = 0;
     bool active = false;
   };
 

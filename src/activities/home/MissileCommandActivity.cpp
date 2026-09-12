@@ -30,16 +30,12 @@ constexpr uint32_t SCORE_MAGIC = 0x4D435331;  // MCS1
 constexpr uint8_t SAVE_VERSION = 1;
 constexpr uint8_t SCORE_VERSION = 1;
 
-// Gameplay, touch and e-ink stay strictly locked 1:1. GAME_FRAME_US is only
-// the minimum cycle gate; on the X4 Pro UC8279 the blocking FAST refresh
-// (~590 ms measured) is slower and therefore sets the real visible cadence.
+// Gameplay, touch and e-ink are intentionally locked to one 100 ms cadence.
+// There is no catch-up simulation and no frame running ahead of the panel:
+// one cycle consumes input, advances the world exactly once, renders that exact
+// state, then waits for the FAST refresh to complete before another cycle.
 constexpr int64_t GAME_FRAME_US = 100000;
-
-// Motion is tuned to the measured UC8279 physical frame while preserving the
-// strict one-input / one-simulation / one-refresh contract.
-constexpr uint16_t ENEMY_SPEED_SCALE = 6;
-constexpr uint16_t PLAYER_MISSILE_SPEED = 500;
-constexpr uint8_t EXPLOSION_PHASE_STEP = 3;
+constexpr int EXPLOSION_PHASE_TICKS = 1;
 constexpr const char* DIFFICULTY_LABELS[] = {"Facile", "Normal", "Difficile"};
 
 
@@ -425,11 +421,9 @@ void MissileCommandActivity::tickGame(int64_t nowUs) {
 
   for (auto& explosion : explosions_) {
     if (!explosion.active) continue;
-    if (static_cast<uint8_t>(explosion.phase + EXPLOSION_PHASE_STEP) >= 7) {
-      explosion.active = false;
-    } else {
-      explosion.phase = static_cast<uint8_t>(explosion.phase + EXPLOSION_PHASE_STEP);
-    }
+    if (++explosion.phaseTicks < EXPLOSION_PHASE_TICKS) continue;
+    explosion.phaseTicks = 0;
+    if (++explosion.phase >= 7) explosion.active = false;
   }
 
   resolveCollisions();
@@ -462,10 +456,9 @@ void MissileCommandActivity::spawnEnemy(int64_t nowUs) {
   slot->targetX = static_cast<int16_t>(geometry.field.x + (geometry.field.width * (city + 1)) / (kCityCount + 1));
   slot->targetY = static_cast<int16_t>(geometry.groundY);
   slot->progress = 0;
-  // Keep approximately the intended real-world descent time at the measured
-  // ~590 ms UC8279 visible cadence.
-  const int baseSpeed = 12 + difficulty_ * 3 + std::min<int>(wave_ / 2, 4) * 3;
-  slot->speed = static_cast<uint16_t>(baseSpeed * ENEMY_SPEED_SCALE);
+  // Speeds are per 100 ms synchronized frame. Scale from the previous 33 ms
+  // cadence so real-world descent time stays approximately unchanged.
+  slot->speed = static_cast<uint16_t>(12 + difficulty_ * 3 + std::min<int>(wave_ / 2, 4) * 3);
   slot->active = true;
   ++enemiesSpawned_;
 
@@ -494,7 +487,7 @@ void MissileCommandActivity::launchPlayerMissile(int x, int y) {
   slot->targetX = static_cast<int16_t>(std::clamp(x, geometry.field.x, geometry.field.x + geometry.field.width - 1));
   slot->targetY = static_cast<int16_t>(std::clamp(y, geometry.field.y, geometry.groundY - 4));
   slot->progress = 0;
-  slot->speed = PLAYER_MISSILE_SPEED;
+  slot->speed = 140;
   slot->active = true;
 }
 
@@ -504,6 +497,7 @@ void MissileCommandActivity::createExplosion(int x, int y) {
     explosion.x = static_cast<int16_t>(x);
     explosion.y = static_cast<int16_t>(y);
     explosion.phase = 0;
+    explosion.phaseTicks = 0;
     explosion.active = true;
     return;
   }
