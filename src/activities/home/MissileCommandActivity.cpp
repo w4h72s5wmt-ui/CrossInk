@@ -1,5 +1,6 @@
 #include "MissileCommandActivity.h"
 
+#include <BoardConfig.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -26,6 +27,7 @@ constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/missile-command.bin";
 constexpr const char SCORE_PATH[] = "/.crosspoint/missile-command-score.bin";
 constexpr const char BENCHMARK_PATH[] = "/missile-command-benchmark.csv";
+constexpr const char CONTROLLER_DIAG_PATH[] = "/missile-command-controller.txt";
 constexpr uint32_t SAVE_MAGIC = 0x4D434D31;   // MCM1
 constexpr uint32_t SCORE_MAGIC = 0x4D435331;  // MCS1
 constexpr uint8_t SAVE_VERSION = 1;
@@ -40,6 +42,59 @@ constexpr uint32_t BENCHMARK_BATCH_FRAMES = 100;
 constexpr int EXPLOSION_PHASE_TICKS = 1;
 constexpr const char* DIFFICULTY_LABELS[] = {"Facile", "Normal", "Difficile"};
 FsFile benchmarkLogFile;
+
+
+const char* activeDisplayControllerName() {
+  switch (BoardConfig::ACTIVE.displayController) {
+    case BoardConfig::DisplayController::SSD1677: return "SSD1677";
+    case BoardConfig::DisplayController::UC8179: return "UC8179";
+    case BoardConfig::DisplayController::UC8279: return "UC8279";
+    default: return "OTHER";
+  }
+}
+
+void writeControllerDiagnostic() {
+  FsFile file;
+  if (!Storage.openFileForWrite("MISSILE CTRL", CONTROLLER_DIAG_PATH, file)) return;
+
+#ifdef FREEINK_X4PRO_FAST_DU_SHORTCUT
+  constexpr unsigned fastDuShortcut = 1;
+#else
+  constexpr unsigned fastDuShortcut = 0;
+#endif
+#if FREEINK_DRIVER_SSD1677
+  constexpr unsigned ssd1677Compiled = 1;
+#else
+  constexpr unsigned ssd1677Compiled = 0;
+#endif
+#if FREEINK_DRIVER_UC8179
+  constexpr unsigned uc8179Compiled = 1;
+#else
+  constexpr unsigned uc8179Compiled = 0;
+#endif
+#if FREEINK_DRIVER_UC8279_X4
+  constexpr unsigned uc8279Compiled = 1;
+#else
+  constexpr unsigned uc8279Compiled = 0;
+#endif
+
+  char text[320];
+  const int length = std::snprintf(
+      text, sizeof(text),
+      "controller=%s\ncontroller_id=%u\nboard_id=%u\nwidth=%u\nheight=%u\nspi_hz=%lu\n"
+      "x4pro_fast_du_shortcut=%u\nssd1677_compiled=%u\nuc8179_compiled=%u\nuc8279_x4_compiled=%u\n",
+      activeDisplayControllerName(), static_cast<unsigned>(BoardConfig::ACTIVE.displayController),
+      static_cast<unsigned>(BoardConfig::ACTIVE.board), static_cast<unsigned>(BoardConfig::ACTIVE.displayWidth),
+      static_cast<unsigned>(BoardConfig::ACTIVE.displayHeight),
+      static_cast<unsigned long>(BoardConfig::ACTIVE.displaySpiHz), fastDuShortcut, ssd1677Compiled,
+      uc8179Compiled, uc8279Compiled);
+
+  if (length > 0 && length < static_cast<int>(sizeof(text))) {
+    file.write(reinterpret_cast<const uint8_t*>(text), static_cast<size_t>(length));
+    file.sync();
+  }
+  file.close();
+}
 
 Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -142,6 +197,7 @@ void MissileCommandActivity::onEnter() {
   benchmarkLogFile.close();
   benchmarkLogOpen_ = false;
   benchmarkSessionStartUs_ = esp_timer_get_time();
+  writeControllerDiagnostic();
   openBenchmarkLog();
   loadHighScore();
   hasSavedGame_ = loadSavedGame();
