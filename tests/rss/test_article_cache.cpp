@@ -167,16 +167,33 @@ void figaroCleanupTests() {
 void metadataTests() {
   auto item = makeItem();
   std::strcpy(item.published, "2026-09-12T12:00:00Z");
-  const auto record = RssArticleMetadata::fromItem(3, item);
+  const auto record = RssArticleMetadata::fromItem(3, item, 7);
   check(sizeof(RssItem) == 4684, "production-sized RssItem host model");
-  check(sizeof(record) == 588, "lightweight RSS history record is 588 bytes");
-  check(record.sourceIndex == 3 && std::strcmp(record.title, item.title) == 0 &&
+  check(sizeof(record) == 589, "lightweight RSS history record is 589 bytes with read time");
+  check(record.sourceIndex == 3 && record.readingMinutes == 7 && std::strcmp(record.title, item.title) == 0 &&
             std::strcmp(record.link, item.link) == 0 && std::strcmp(record.published, item.published) == 0,
-        "history record keeps source/title/link/date");
+        "history record keeps source/read-time/title/link/date");
   check(RssArticleMetadata::same(record, item), "history identity matches source RssItem");
   auto changed = item;
   std::strcpy(changed.summary, "un autre resume ne change pas l'identite");
   check(RssArticleMetadata::same(record, changed), "summary is not part of history identity");
+
+  const std::string words220 = [] {
+    std::string text;
+    for (int i = 0; i < 220; ++i) text += i ? " mot" : "mot";
+    return text;
+  }();
+  check(RssArticleMetadata::readingMinutesForText(words220.c_str(), words220.size()) == 1,
+        "220 words rounds to one minute");
+  const std::string words221 = words220 + " mot";
+  check(RssArticleMetadata::readingMinutesForText(words221.c_str(), words221.size()) == 2,
+        "221 words rounds up to two minutes");
+  check(RssArticleMetadata::readingMinutesForText("", 0) == 0, "empty text has no reading estimate");
+  std::string huge;
+  huge.reserve(220 * 101 * 2);
+  for (int i = 0; i < 220 * 101; ++i) huge += i ? " x" : "x";
+  check(RssArticleMetadata::readingMinutesForText(huge.c_str(), huge.size()) == 99,
+        "reading estimate is capped at 99 minutes");
 }
 
 void cacheTests() {
