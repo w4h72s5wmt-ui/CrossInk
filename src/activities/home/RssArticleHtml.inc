@@ -440,6 +440,16 @@ bool anchorBoundaryGluesBeforeSource(const char* html, const size_t length, cons
   return false;
 }
 
+bool semanticInlineBoundaryTag(const char* name) {
+  // Modern news templates often build flex/grid rows from adjacent inline
+  // wrappers. We only separate sibling wrappers; ordinary inline emphasis is
+  // deliberately left untouched so <strong>mot</strong>s stays "mots".
+  return tagEquals(name, "span") || tagEquals(name, "strong") || tagEquals(name, "b") ||
+         tagEquals(name, "em") || tagEquals(name, "i") || tagEquals(name, "u") ||
+         tagEquals(name, "small") || tagEquals(name, "mark") || tagEquals(name, "label") ||
+         tagEquals(name, "time") || tagEquals(name, "abbr") || tagEquals(name, "cite");
+}
+
 bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {
   textLength = 0;
   if (!html || !text || htmlLength == 0) return false;
@@ -449,6 +459,7 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
   size_t anchorTextStart = 0;
   size_t anchorMarkerStart = 0;
   bool inAnchor = false;
+  bool closedSemanticInline = false;
   while (pos < end && textLength < MAX_TEXT_BYTES) {
     if (html[pos] == '<') {
       if (startsWithInsensitive(html, end, pos, "<!--")) {
@@ -464,9 +475,18 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
       if (tag.end == std::string::npos) break;
       const size_t next = tag.end + 1;
       if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
+        closedSemanticInline = false;
         pos = next;
         continue;
       }
+      const bool semanticInline = semanticInlineBoundaryTag(tag.name);
+      if (!tag.closing && semanticInline && closedSemanticInline && !inAnchor && textLength > 0 &&
+          !anchorBoundaryGluesAfterText(text, textLength)) {
+        // Adjacent wrappers are commonly independent CSS cells despite having
+        // no literal whitespace in source: </span><strong>, </span><span>, …
+        appendRemovalBoundary(text, textLength);
+      }
+      if (!tag.closing) closedSemanticInline = false;
       if (!tag.closing && htmlRawText(tag.name)) {
         const size_t afterRemoved = skipHtmlRaw(html, end, tag);
         if (textLength > 0 && afterRemoved < end) appendRemovalBoundary(text, textLength);
@@ -521,6 +541,7 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
           inAnchor = false;
         }
       }
+      if (tag.closing && semanticInline && !inAnchor) closedSemanticInline = true;
       if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {
         appendLineBreak(text, textLength);
       } else if (tagEquals(tag.name, "li")) {
@@ -534,7 +555,12 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
       pos = next;
       continue;
     }
-    if (html[pos] == '&') { pos = decodeEntityUtf8(html, end, pos, text, textLength); continue; }
+    if (html[pos] == '&') {
+      closedSemanticInline = false;
+      pos = decodeEntityUtf8(html, end, pos, text, textLength);
+      continue;
+    }
+    closedSemanticInline = false;
     const unsigned char c = static_cast<unsigned char>(html[pos++]);
     if (htmlSpace(static_cast<char>(c))) appendSpace(text, textLength);
     else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));

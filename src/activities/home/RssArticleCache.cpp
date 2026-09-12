@@ -19,7 +19,7 @@ namespace {
 constexpr char CACHE_DIR[] = "/.crosspoint/rss_articles";
 // Plain-text cache format marker. Bumping this invalidates old extracted text
 // after the cleaner changes, while keeping files human-readable on the SD card.
-constexpr char BODY_MAGIC[] = "XRSS14\n";
+constexpr char BODY_MAGIC[] = "XRSS15\n";
 constexpr char FALLBACK_MAGIC[] = "XRSSF4\n";
 constexpr size_t BODY_MAGIC_BYTES = sizeof(BODY_MAGIC) - 1;
 static_assert(sizeof(FALLBACK_MAGIC) == sizeof(BODY_MAGIC), "RSS body markers must have equal width");
