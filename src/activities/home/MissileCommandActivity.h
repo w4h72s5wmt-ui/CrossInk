@@ -76,32 +76,19 @@ class MissileCommandActivity final : public Activity {
   uint16_t wave_ = 1;
   uint16_t enemiesSpawned_ = 0;
   uint16_t enemiesResolved_ = 0;
-  int64_t lastLogicTickUs_ = 0;
-  int64_t lastFrameRequestUs_ = 0;
+  int64_t lastCycleUs_ = 0;
   int64_t nextSpawnUs_ = 0;
   bool hasSavedGame_ = false;
-  bool frameDirty_ = false;
   bool sceneNeedsFullRedraw_ = true;
-  bool refreshInFlight_ = false;
 
-  // Rendering state belongs to the render task. The gameplay state above can
-  // advance several 40 ms simulation ticks while an e-ink waveform is still
-  // running; these caches let the next frame draw only the new trail segments.
-  std::array<int16_t, kMaxEnemyMissiles> enemyDrawX_{};
-  std::array<int16_t, kMaxEnemyMissiles> enemyDrawY_{};
-  std::array<uint16_t, kMaxEnemyMissiles> enemyDrawProgress_{};
-  std::array<uint8_t, kMaxEnemyMissiles> enemyDrawValid_{};
-  std::array<int16_t, kMaxPlayerMissiles> playerDrawX_{};
-  std::array<int16_t, kMaxPlayerMissiles> playerDrawY_{};
-  std::array<uint16_t, kMaxPlayerMissiles> playerDrawProgress_{};
-  std::array<uint8_t, kMaxPlayerMissiles> playerDrawValid_{};
-  std::array<uint8_t, kMaxExplosions> explosionDrawPhase_{};
-  std::array<uint8_t, kMaxExplosions> explosionDrawValid_{};
-  std::array<uint8_t, kCityCount> drawnCitiesAlive_{};
-  std::array<uint8_t, kBatteryCount> drawnAmmo_{};
-  uint32_t drawnScore_ = UINT32_MAX;
-  uint16_t drawnWave_ = UINT16_MAX;
-  int drawnCityCount_ = -1;
+  // Main task captures touch into the next frame; render task clears this only
+  // after the blocking FAST refresh completes. This enforces a strict 1:1
+  // relationship between input, simulation state and the visible e-ink frame.
+  std::atomic<bool> cycleRenderPending_{false};
+  bool pendingTap_ = false;
+  int16_t pendingTapX_ = 0;
+  int16_t pendingTapY_ = 0;
+  bool pendingBack_ = false;
 
   static void menuScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
@@ -115,10 +102,7 @@ class MissileCommandActivity final : public Activity {
   void renderPlaying();
   void renderGameOver();
   void drawFullPlayingScene();
-  bool drawIncrementalPlayingScene();
-  void waitForPendingRefresh();
-  void startFastRefresh();
-  void resetRenderCaches();
+  void drawPlayingFrame();
 
   void newGame();
   void continueGame();

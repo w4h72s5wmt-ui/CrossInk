@@ -30,15 +30,12 @@ constexpr uint32_t SCORE_MAGIC = 0x4D435331;  // MCS1
 constexpr uint8_t SAVE_VERSION = 1;
 constexpr uint8_t SCORE_VERSION = 1;
 
-// Simulation and panel cadence are deliberately independent. The old version
-// advanced the game once per screen refresh, so a slow e-ink waveform made the
-// whole game slow. We now simulate at 25 Hz and only ask for a new visible frame
-// every 120 ms. If the panel is still busy the render task waits, while the main
-// task continues simulating and accepting touch input.
-constexpr int64_t LOGIC_TICK_US = 33333;
-constexpr int64_t FRAME_INTERVAL_US = 33333;
-constexpr int MAX_CATCHUP_TICKS = 8;
-constexpr int EXPLOSION_PHASE_TICKS = 2;
+// Gameplay, touch and e-ink are intentionally locked to one 100 ms cadence.
+// There is no catch-up simulation and no frame running ahead of the panel:
+// one cycle consumes input, advances the world exactly once, renders that exact
+// state, then waits for the FAST refresh to complete before another cycle.
+constexpr int64_t GAME_FRAME_US = 100000;
+constexpr int EXPLOSION_PHASE_TICKS = 1;
 constexpr const char* DIFFICULTY_LABELS[] = {"Facile", "Normal", "Difficile"};
 
 Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
@@ -130,21 +127,20 @@ void MissileCommandActivity::onEnter() {
   visibleRows_ = 1;
   initialViewportPending_ = true;
   uiReady_ = false;
-  frameDirty_ = false;
   sceneNeedsFullRedraw_ = true;
-  refreshInFlight_ = false;
+  cycleRenderPending_.store(false);
+  pendingTap_ = false;
+  pendingBack_ = false;
   loadHighScore();
   hasSavedGame_ = loadSavedGame();
   selectedIndex_ = difficulty_;
   applySharedUiTheme(app_, uiTarget_);
   app_.on(ACTION_ROW, &MissileCommandActivity::onRowEvent, this);
   app_.setScreen(&MissileCommandActivity::menuScreen, this);
-  resetRenderCaches();
   requestUpdate();
 }
 
 void MissileCommandActivity::onExit() {
-  waitForPendingRefresh();
   if (viewMode_ == ViewMode::Playing && aliveCityCount() > 0) saveGame();
   saveHighScore();
   Activity::onExit();
@@ -217,39 +213,51 @@ void MissileCommandActivity::loopMenu() {
 
 void MissileCommandActivity::loopPlaying() {
   const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+
+  // Capture input continuously, but consume it only at the next 100 ms game
+  // frame. This gives touch exactly the same temporal state as simulation and
+  // display instead of letting input or gameplay run ahead of the e-ink panel.
   if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, geometry.header)) ||
       mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
-    returnToMenu();
-    return;
+    pendingBack_ = true;
   }
 
   int tx = 0;
   int ty = 0;
-  if (mappedInput.wasScreenTapped(tx, ty) && pointInRect(geometry.field, tx, ty) && ty < geometry.groundY) {
-    launchPlayerMissile(tx, ty);
-    frameDirty_ = true;
+  if (!pendingBack_ && mappedInput.wasScreenTapped(tx, ty) && pointInRect(geometry.field, tx, ty) &&
+      ty < geometry.groundY) {
+    pendingTapX_ = static_cast<int16_t>(tx);
+    pendingTapY_ = static_cast<int16_t>(ty);
+    pendingTap_ = true;
   }
+
+  // A new world step is forbidden until the frame representing the previous
+  // step has finished on the panel. This is the core 1:1 game/display lock.
+  if (cycleRenderPending_.load()) return;
 
   const int64_t now = esp_timer_get_time();
-  if (lastLogicTickUs_ == 0) lastLogicTickUs_ = now;
+  if (lastCycleUs_ == 0) lastCycleUs_ = now;
+  if (now - lastCycleUs_ < GAME_FRAME_US) return;
+  lastCycleUs_ = now;
 
-  int ticks = 0;
-  while (now - lastLogicTickUs_ >= LOGIC_TICK_US && ticks < MAX_CATCHUP_TICKS && viewMode_ == ViewMode::Playing) {
-    lastLogicTickUs_ += LOGIC_TICK_US;
-    tickGame(lastLogicTickUs_);
-    frameDirty_ = true;
-    ++ticks;
-  }
-  if (ticks == MAX_CATCHUP_TICKS && now - lastLogicTickUs_ >= LOGIC_TICK_US) {
-    lastLogicTickUs_ = now;
+  if (pendingBack_) {
+    pendingBack_ = false;
+    pendingTap_ = false;
+    returnToMenu();
+    return;
   }
 
-  if (viewMode_ == ViewMode::Playing && frameDirty_ && now - lastFrameRequestUs_ >= FRAME_INTERVAL_US) {
-    frameDirty_ = false;
-    lastFrameRequestUs_ = now;
-    requestUpdate();
+  if (pendingTap_) {
+    launchPlayerMissile(pendingTapX_, pendingTapY_);
+    pendingTap_ = false;
   }
+
+  tickGame(now);
+  if (viewMode_ != ViewMode::Playing) return;
+
+  cycleRenderPending_.store(true);
+  requestUpdate();
 }
 
 void MissileCommandActivity::loopGameOver() {
@@ -292,7 +300,6 @@ void MissileCommandActivity::activateRow(int row) {
 }
 
 void MissileCommandActivity::newGame() {
-  waitForPendingRefresh();
   clearSavedGame();
   enemies_ = {};
   players_ = {};
@@ -304,16 +311,15 @@ void MissileCommandActivity::newGame() {
   startWave();
   viewMode_ = ViewMode::Playing;
   uiReady_ = false;
-  lastLogicTickUs_ = esp_timer_get_time();
-  lastFrameRequestUs_ = 0;
-  frameDirty_ = false;
+  lastCycleUs_ = esp_timer_get_time();
+  pendingTap_ = false;
+  pendingBack_ = false;
   sceneNeedsFullRedraw_ = true;
-  resetRenderCaches();
+  cycleRenderPending_.store(true);
   requestUpdate();
 }
 
 void MissileCommandActivity::continueGame() {
-  waitForPendingRefresh();
   enemies_ = {};
   players_ = {};
   explosions_ = {};
@@ -321,23 +327,25 @@ void MissileCommandActivity::continueGame() {
   enemiesResolved_ = 0;
   viewMode_ = ViewMode::Playing;
   uiReady_ = false;
-  lastLogicTickUs_ = esp_timer_get_time();
-  lastFrameRequestUs_ = 0;
-  nextSpawnUs_ = lastLogicTickUs_ + 500000;
-  frameDirty_ = false;
+  lastCycleUs_ = esp_timer_get_time();
+  nextSpawnUs_ = lastCycleUs_ + 500000;
+  pendingTap_ = false;
+  pendingBack_ = false;
   sceneNeedsFullRedraw_ = true;
-  resetRenderCaches();
+  cycleRenderPending_.store(true);
   requestUpdate();
 }
 
 void MissileCommandActivity::returnToMenu() {
-  waitForPendingRefresh();
   if (aliveCityCount() > 0) saveGame();
   viewMode_ = ViewMode::Menu;
   selectedIndex_ = difficulty_;
   topIndex_ = 0;
   initialViewportPending_ = true;
   sceneNeedsFullRedraw_ = true;
+  cycleRenderPending_.store(false);
+  pendingTap_ = false;
+  pendingBack_ = false;
   requestUpdate();
 }
 
@@ -350,7 +358,6 @@ void MissileCommandActivity::startWave() {
   enemiesResolved_ = 0;
   nextSpawnUs_ = esp_timer_get_time() + 500000;
   sceneNeedsFullRedraw_ = true;
-  resetRenderCaches();
 }
 
 void MissileCommandActivity::tickGame(int64_t nowUs) {
@@ -433,9 +440,9 @@ void MissileCommandActivity::spawnEnemy(int64_t nowUs) {
   slot->targetX = static_cast<int16_t>(geometry.field.x + (geometry.field.width * (city + 1)) / (kCityCount + 1));
   slot->targetY = static_cast<int16_t>(geometry.groundY);
   slot->progress = 0;
-  // Speeds are per 40 ms simulation tick. These values preserve roughly the
-  // original real-time descent speed while producing much finer movement.
-  slot->speed = static_cast<uint16_t>(4 + difficulty_ + std::min<int>(wave_ / 2, 4));
+  // Speeds are per 100 ms synchronized frame. Scale from the previous 33 ms
+  // cadence so real-world descent time stays approximately unchanged.
+  slot->speed = static_cast<uint16_t>(12 + difficulty_ * 3 + std::min<int>(wave_ / 2, 4) * 3);
   slot->active = true;
   ++enemiesSpawned_;
 
@@ -464,7 +471,7 @@ void MissileCommandActivity::launchPlayerMissile(int x, int y) {
   slot->targetX = static_cast<int16_t>(std::clamp(x, geometry.field.x, geometry.field.x + geometry.field.width - 1));
   slot->targetY = static_cast<int16_t>(std::clamp(y, geometry.field.y, geometry.groundY - 4));
   slot->progress = 0;
-  slot->speed = 46;
+  slot->speed = 140;
   slot->active = true;
 }
 
@@ -520,8 +527,8 @@ void MissileCommandActivity::finishGame() {
   }
   clearSavedGame();
   viewMode_ = ViewMode::GameOver;
-  frameDirty_ = false;
   sceneNeedsFullRedraw_ = true;
+  cycleRenderPending_.store(false);
   requestUpdate();
 }
 
@@ -614,7 +621,6 @@ void MissileCommandActivity::buildMenuScreen(UiApp::ScreenType& screen) {
 }
 
 void MissileCommandActivity::render(RenderLock&&) {
-  waitForPendingRefresh();
   switch (viewMode_) {
     case ViewMode::Menu:
       renderMenu();
@@ -694,32 +700,6 @@ void MissileCommandActivity::renderMenu() {
   renderer.displayBuffer();
 }
 
-void MissileCommandActivity::resetRenderCaches() {
-  enemyDrawValid_.fill(0);
-  playerDrawValid_.fill(0);
-  explosionDrawValid_.fill(0);
-  drawnCitiesAlive_.fill(0xFF);
-  drawnAmmo_.fill(0xFF);
-  drawnScore_ = UINT32_MAX;
-  drawnWave_ = UINT16_MAX;
-  drawnCityCount_ = -1;
-}
-
-void MissileCommandActivity::waitForPendingRefresh() {
-  if (!refreshInFlight_) return;
-  renderer.waitRefreshComplete();
-  refreshInFlight_ = false;
-}
-
-void MissileCommandActivity::startFastRefresh() {
-  if (renderer.supportsAsyncRefresh()) {
-    renderer.displayBufferAsync(HalDisplay::FAST_REFRESH);
-    refreshInFlight_ = true;
-  } else {
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-  }
-}
-
 void MissileCommandActivity::drawFullPlayingScene() {
   renderer.clearScreen();
   const GameGeometry geometry = gameGeometry(renderer, mappedInput);
@@ -733,16 +713,16 @@ void MissileCommandActivity::drawFullPlayingScene() {
   renderer.drawRect(geometry.field.x, geometry.field.y, geometry.field.width, geometry.field.height, 1, true);
   const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
-  resetRenderCaches();
   sceneNeedsFullRedraw_ = false;
 }
 
-bool MissileCommandActivity::drawIncrementalPlayingScene() {
+void MissileCommandActivity::drawPlayingFrame() {
   const GameGeometry geometry = gameGeometry(renderer, mappedInput);
 
-  // Recompose the whole gameplay field in RAM each visible frame. This clears
-  // the previous missile positions while retaining FAST differential e-ink
-  // refresh. No permanent trajectory accumulation remains.
+  // Recompose the complete gameplay field from the synchronized world state.
+  // Active missiles redraw their FULL trajectory from launch to current point.
+  // As soon as a missile dies, reaches its target or hits the ground, it is no
+  // longer active and its complete trail is therefore erased on this frame.
   renderer.fillRect(geometry.field.x + 1, geometry.field.y + 1,
                     std::max(1, geometry.field.width - 2), std::max(1, geometry.field.height - 2), false);
   renderer.drawLine(geometry.field.x, geometry.groundY,
@@ -769,9 +749,7 @@ bool MissileCommandActivity::drawIncrementalPlayingScene() {
     if (!missile.active) continue;
     const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
     const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
-    const uint16_t tailProgress = missile.progress > 45 ? static_cast<uint16_t>(missile.progress - 45) : 0;
-    renderer.drawLine(lerpInt(missile.startX, missile.targetX, tailProgress),
-                      lerpInt(missile.startY, missile.targetY, tailProgress), x, y, 1, true);
+    renderer.drawLine(missile.startX, missile.startY, x, y, 1, true);
     renderer.fillRect(x - 1, y - 1, 3, 3, true);
   }
 
@@ -779,9 +757,7 @@ bool MissileCommandActivity::drawIncrementalPlayingScene() {
     if (!missile.active) continue;
     const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
     const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
-    const uint16_t tailProgress = missile.progress > 70 ? static_cast<uint16_t>(missile.progress - 70) : 0;
-    renderer.drawLine(lerpInt(missile.startX, missile.targetX, tailProgress),
-                      lerpInt(missile.startY, missile.targetY, tailProgress), x, y, 1, true);
+    renderer.drawLine(missile.startX, missile.startY, x, y, 1, true);
     renderer.drawRect(x - 2, y - 2, 5, 5, 1, true);
   }
 
@@ -796,17 +772,21 @@ bool MissileCommandActivity::drawIncrementalPlayingScene() {
                 static_cast<unsigned long>(score_), static_cast<unsigned long>(highScore_),
                 static_cast<unsigned>(wave_), aliveCityCount());
   drawCenteredText(renderer, UI_10_FONT_ID, geometry.status, status);
-  return true;
 }
 
 void MissileCommandActivity::renderPlaying() {
   if (sceneNeedsFullRedraw_) drawFullPlayingScene();
-  if (drawIncrementalPlayingScene()) startFastRefresh();
+  drawPlayingFrame();
+
+  // Blocking FAST refresh is deliberate: the next 100 ms simulation/input
+  // cycle cannot begin until this exact frame has completed on the panel.
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  cycleRenderPending_.store(false);
 }
 
 void MissileCommandActivity::renderGameOver() {
   drawFullPlayingScene();
-  drawIncrementalPlayingScene();
+  drawPlayingFrame();
   const int width = std::min(380, renderer.getScreenWidth() - 36);
   const int height = 170;
   const Rect box{(renderer.getScreenWidth() - width) / 2, (renderer.getScreenHeight() - height) / 2, width, height};
