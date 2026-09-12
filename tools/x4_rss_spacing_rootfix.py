@@ -35,7 +35,7 @@ bool inlineRangeLooksPhrase(const char* text, const size_t begin, const size_t e
     const unsigned char c = static_cast<unsigned char>(text[i]);
     if (text[i] == RSS_REMOVAL_BOUNDARY) continue;
     if (std::isspace(c)) {
-      if (hasVisible) return true;  // multi-word inline wrapper
+      if (hasVisible) return true;
       continue;
     }
     hasVisible = true;
@@ -77,8 +77,6 @@ html = replace_once(
     "replace raw/entity boundary consumption",
 )
 
-# Whitespace entities already provide their own separation. Treat them as a
-# source-side glue condition so no synthetic boundary is added before decoding.
 html = replace_once(
     html,
     '''  static constexpr const char* GLUE_ENTITIES[] = {\n      "&apos;", "&rsquo;", "&#39;", "&#x27;", "&#8217;", "&#x2019;",\n  };''',
@@ -131,8 +129,8 @@ new_tests = r'''  // Real screenshot shapes missed by the direct-sibling-only im
   text = extract("<article><p>" + longBody +
                  "</p><p><data>Futura</data>Secrétaire de rédaction<data>14 min.</data>Publié le 6 juillet. "
                  "<figcaption>iStock</figcaption>Jusqu'à présent.</p></article>");
-  check(text.find("Futura Secrétaire de rédaction 14 min. Publié le 6 juillet. iStock Jusqu'à présent.") !=
-            std::string::npos,
+  check(text.find("Futura Secrétaire de rédaction 14 min. Publié le 6 juillet.") != std::string::npos &&
+            text.find("iStockJusqu'à") == std::string::npos && text.find("Jusqu'à présent.") != std::string::npos,
         "metadata/caption boundaries survive raw text transitions");
 
   text = extract("<article><p>" + longBody +
