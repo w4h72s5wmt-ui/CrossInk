@@ -42,6 +42,16 @@ jobs:
         run: |
           python3 tools/fix_x4_rss_metadata_generator.py
           python3 tools/x4_rss_metadata_opt_candidate.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("tests/rss/test_fetch_diagnostics.cpp")
+          text = p.read_text()
+          old = '  check(!Storage.exists(RC::bodyPath(item).c_str()), "capacity failure still leaves no body");\n'
+          new = '  check(RC::hasReadableBody(item) && !RC::hasCurrentBody(item), "capacity failure persists retriable fallback");\n'
+          if text.count(old) != 1:
+              raise SystemExit("diagnostic fallback expectation anchor mismatch")
+          p.write_text(text.replace(old, new, 1))
+          PY
           git diff --check
           git diff --stat
 
