@@ -209,6 +209,44 @@ void htmlTests() {
             std::string::npos,
         "Figaro adjacent links keep screenshot boundaries");
 
+  // Real screenshot shapes missed by the direct-sibling-only implementation:
+  // cells can be nested, and a structural/phrase field can touch raw prose/entities.
+  text = extract("<article><p>" + longBody +
+                 "</p><p><data><span>très chaud.</span></data><data><span>Une vapeur très chaude</span></data>"
+                 "<data><span>classiques.</span></data><data>Dans le sous-sol</data></p></article>");
+  check(text.find("très chaud. Une vapeur très chaude classiques. Dans le sous-sol") != std::string::npos,
+        "nested Science-style fields preserve prose boundaries");
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p><data><span>Fiche technique</span></data><data>Modèle</data><data><span>Oppo Pad 5</span></data>"
+                 "<data>Dimensions</data><data><span>266,01 x 192,77 mm</span></data></p></article>");
+  check(text.find("Fiche technique Modèle Oppo Pad 5 Dimensions 266,01 x 192,77 mm") != std::string::npos,
+        "nested Frandroid spec fields preserve cell boundaries");
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p><span>Trois conditions se cumulent dans une</span>&eacute;ponge de cuisine "
+                 "<span>stable.</span>Le contraste reste lisible.</p></article>");
+  check(text.find("dans une éponge de cuisine stable. Le contraste") != std::string::npos,
+        "phrase span boundaries survive entity/raw text transitions");
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p><data>Futura</data>Secrétaire de rédaction<data>14 min.</data>Publié le 6 juillet. "
+                 "<figcaption>iStock</figcaption>Jusqu'à présent.</p></article>");
+  check(text.find("Futura Secrétaire de rédaction 14 min. Publié le 6 juillet.") != std::string::npos &&
+            text.find("iStockJusqu'à") == std::string::npos && text.find("Jusqu'à présent.") != std::string::npos,
+        "metadata/caption boundaries survive raw text transitions");
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p><span>Bastié.</span>La valeur du texte doit rester lisible. "
+                 "<span>aboutir.</span>En route vers la suite.</p></article>");
+  check(text.find("Bastié. La valeur du texte doit rester lisible. aboutir. En route") != std::string::npos,
+        "sentence punctuation across plain spans preserves following space");
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p><span>mot</span>s, l'<span>Europe</span> et e-<span>mail</span>.</p></article>");
+  check(text.find("mots, l'Europe et e-mail.") != std::string::npos,
+        "plain span suffix/apostrophe/hyphen grammar stays untouched");
+
   // Ordinary inline formatting is not a cell boundary and must not split words.
   text = extract("<article><p>" + longBody +
                  "</p><p>l'<strong>Europe</strong> et e-<span>mail</span> puis <strong>mot</strong>s.</p></article>");
@@ -332,7 +370,7 @@ void cacheTests() {
         "persisted summary fallback loads without RssItem history summary");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY, "manual retry replaces fallback with full body");
-  check(testFiles[path].rfind("XRSS15\n", 0) == 0, "full body keeps current marker");
+  check(testFiles[path].rfind("XRSS16\n", 0) == 0, "full body keeps current marker");
   check(load(item, out) == RC::CacheResult::READY && out.find("FIN_UTILE") != std::string::npos, "body loads");
   const auto cachedCalls = H::publicCalls;
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid full cache reused");
@@ -343,7 +381,7 @@ void cacheTests() {
   check(!RC::hasCurrentBody(item) && !RC::hasReadableBody(item), "previous body generation rejected");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "obsolete body invalidated and refetched");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS15\n", 0) == 0, "refetched current full body version");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS16\n", 0) == 0, "refetched current full body version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});

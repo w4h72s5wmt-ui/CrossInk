@@ -149,7 +149,11 @@ inline void drawLine(GfxRenderer& renderer, const int fontId, const int x, const
 
     const std::string segment = marked.substr(pos, end - pos);
     renderer.drawText(fontId, cursorX, y, segment.c_str(), black);
-    const int width = renderer.getTextWidth(fontId, segment.c_str());
+    // Link markup splits one visual line into independently drawn segments.
+    // getTextWidth() is a visual bbox for flash fonts and can omit a trailing
+    // space, making the following underlined segment look glued. Advance by the
+    // same metric drawText() uses instead.
+    const int width = renderer.getTextAdvanceX(fontId, segment.c_str(), EpdFontFamily::REGULAR);
     if (underlined && width > 0) {
       const int underlineY = y + std::max(1, renderer.getLineHeight(fontId) - 2);
       renderer.drawLine(cursorX, underlineY, cursorX + width - 1, underlineY, black);
