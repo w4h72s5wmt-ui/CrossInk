@@ -1,21 +1,22 @@
-name: CrossInk Notes + Demineur + 2048 X4 Pro
+name: CrossInk X4 Pro RSS spacing candidate
 
 on:
   push:
-    branches: [x4-pro-notes]
+    branches: [x4-pro-rss-spacing-opt]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-x4-pro-notes:
+  build-x4-pro-rss-spacing:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout CrossInk sources
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -38,21 +39,34 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      - name: Apply RSS spacing candidate
+        run: python tools/x4_rss_spacing_candidate.py
+
       - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
 
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
-      - name: Build X4 Pro firmware directly from sources
+      - name: Build X4 Pro candidate
         run: |
           set -euo pipefail
-          pio run -e x4-pro | tee pio-x4-pro-notes.log
+          pio run -e x4-pro | tee pio-x4-pro-spacing.log
 
-      - name: Upload X4 Pro firmware
+      - name: Freeze clean validated source tree
+        run: |
+          set -euo pipefail
+          git checkout 23e200037a0e907aa8d26efc1c43c6edb55f6d90 -- .github/workflows/notes-build.yml
+          git rm -f tools/x4_rss_spacing_candidate.py
+          git add src/activities/home/RssArticleCache.cpp src/activities/home/RssArticleHtml.inc src/activities/home/RssArticleCachePolicy.inc tests/rss/test_article_cache.cpp .github/workflows/notes-build.yml
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(rss): preserve spacing across removed content'
+          git branch -f x4-pro-rss-spacing-generated HEAD
+          git push -f origin x4-pro-rss-spacing-generated
+
+      - name: Upload candidate firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-build-${{ github.run_number }}
+          name: firmware-x4-pro-spacing-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -60,6 +74,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-build-${{ github.run_number }}-log
-          path: pio-x4-pro-notes.log
+          name: x4-pro-spacing-${{ github.run_number }}-log
+          path: pio-x4-pro-spacing.log
           if-no-files-found: ignore
