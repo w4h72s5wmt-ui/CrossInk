@@ -1,12 +1,11 @@
-name: CrossInk Notes + Demineur + 2048 X4 Pro
+name: CrossInk RSS anchor spacing validation
 
 on:
   push:
-    branches: [x4-pro-notes]
-  workflow_dispatch:
+    branches: [x4-pro-rss-anchor-spacing]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-x4-pro-notes:
@@ -16,6 +15,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -38,6 +38,23 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      - name: Materialize clean RSS anchor-spacing commit
+        run: |
+          set -euo pipefail
+          python tools/x4_rss_anchor_spacing_candidate.py
+          cp src/activities/home/RssArticleCache.cpp /tmp/RssArticleCache.cpp
+          cp src/activities/home/RssArticleHtml.inc /tmp/RssArticleHtml.inc
+          cp tests/rss/test_article_cache.cpp /tmp/test_article_cache.cpp
+          git reset --hard 4f457d5c8ff095d7c7f03a23be619f3b5c3fac8a
+          cp /tmp/RssArticleCache.cpp src/activities/home/RssArticleCache.cpp
+          cp /tmp/RssArticleHtml.inc src/activities/home/RssArticleHtml.inc
+          cp /tmp/test_article_cache.cpp tests/rss/test_article_cache.cpp
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/activities/home/RssArticleCache.cpp src/activities/home/RssArticleHtml.inc tests/rss/test_article_cache.cpp
+          git commit -m "fix(rss): preserve spacing around all links"
+          git push --force origin HEAD:x4-pro-rss-anchor-generated
+
       - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
 
@@ -52,7 +69,7 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-build-${{ github.run_number }}
+          name: firmware-x4-pro-anchor-spacing-candidate-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -60,6 +77,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-build-${{ github.run_number }}-log
+          name: x4-pro-anchor-spacing-candidate-${{ github.run_number }}-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
