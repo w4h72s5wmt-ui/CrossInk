@@ -19,8 +19,8 @@ namespace {
 constexpr char CACHE_DIR[] = "/.crosspoint/rss_articles";
 // Plain-text cache format marker. Bumping this invalidates old extracted text
 // after the cleaner changes, while keeping files human-readable on the SD card.
-constexpr char BODY_MAGIC[] = "XRSS11\n";
-constexpr char FALLBACK_MAGIC[] = "XRSSF1\n";
+constexpr char BODY_MAGIC[] = "XRSS12\n";
+constexpr char FALLBACK_MAGIC[] = "XRSSF2\n";
 constexpr size_t BODY_MAGIC_BYTES = sizeof(BODY_MAGIC) - 1;
 static_assert(sizeof(FALLBACK_MAGIC) == sizeof(BODY_MAGIC), "RSS body markers must have equal width");
 constexpr size_t MAX_HTML_BYTES = 1536U * 1024U;
@@ -653,12 +653,14 @@ size_t removeFallbackUrls(char* text, const size_t length) {
                      startsWithInsensitive(text, length, read, "www.");
     if (url) {
       while (read < length && !std::isspace(static_cast<unsigned char>(text[read]))) ++read;
+      while (read < length && (text[read] == ' ' || text[read] == '\t')) ++read;
       while (write > 0 && text[write - 1] == ' ') --write;
-      if (read < length && write > 0) appendSpace(text, write);
+      if (read < length && write > 0) appendRemovalBoundary(text, write);
       continue;
     }
     text[write++] = text[read++];
   }
+  write = normalizeRemovalBoundaries(text, write);
   while (write > 0 && std::isspace(static_cast<unsigned char>(text[write - 1]))) --write;
   text[write] = '\0';
   return write;

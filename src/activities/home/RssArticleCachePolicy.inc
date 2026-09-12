@@ -126,7 +126,7 @@ size_t stripFigaroShareControls(char* text, size_t length, const char* articleUr
     const bool hasEditorialSuffix = eraseEnd < length;
     const size_t suffixLength = length - eraseEnd;
     if (hasEditorialPrefix && hasEditorialSuffix) {
-      text[eraseStart] = ' ';
+      text[eraseStart] = RSS_REMOVAL_BOUNDARY;
       std::memmove(text + eraseStart + 1, text + eraseEnd, suffixLength);
       length = eraseStart + 1 + suffixLength;
       text[length] = '\0';
@@ -138,7 +138,7 @@ size_t stripFigaroShareControls(char* text, size_t length, const char* articleUr
       searchFrom = eraseStart;
     }
   }
-  return length;
+  return normalizeRemovalBoundaries(text, length);
 }
 
 bool buildFallbackText(const RssItem& item, const char* sourceName, const char* dropRules,
