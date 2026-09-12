@@ -12,6 +12,7 @@
 
 #include "activities/Activity.h"
 #include "activities/ScreenTransitionRefresh.h"
+#include "RssArticleMetadata.h"
 #include "util/ButtonNavigator.h"
 
 class RssNewsActivity final : public Activity {
@@ -27,10 +28,7 @@ class RssNewsActivity final : public Activity {
   enum class State : uint8_t { LIST, ARTICLE, WIFI_SELECTION, REFRESHING };
   enum class SortMode : uint8_t { DATE_DESC, SOURCE };
 
-  struct CachedArticle {
-    uint8_t sourceIndex = 0;
-    RssItem item{};
-  };
+  using CachedArticle = RssArticleMetadata::Record;
 
   struct Source {
     std::string name;
@@ -62,9 +60,9 @@ class RssNewsActivity final : public Activity {
   static constexpr size_t FEED_CONFIG_MAX_BYTES = 4096;
   static constexpr size_t LIST_META_CAPACITY = 64;
   static constexpr uint32_t CACHE_MAGIC = 0x52535332;  // RSS2
-  // V4 binds the binary article cache to the current feeds.txt content so
-  // reordering/replacing sources can never relabel old articles incorrectly.
-  static constexpr uint16_t CACHE_VERSION = 4;
+  // V5 stores lightweight history metadata; old development caches are
+  // intentionally invalidated rather than migrated.
+  static constexpr uint16_t CACHE_VERSION = 5;
   static constexpr char CACHE_PATH[] = "/.crosspoint/rss_news.bin";
   static constexpr char CACHE_TMP_PATH[] = "/.crosspoint/rss_news.tmp";
   static constexpr char FEEDS_DIR[] = "/RSS";
@@ -126,12 +124,14 @@ class RssNewsActivity final : public Activity {
   void buildStatusScreen(UiApp::ScreenType& screen);
 
   bool ensureBuffers();
+  bool ensureFeedBuffer();
+  void releaseFeedBuffer();
   void loadSources();
   bool ensureFeedConfigFile();
   uint32_t sourceConfigHash() const;
   bool loadCache();
   bool saveCache() const;
-  void mergeSourceArticles(uint8_t sourceIndex, RssItem* items, size_t count);
+  bool mergeSourceArticles(uint8_t sourceIndex, RssItem* items, size_t count);
   void rebuildDisplayOrder();
   void toggleSortMode();
   size_t articleIndexForDisplayRow(size_t displayRow) const;

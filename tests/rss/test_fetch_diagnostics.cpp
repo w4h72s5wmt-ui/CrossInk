@@ -96,7 +96,7 @@ int main() {
   check(fetch(item) == RC::CacheResult::FALLBACK_READY, "capacity policy unchanged");
   D::end();
   check(testFiles[D::PATH].find("\thtml-capacity\t") != std::string::npos, "HTML capacity reason logged");
-  check(!Storage.exists(RC::bodyPath(item).c_str()), "capacity failure still leaves no body");
+  check(RC::hasReadableBody(item) && !RC::hasCurrentBody(item), "capacity failure persists retriable fallback");
   reset();
   D::begin();
   H::replies.push_back({page});

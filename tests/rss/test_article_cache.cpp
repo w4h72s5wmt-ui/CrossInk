@@ -7,6 +7,7 @@
 #include <random>
 #include <vector>
 #include "../../src/activities/home/RssArticleCache.cpp"
+#include "../../src/activities/home/RssArticleMetadata.h"
 
 inline bool testAuth = false;
 namespace RssFigaroAuth {
@@ -54,7 +55,7 @@ RC::CacheResult fetch(const RssItem& item, const H::CancelCallback& cancel = {})
   return RC::ensureCached(item, "Test", "", "", "[Lire la suite]", cancel);
 }
 RC::CacheResult load(const RssItem& item, std::string& out) {
-  return RC::load(item, "Test", "", "", "[Lire la suite]", out);
+  return RC::load(item, out);
 }
 
 void htmlTests() {
@@ -163,50 +164,77 @@ void figaroCleanupTests() {
   check(sharedTwiceOut == "Debut Milieu Fin", "Figaro multiple share controls removed");
 }
 
+void metadataTests() {
+  auto item = makeItem();
+  std::strcpy(item.published, "2026-09-12T12:00:00Z");
+  const auto record = RssArticleMetadata::fromItem(3, item);
+  check(sizeof(RssItem) == 4684, "production-sized RssItem host model");
+  check(sizeof(record) == 588, "lightweight RSS history record is 588 bytes");
+  check(record.sourceIndex == 3 && std::strcmp(record.title, item.title) == 0 &&
+            std::strcmp(record.link, item.link) == 0 && std::strcmp(record.published, item.published) == 0,
+        "history record keeps source/title/link/date");
+  check(RssArticleMetadata::same(record, item), "history identity matches source RssItem");
+  auto changed = item;
+  std::strcpy(changed.summary, "un autre resume ne change pas l'identite");
+  check(RssArticleMetadata::same(record, changed), "summary is not part of history identity");
+}
+
 void cacheTests() {
   auto item = makeItem();
   std::string out;
   reset();
-  check(fetch(item) == RC::CacheResult::FALLBACK_READY, "network failure -> summary");
-  check(testFiles.empty() && testWrites == 0, "summary not persisted");
+  const std::string path = RC::bodyPath(item);
+  check(fetch(item) == RC::CacheResult::FALLBACK_READY, "network failure -> persisted summary fallback");
+  check(testFiles[path].rfind("XRSSF1\n", 0) == 0, "fallback has distinct SD marker");
+  check(RC::hasReadableBody(item) && !RC::hasCurrentBody(item), "fallback readable but not a full body");
   check(load(item, out) == RC::CacheResult::FALLBACK_READY && out == "Le resume du flux reste disponible.",
-        "summary explicit fallback");
+        "persisted summary fallback loads without RssItem history summary");
   H::replies.push_back({page});
-  check(fetch(item) == RC::CacheResult::READY, "manual retry obtains body");
+  check(fetch(item) == RC::CacheResult::READY, "manual retry replaces fallback with full body");
+  check(testFiles[path].rfind("XRSS11\n", 0) == 0, "full body keeps XRSS11 marker");
   check(load(item, out) == RC::CacheResult::READY && out.find("FIN_UTILE") != std::string::npos, "body loads");
   const auto cachedCalls = H::publicCalls;
-  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid cache reused");
-  check(RC::hasCurrentBody(item), "current body probe accepts XRSS11 cache");
+  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid full cache reused");
+  check(RC::hasCurrentBody(item) && RC::hasReadableBody(item), "full body probes current/readable");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS10\nAncien corps nettoye par compatibilite";
-  check(!RC::hasCurrentBody(item), "XRSS10 rejected by current body probe");
+  testFiles[RC::bodyPath(item)] = "XRSS10\\nAncien corps de developpement";
+  check(!RC::hasCurrentBody(item) && !RC::hasReadableBody(item), "obsolete marker rejected");
   H::replies.push_back({page});
-  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS10 body invalidated and refetched");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS11\n", 0) == 0, "XRSS11 body cache version");
-  check(RC::hasCurrentBody(item), "refetched XRSS11 body is current");
+  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "obsolete body invalidated and refetched");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS11\n", 0) == 0, "refetched full body version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});
-  check(fetch(item) == RC::CacheResult::FALLBACK_READY && testFiles.empty(), "short extraction not cached");
+  check(fetch(item) == RC::CacheResult::FALLBACK_READY && RC::hasReadableBody(item),
+        "short extraction persists retriable fallback");
   reset();
   H::replies.push_back({std::string(RC::MAX_HTML_BYTES + 1, 'x')});
-  check(fetch(item) == RC::CacheResult::FALLBACK_READY && testFiles.empty(), "oversized HTML rejected");
+  check(fetch(item) == RC::CacheResult::FALLBACK_READY && RC::hasReadableBody(item),
+        "oversized HTML persists retriable fallback");
   reset();
   testOom = true;
-  check(fetch(item) == RC::CacheResult::FALLBACK_READY && testFiles.empty(), "OOM retriable");
+  check(fetch(item) == RC::CacheResult::FAILED && testFiles.empty(), "OOM without existing fallback drops metadata safely");
+
+  reset();
+  check(fetch(item) == RC::CacheResult::FALLBACK_READY, "seed fallback before failed replacement");
+  const std::string fallbackBefore = testFiles[RC::bodyPath(item)];
+  testWriteFail = true;
+  H::replies.push_back({page});
+  check(fetch(item) == RC::CacheResult::FALLBACK_READY && testFiles[RC::bodyPath(item)] == fallbackBefore,
+        "failed full-body write preserves existing fallback");
 
   reset();
   testAuth = true;
   std::strcpy(item.link, "https://www.lefigaro.fr/test");
   check(fetch(item) == RC::CacheResult::FAILED && H::authCalls == 1 && H::publicCalls == 0,
-        "AUTH failure never public fetch");
+        "AUTH failure never public fetch or summary fallback");
   check(load(item, out) == RC::CacheResult::FAILED && out.empty(), "AUTH failure no summary");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 0, "AUTH retry succeeds");
 
   reset(); item = makeItem(); H::replies.push_back({page}); testWriteFail = true;
-  check(fetch(item) == RC::CacheResult::FALLBACK_READY && testFiles.empty(), "write failure cleans cache");
+  check(fetch(item) == RC::CacheResult::FAILED && testFiles.empty(), "body/fallback write failure is not retained");
   reset(); H::replies.push_back({page});
   int polls = 0;
   check(fetch(item, [&]{ return ++polls >= 3; }) == RC::CacheResult::CANCELLED && testFiles.empty(),
@@ -219,7 +247,7 @@ std::string readFile(const char* path) {
   return std::string(std::istreambuf_iterator<char>(stream), {});
 }
 int main(int argc, char** argv) {
-  htmlTests(); figaroCleanupTests(); cacheTests();
+  htmlTests(); figaroCleanupTests(); metadataTests(); cacheTests();
   if (argc >= 3) {
     auto item = makeItem();
     const auto html = readFile(argv[1]);
@@ -241,7 +269,7 @@ int main(int argc, char** argv) {
     check(RC::ensureCached(item, "Frandroid", drop.c_str(), dropStart.c_str(), stop.c_str(), {}) == RC::CacheResult::READY,
           "real Frandroid HTML cached");
     std::string body;
-    check(RC::load(item, "Frandroid", drop.c_str(), dropStart.c_str(), stop.c_str(), body) == RC::CacheResult::READY,
+    check(RC::load(item, body) == RC::CacheResult::READY,
           "real Frandroid body loads");
   }
   check(testOpenFiles == 0, "final no open files");

@@ -49,13 +49,6 @@ HeapByteBuffer allocateRssBuffer(const size_t bytes) {
   return buffer;
 }
 
-bool sameRssItem(const RssItem& left, const RssItem& right) {
-  if (left.link[0] && right.link[0]) return std::strcmp(left.link, right.link) == 0;
-  if (std::strcmp(left.title, right.title) != 0) return false;
-  if (left.published[0] || right.published[0]) return std::strcmp(left.published, right.published) == 0;
-  return true;
-}
-
 int monthNumber(const char* month) {
   static constexpr const char* MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
@@ -271,31 +264,17 @@ bool RssNewsActivity::ensureBuffers() {
   }
   articleCapacity = std::clamp<size_t>(requestedArticleCapacity, 1, MAX_ARTICLES);
   feedItemCapacity = std::clamp<size_t>(requestedFeedCapacity, 1, FEED_ITEM_CAPACITY);
-  LOG_DBG("RSS", "Runtime capacities: articles=%zu/%zu feed=%zu/%zu", articleCapacity, MAX_ARTICLES,
-          feedItemCapacity, FEED_ITEM_CAPACITY);
 
   if (!articleStorage) {
     articleStorage = allocateRssBuffer(sizeof(CachedArticle) * articleCapacity);
     if (!articleStorage) {
-      LOG_ERR("RSS", "OOM allocating article cache (%zu records)", articleCapacity);
+      LOG_ERR("RSS", "OOM allocating article metadata (%zu records)", articleCapacity);
       return false;
     }
     articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
     std::memset(articles, 0, sizeof(CachedArticle) * articleCapacity);
   } else if (!articles) {
     articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
-  }
-
-  if (!feedStorage) {
-    feedStorage = allocateRssBuffer(sizeof(RssItem) * feedItemCapacity);
-    if (!feedStorage) {
-      LOG_ERR("RSS", "OOM allocating feed scratch (%zu records)", feedItemCapacity);
-      return false;
-    }
-    feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
-    std::memset(feedItems, 0, sizeof(RssItem) * feedItemCapacity);
-  } else if (!feedItems) {
-    feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
   }
 
   if (!listItemStorage) {
@@ -334,7 +313,34 @@ bool RssNewsActivity::ensureBuffers() {
     displayOrder = reinterpret_cast<uint16_t*>(displayOrderStorage.get());
   }
 
+  const size_t residentBytes = sizeof(CachedArticle) * articleCapacity +
+                               sizeof(fui::ListItem) * (articleCapacity + 1) +
+                               articleCapacity * LIST_META_CAPACITY +
+                               sizeof(uint16_t) * articleCapacity;
+  LOG_DBG("RSS", "Memory model: RssItem=%zu history=%zu ListItem=%zu resident=%zu feedScratch=%zu",
+          sizeof(RssItem), sizeof(CachedArticle), sizeof(fui::ListItem), residentBytes,
+          sizeof(RssItem) * feedItemCapacity);
   return true;
+}
+
+bool RssNewsActivity::ensureFeedBuffer() {
+  if (feedStorage) {
+    if (!feedItems) feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
+    return feedItems != nullptr;
+  }
+  feedStorage = allocateRssBuffer(sizeof(RssItem) * feedItemCapacity);
+  if (!feedStorage) {
+    LOG_ERR("RSS", "OOM allocating transient feed scratch (%zu records)", feedItemCapacity);
+    return false;
+  }
+  feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
+  std::memset(feedItems, 0, sizeof(RssItem) * feedItemCapacity);
+  return true;
+}
+
+void RssNewsActivity::releaseFeedBuffer() {
+  feedItems = nullptr;
+  feedStorage.reset();
 }
 
 void RssNewsActivity::loadSources() {
@@ -583,7 +589,7 @@ bool RssNewsActivity::loadCache() {
     for (uint16_t i = 0; i < header.count; ++i) {
       CachedArticle stale{};
       if (file.read(&stale, sizeof(stale)) != static_cast<int>(sizeof(stale))) break;
-      RssArticleCache::remove(stale.item);
+      RssArticleCache::remove({stale.link, stale.title, stale.published});
     }
     file.close();
     Storage.remove(CACHE_PATH);
@@ -649,52 +655,55 @@ bool RssNewsActivity::saveCache() const {
   return true;
 }
 
-void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* items, const size_t count) {
-  if (!articles || !items || sourceIndex >= sourceCount) return;
+bool RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* items, const size_t count) {
+  if (!articles || !items || sourceIndex >= sourceCount) return false;
 
   const size_t historyLimit = std::clamp<size_t>(sources[sourceIndex].historyLimit, 1, ITEMS_PER_SOURCE);
-  const bool requiresCachedBody = RssFigaroAuth::isConfiguredFor(sources[sourceIndex].url);
-  const auto keepHistoryItem = [requiresCachedBody](const RssItem& item) {
-    return !requiresCachedBody || RssArticleCache::hasCurrentBody(item);
+  auto mergeStorage = allocateRssBuffer(sizeof(CachedArticle) * historyLimit);
+  if (!mergeStorage) {
+    LOG_ERR("RSS", "OOM allocating lightweight merge scratch (%zu records)", historyLimit);
+    return false;
+  }
+  auto* merged = reinterpret_cast<CachedArticle*>(mergeStorage.get());
+  std::memset(merged, 0, sizeof(CachedArticle) * historyLimit);
+
+  const auto identity = [](const CachedArticle& article) {
+    return RssArticleCache::ArticleIdentity{article.link, article.title, article.published};
   };
 
   size_t mergedCount = 0;
   const size_t incomingCount = std::min(count, historyLimit);
   for (size_t i = 0; i < incomingCount; ++i) {
-    if (!keepHistoryItem(items[i])) continue;
+    if (!RssArticleCache::hasReadableBody(items[i])) continue;
     bool duplicate = false;
     for (size_t j = 0; j < mergedCount; ++j) {
-      if (sameRssItem(items[i], items[j])) {
+      if (RssArticleMetadata::same(merged[j], items[i])) {
         duplicate = true;
         break;
       }
     }
-    if (!duplicate) {
-      if (mergedCount != i) items[mergedCount] = items[i];
-      ++mergedCount;
-    }
+    if (!duplicate) merged[mergedCount++] = RssArticleMetadata::fromItem(sourceIndex, items[i]);
   }
 
   for (size_t i = 0; i < articleCount && mergedCount < historyLimit; ++i) {
-    if (articles[i].sourceIndex != sourceIndex || !keepHistoryItem(articles[i].item)) continue;
+    if (articles[i].sourceIndex != sourceIndex || !RssArticleCache::hasReadableBody(identity(articles[i]))) continue;
     bool duplicate = false;
     for (size_t j = 0; j < mergedCount; ++j) {
-      if (sameRssItem(articles[i].item, items[j])) {
+      if (RssArticleMetadata::same(articles[i], merged[j])) {
         duplicate = true;
         break;
       }
     }
-    if (!duplicate) items[mergedCount++] = articles[i].item;
+    if (!duplicate) merged[mergedCount++] = articles[i];
   }
 
-  // Delete full-text bodies that just fell out of this source's 100-entry
-  // history. A shared URL is kept when another configured source still points
-  // to the same article.
+  // Delete body/fallback files that just fell out of this source's configured
+  // history. A shared URL is kept while another source still references it.
   for (size_t i = 0; i < articleCount; ++i) {
     if (articles[i].sourceIndex != sourceIndex) continue;
     bool retained = false;
     for (size_t j = 0; j < mergedCount; ++j) {
-      if (sameRssItem(articles[i].item, items[j])) {
+      if (RssArticleMetadata::same(articles[i], merged[j])) {
         retained = true;
         break;
       }
@@ -704,12 +713,12 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
     bool referencedElsewhere = false;
     for (size_t j = 0; j < articleCount; ++j) {
       if (j == i || articles[j].sourceIndex == sourceIndex) continue;
-      if (sameRssItem(articles[i].item, articles[j].item)) {
+      if (RssArticleMetadata::same(articles[i], articles[j])) {
         referencedElsewhere = true;
         break;
       }
     }
-    if (!referencedElsewhere) RssArticleCache::remove(articles[i].item);
+    if (!referencedElsewhere) RssArticleCache::remove(identity(articles[i]));
   }
 
   size_t writeIndex = 0;
@@ -723,12 +732,8 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
   const size_t addCount = articleCount < articleCapacity
                               ? std::min(mergedCount, articleCapacity - articleCount)
                               : 0;
-  for (size_t i = 0; i < addCount; ++i) {
-    CachedArticle& article = articles[articleCount++];
-    article = CachedArticle{};
-    article.sourceIndex = sourceIndex;
-    article.item = items[i];
-  }
+  for (size_t i = 0; i < addCount; ++i) articles[articleCount++] = merged[i];
+  return true;
 }
 
 void RssNewsActivity::rebuildDisplayOrder() {
@@ -740,8 +745,8 @@ void RssNewsActivity::rebuildDisplayOrder() {
     const CachedArticle& right = articles[rightIndex];
     if (sortMode == SortMode::SOURCE && left.sourceIndex != right.sourceIndex) return left.sourceIndex < right.sourceIndex;
 
-    const int64_t leftDate = publishedDateKey(left.item.published);
-    const int64_t rightDate = publishedDateKey(right.item.published);
+    const int64_t leftDate = publishedDateKey(left.published);
+    const int64_t rightDate = publishedDateKey(right.published);
     if (leftDate != rightDate) return leftDate > rightDate;
     if (sortMode == SortMode::DATE_DESC && left.sourceIndex != right.sourceIndex) return left.sourceIndex < right.sourceIndex;
     return leftIndex < rightIndex;
@@ -834,10 +839,10 @@ void RssNewsActivity::buildListScreen(UiApp::ScreenType& screen) {
     const CachedArticle& article = articles[articleIndex];
     fui::ListItem& item = listItems[i + 1];
     item = fui::ListItem{};
-    item.label = article.item.title;
+    item.label = article.title;
     char* meta = listMetaText + i * LIST_META_CAPACITY;
     char dateText[16] = {};
-    if (formatPublishedDate(article.item.published, dateText, sizeof(dateText))) {
+    if (formatPublishedDate(article.published, dateText, sizeof(dateText))) {
       std::snprintf(meta, LIST_META_CAPACITY, "%s - %s", sources[article.sourceIndex].name.c_str(), dateText);
     } else {
       std::snprintf(meta, LIST_META_CAPACITY, "%s", sources[article.sourceIndex].name.c_str());
@@ -896,7 +901,7 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
   screen.spacer(theme.spaceXs);
   char articleDate[16] = {};
   char metaLine[96] = {};
-  if (formatPublishedDate(article.item.published, articleDate, sizeof(articleDate))) {
+  if (formatPublishedDate(article.published, articleDate, sizeof(articleDate))) {
     std::snprintf(metaLine, sizeof(metaLine), "%s - %s", sources[article.sourceIndex].name.c_str(), articleDate);
   } else {
     std::snprintf(metaLine, sizeof(metaLine), "%s", sources[article.sourceIndex].name.c_str());
@@ -970,9 +975,8 @@ void RssNewsActivity::openArticle(const size_t articleIndex) {
   const auto scale = uiScaleSpec();
 
   std::string offlineBody;
-  const Source& source = sources[article.sourceIndex];
-  const auto bodyResult = RssArticleCache::load(article.item, source.name.c_str(), source.dropRules.c_str(),
-                                              source.dropStartRules.c_str(), source.stopRules.c_str(), offlineBody);
+  const auto bodyResult = RssArticleCache::load(
+      {article.link, article.title, article.published}, offlineBody);
   if (bodyResult == RssArticleCache::CacheResult::FALLBACK_READY) {
     offlineBody.insert(0, "Résumé du flux uniquement.\nActualise RSS pour réessayer l'article.\n\n");
   } else if (bodyResult != RssArticleCache::CacheResult::READY) {
@@ -983,7 +987,7 @@ void RssNewsActivity::openArticle(const size_t articleIndex) {
     renderer.ensureSdCardFontReady(readerFontId, visibleBody.c_str(), /*styleMask=*/0x01);
   }
 
-  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.item.title, maxWidth, 3);
+  articleTitleLines = renderer.wrappedText(scale.titleFontId, article.title, maxWidth, 3);
   articleSummaryLines = renderer.wrappedText(readerFontId, visibleBody.c_str(), maxWidth, 2000);
   RssArticleRichText::decorateWrappedLines(offlineBody, articleSummaryLines);
   articleLineOffset = 0;
@@ -1119,6 +1123,13 @@ void RssNewsActivity::refreshFeeds() {
     requestUpdate();
     return;
   }
+  if (!ensureFeedBuffer()) {
+    refreshHadError = true;
+    state = State::LIST;
+    statusMessage = tr(STR_MEMORY_ERROR);
+    requestUpdate();
+    return;
+  }
   usedNetwork = true;
   refreshHadError = false;
   goHomeAfterRefreshCancel = false;
@@ -1164,15 +1175,18 @@ void RssNewsActivity::refreshFeeds() {
             cacheResult == RssArticleCache::CacheResult::FALLBACK_READY) refreshHadError = true;
       }
       if (!cancelled) {
-        mergeSourceArticles(sourceIndex, feedItems, fetchedCount);
-        ++successfulSources;
+        if (mergeSourceArticles(sourceIndex, feedItems, fetchedCount)) {
+          ++successfulSources;
+        } else {
+          refreshHadError = true;
+        }
       } else {
         // This source was not merged into metadata. Remove any newly-created
         // body that is not already referenced by the current history.
         for (size_t i = 0; i < processedBodies; ++i) {
           bool referenced = false;
           for (size_t j = 0; j < articleCount; ++j) {
-            if (sameRssItem(feedItems[i], articles[j].item)) {
+            if (RssArticleMetadata::same(articles[j], feedItems[i])) {
               referenced = true;
               break;
             }
@@ -1187,6 +1201,7 @@ void RssNewsActivity::refreshFeeds() {
   }
 
   if (cancelled) {
+    releaseFeedBuffer();
     if (goHomeAfterRefreshCancel) {
       onGoHome();
       return;
@@ -1198,6 +1213,7 @@ void RssNewsActivity::refreshFeeds() {
     return;
   }
 
+  releaseFeedBuffer();
   rebuildDisplayOrder();
   if (successfulSources > 0 && !saveCache()) {
     LOG_ERR("RSS", "Could not persist refreshed cache");
@@ -1217,11 +1233,9 @@ void RssNewsActivity::seedSimulatorArticles() {
       CachedArticle& article = articles[articleCount++];
       article = CachedArticle{};
       article.sourceIndex = sourceIndex;
-      snprintf(article.item.title, sizeof(article.item.title), "Exemple %u - %s", static_cast<unsigned>(sample + 1),
+      snprintf(article.title, sizeof(article.title), "Exemple %u - %s", static_cast<unsigned>(sample + 1),
                sources[sourceIndex].name.c_str());
-      snprintf(article.item.summary, sizeof(article.item.summary),
-               "Contenu hors ligne de demonstration pour verifier le cache SD, le tactile et la pagination de lecture.");
-      snprintf(article.item.published, sizeof(article.item.published), "2026-09-%02uT12:00:00Z",
+      snprintf(article.published, sizeof(article.published), "2026-09-%02uT12:00:00Z",
                static_cast<unsigned>(8 - sample));
     }
   }
