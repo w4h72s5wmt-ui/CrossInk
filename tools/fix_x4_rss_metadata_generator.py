@@ -5,6 +5,7 @@ text = path.read_text()
 
 targets = [
     ("cache body-state helpers", "size_t sanitizeFallbackMarkup(char* text, const size_t length) {\n"),
+    ("cache identity API", '#include "RssArticleCachePolicy.inc"\n'),
     ("runtime RSS buffers", "void RssNewsActivity::loadSources() {\n"),
     ("lightweight history merge", "void RssNewsActivity::rebuildDisplayOrder() {\n"),
     ("cache/metadata tests", "std::string readFile(const char* path) {\n"),
