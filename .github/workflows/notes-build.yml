@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-x4-pro-notes:
@@ -16,6 +16,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -50,6 +51,27 @@ jobs:
         run: |
           set -euo pipefail
           pio run -e x4-pro | tee pio-x4-pro-notes.log
+
+      - name: Materialize clean source and repository cleanup commit
+        run: |
+          set -euo pipefail
+          base=1f151c8980c9c263fe68ce340d1222f25fcb47e4
+          mkdir -p /tmp/rss-final/src/activities/home /tmp/rss-final/tests/rss
+          cp src/activities/home/RssArticleCache.cpp /tmp/rss-final/src/activities/home/
+          cp src/activities/home/RssArticleHtml.inc /tmp/rss-final/src/activities/home/
+          cp tests/rss/test_article_cache.cpp /tmp/rss-final/tests/rss/
+          git reset --hard "$base"
+          cp /tmp/rss-final/src/activities/home/RssArticleCache.cpp src/activities/home/
+          cp /tmp/rss-final/src/activities/home/RssArticleHtml.inc src/activities/home/
+          cp /tmp/rss-final/tests/rss/test_article_cache.cpp tests/rss/
+          rm -f .github/workflows/apply-rss-offline-patch.yml .github/workflows/rss-integration-build.yml
+          rm -f tools/apply_rss_offline_patch.py tools/run_rss_offline_patch.py tools/apply_x4_*.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B x4-pro-rss-boundary-cleanup-generated
+          git add src/activities/home/RssArticleCache.cpp src/activities/home/RssArticleHtml.inc tests/rss/test_article_cache.cpp .github/workflows tools
+          git commit -m "fix(rss): preserve structural text boundaries"
+          git push --force origin x4-pro-rss-boundary-cleanup-generated
 
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
