@@ -1,70 +1,44 @@
-name: CrossInk Notes + Demineur + 2048 X4 Pro
+name: Materialize validated RSS spacing fix
 
 on:
   push:
-    branches: [x4-pro-notes, x4-pro-rss-spacing-rootfix-validation]
-  workflow_dispatch:
+    branches: [x4-pro-rss-spacing-rootfix-validation]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-x4-pro-notes:
+  materialize:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout CrossInk sources
+      - name: Checkout candidate branch
         uses: actions/checkout@v6
         with:
-          submodules: recursive
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-          enable-cache: true
-
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.platformio/packages
-            ~/.platformio/platforms
-          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
-
-      - name: Install PlatformIO Core
-        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
-
-      - name: Apply RSS spacing root fix candidate
+      - name: Apply validated candidate
         run: |
           python tools/x4_rss_spacing_rootfix.py
           python tools/x4_rss_spacing_rootfix_adjust.py
 
-      - name: Test RSS cache with ASan and UBSan
-        run: sh tests/rss/run.sh
-
-      - name: Clean X4 Pro build output
-        run: pio run -e x4-pro -t clean
-
-      - name: Build X4 Pro firmware directly from sources
+      - name: Materialize clean commit
         run: |
           set -euo pipefail
-          pio run -e x4-pro | tee pio-x4-pro-notes.log
+          mkdir -p /tmp/rss-spacing-fix/src/activities/home /tmp/rss-spacing-fix/tests/rss
+          cp src/activities/home/RssArticleHtml.inc /tmp/rss-spacing-fix/src/activities/home/
+          cp src/activities/home/RssArticleRichText.h /tmp/rss-spacing-fix/src/activities/home/
+          cp src/activities/home/RssArticleCache.cpp /tmp/rss-spacing-fix/src/activities/home/
+          cp tests/rss/test_article_cache.cpp /tmp/rss-spacing-fix/tests/rss/
 
-      - name: Upload X4 Pro firmware
-        uses: actions/upload-artifact@v7
-        with:
-          name: firmware-x4-pro-build-${{ github.run_number }}
-          path: .pio/build/x4-pro/firmware-x4-pro.bin
-          if-no-files-found: error
+          git reset --hard 540404358344d77767c268e9858ff6401370201d
+          cp /tmp/rss-spacing-fix/src/activities/home/RssArticleHtml.inc src/activities/home/
+          cp /tmp/rss-spacing-fix/src/activities/home/RssArticleRichText.h src/activities/home/
+          cp /tmp/rss-spacing-fix/src/activities/home/RssArticleCache.cpp src/activities/home/
+          cp /tmp/rss-spacing-fix/tests/rss/test_article_cache.cpp tests/rss/
 
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: x4-pro-build-${{ github.run_number }}-log
-          path: pio-x4-pro-notes.log
-          if-no-files-found: ignore
+          git config user.name "CrossInk Builder"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -B x4-pro-rss-spacing-rootfix-generated
+          git add src/activities/home/RssArticleHtml.inc src/activities/home/RssArticleRichText.h src/activities/home/RssArticleCache.cpp tests/rss/test_article_cache.cpp
+          git commit -m "fix(rss): preserve article text spacing"
+          git push --force origin x4-pro-rss-spacing-rootfix-generated
