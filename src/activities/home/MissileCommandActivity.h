@@ -18,11 +18,14 @@ class MissileCommandActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  bool skipLoopDelay() override { return viewMode_ == ViewMode::Playing; }
+  bool preventAutoSleep() override { return viewMode_ == ViewMode::Playing; }
 
  private:
   using UiApp = freeink::ui::FreeInkApp<16, 4>;
 
   static constexpr int kMenuRowCount = 5;
+  static constexpr int kDifficultyCount = 3;
   static constexpr int kCityCount = 6;
   static constexpr int kBatteryCount = 3;
   static constexpr int kMaxEnemyMissiles = 12;
@@ -45,6 +48,7 @@ class MissileCommandActivity final : public Activity {
     int16_t x = 0;
     int16_t y = 0;
     uint8_t phase = 0;
+    uint8_t phaseTicks = 0;
     bool active = false;
   };
 
@@ -59,6 +63,7 @@ class MissileCommandActivity final : public Activity {
   int visibleRows_ = 1;
   int topIndex_ = 0;
   bool initialViewportPending_ = true;
+  std::array<char, 40> continueValue_{};
 
   std::array<Missile, kMaxEnemyMissiles> enemies_{};
   std::array<Missile, kMaxPlayerMissiles> players_{};
@@ -71,9 +76,32 @@ class MissileCommandActivity final : public Activity {
   uint16_t wave_ = 1;
   uint16_t enemiesSpawned_ = 0;
   uint16_t enemiesResolved_ = 0;
-  int64_t lastTickUs_ = 0;
+  int64_t lastLogicTickUs_ = 0;
+  int64_t lastFrameRequestUs_ = 0;
   int64_t nextSpawnUs_ = 0;
   bool hasSavedGame_ = false;
+  bool frameDirty_ = false;
+  bool sceneNeedsFullRedraw_ = true;
+  bool refreshInFlight_ = false;
+
+  // Rendering state belongs to the render task. The gameplay state above can
+  // advance several 40 ms simulation ticks while an e-ink waveform is still
+  // running; these caches let the next frame draw only the new trail segments.
+  std::array<int16_t, kMaxEnemyMissiles> enemyDrawX_{};
+  std::array<int16_t, kMaxEnemyMissiles> enemyDrawY_{};
+  std::array<uint16_t, kMaxEnemyMissiles> enemyDrawProgress_{};
+  std::array<uint8_t, kMaxEnemyMissiles> enemyDrawValid_{};
+  std::array<int16_t, kMaxPlayerMissiles> playerDrawX_{};
+  std::array<int16_t, kMaxPlayerMissiles> playerDrawY_{};
+  std::array<uint16_t, kMaxPlayerMissiles> playerDrawProgress_{};
+  std::array<uint8_t, kMaxPlayerMissiles> playerDrawValid_{};
+  std::array<uint8_t, kMaxExplosions> explosionDrawPhase_{};
+  std::array<uint8_t, kMaxExplosions> explosionDrawValid_{};
+  std::array<uint8_t, kCityCount> drawnCitiesAlive_{};
+  std::array<uint8_t, kBatteryCount> drawnAmmo_{};
+  uint32_t drawnScore_ = UINT32_MAX;
+  uint16_t drawnWave_ = UINT16_MAX;
+  int drawnCityCount_ = -1;
 
   static void menuScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
@@ -86,6 +114,11 @@ class MissileCommandActivity final : public Activity {
   void renderMenu();
   void renderPlaying();
   void renderGameOver();
+  void drawFullPlayingScene();
+  bool drawIncrementalPlayingScene();
+  void waitForPendingRefresh();
+  void startFastRefresh();
+  void resetRenderCaches();
 
   void newGame();
   void continueGame();
