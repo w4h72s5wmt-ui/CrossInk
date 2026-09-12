@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-x4-pro-notes:
@@ -35,6 +35,7 @@ jobs:
             ~/.platformio/platforms
           key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
 
+      # BEGIN_INCREMENTAL_CACHE_BOOTSTRAP
       - name: Cache incremental X4 Pro build
         uses: actions/cache@v4
         with:
@@ -44,10 +45,12 @@ jobs:
           key: ${{ runner.os }}-x4-pro-pio6.1.19-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-x4-pro-pio6.1.19-
+      # END_INCREMENTAL_CACHE_BOOTSTRAP
 
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      # BEGIN_APP_OVERLAYS_BOOTSTRAP
       - name: Apply Notes + Minesweeper overlays without historical RSS bootstrap
         run: python3 tools/apply_x4_notes_minesweeper_without_rss.py
 
@@ -56,6 +59,94 @@ jobs:
 
       - name: Apply minimal RSS host bridge
         run: python3 tools/apply_x4_rss_host_bridge.py
+      # END_APP_OVERLAYS_BOOTSTRAP
+
+      # BEGIN_DIRECT_SOURCE_BOOTSTRAP
+      - name: Freeze generated app sources into the branch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Lock the #249 Figaro share-bar cleanup with a production-code test.
+          test_path = Path("tests/rss/test_article_cache.cpp")
+          test = test_path.read_text()
+          anchor = '''  check(normalLength == normal.size() && std::string(normalBuffer.data(), normalLength) == normal,
+                  "Figaro prose is not removed without multiple UI markers");
+          '''
+          addition = '''
+
+            std::string sharedMiddle = "Avant -Lien copie- Mail- X- MessengerApres";
+            std::vector<char> sharedMiddleBuffer(sharedMiddle.begin(), sharedMiddle.end());
+            sharedMiddleBuffer.push_back('\\0');
+            const size_t sharedMiddleLength = RC::stripFigaroShareControls(
+                sharedMiddleBuffer.data(), sharedMiddle.size(), "https://www.lefigaro.fr/test");
+            const std::string sharedMiddleOut(sharedMiddleBuffer.data(), sharedMiddleLength);
+            check(sharedMiddleOut == "Avant Apres", "Figaro mid-article share controls removed without losing prose");
+
+            std::string sharedTwice =
+                "Debut -Lien copié- Mail- X- MessengerMilieu -Lien copie- Mail- X- MessengerFin";
+            std::vector<char> sharedTwiceBuffer(sharedTwice.begin(), sharedTwice.end());
+            sharedTwiceBuffer.push_back('\\0');
+            const size_t sharedTwiceLength = RC::stripFigaroShareControls(
+                sharedTwiceBuffer.data(), sharedTwice.size(), "https://www.lefigaro.fr/test");
+            const std::string sharedTwiceOut(sharedTwiceBuffer.data(), sharedTwiceLength);
+            check(sharedTwiceOut == "Debut Milieu Fin", "Figaro multiple share controls removed");
+          '''
+          if addition.strip() not in test:
+              if anchor not in test:
+                  raise SystemExit("Figaro cleanup test anchor not found")
+              test = test.replace(anchor, anchor + addition, 1)
+              test_path.write_text(test)
+
+          # The #250 history fix must remain present in the direct source.
+          rss_path = Path("src/activities/home/RssNewsActivity.cpp")
+          rss = rss_path.read_text()
+          required = (
+              "const auto keepHistoryItem = [requiresCachedBody](const RssItem& item)",
+              "if (!keepHistoryItem(items[i])) continue;",
+              "articles[i].sourceIndex != sourceIndex || !keepHistoryItem(articles[i].item)",
+          )
+          missing = [needle for needle in required if needle not in rss]
+          if missing:
+              raise SystemExit("RSS #250 history regression missing: " + ", ".join(missing))
+
+          # Rewrite this workflow to its permanent form: sources are now final,
+          # so no app overlay or incremental build cache is allowed at compile time.
+          workflow_path = Path(".github/workflows/notes-build.yml")
+          workflow = workflow_path.read_text()
+          workflow = workflow.replace("permissions:\n  contents: write\n", "permissions:\n  contents: read\n", 1)
+
+          def remove_marked_block(text, begin, end):
+              start = text.find(begin)
+              if start < 0:
+                  raise SystemExit(f"workflow marker missing: {begin}")
+              finish = text.find(end, start)
+              if finish < 0:
+                  raise SystemExit(f"workflow marker missing: {end}")
+              finish += len(end)
+              while finish < len(text) and text[finish] in " \t":
+                  finish += 1
+              if finish < len(text) and text[finish] == "\\n":
+                  finish += 1
+              return text[:start] + text[finish:]
+
+          workflow = remove_marked_block(
+              workflow, "      # BEGIN_INCREMENTAL_CACHE_BOOTSTRAP", "      # END_INCREMENTAL_CACHE_BOOTSTRAP")
+          workflow = remove_marked_block(
+              workflow, "      # BEGIN_APP_OVERLAYS_BOOTSTRAP", "      # END_APP_OVERLAYS_BOOTSTRAP")
+          workflow = remove_marked_block(
+              workflow, "      # BEGIN_DIRECT_SOURCE_BOOTSTRAP", "      # END_DIRECT_SOURCE_BOOTSTRAP")
+          workflow_path.write_text(workflow)
+          PY
+
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests/rss/test_article_cache.cpp .github/workflows/notes-build.yml
+          git diff --cached --stat
+          git commit -m "refactor(x4): consolidate app sources"
+          git push origin HEAD:x4-pro-notes
+      # END_DIRECT_SOURCE_BOOTSTRAP
 
       - name: Test consolidated RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
