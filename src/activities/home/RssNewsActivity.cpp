@@ -940,6 +940,7 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
     return;
   }
 
+  const fui::Rect articleViewport = screen.body();
   size_t displayedLines = 0;
   for (size_t i = articleLineOffset; i < articleSummaryLines.size(); ++i) {
     if (screen.body().height < bodyHeight) break;
@@ -950,6 +951,33 @@ void RssNewsActivity::buildArticleScreen(UiApp::ScreenType& screen) {
     ++displayedLines;
   }
   articlePageLines = std::max<size_t>(1, displayedLines);
+
+  // Keep the progress indicator entirely inside the reader's right margin so
+  // it never steals text width. A one-pixel rail plus a thicker thumb remains
+  // legible on e-ink without adding any persistent state or allocation.
+  const size_t totalLines = articleSummaryLines.size();
+  if (displayedLines > 0 && totalLines > displayedLines && articleViewport.height > 0) {
+    const int trackHeight = articleViewport.height;
+    const int trackX = renderer.getScreenWidth() - std::max(3, readerMargin / 2);
+    const int minThumbHeight = std::min(14, trackHeight);
+    int thumbHeight = static_cast<int>((static_cast<uint64_t>(trackHeight) * displayedLines) / totalLines);
+    thumbHeight = std::clamp(thumbHeight, minThumbHeight, trackHeight);
+
+    const size_t maxOffset = totalLines - displayedLines;
+    const size_t clampedOffset = std::min(articleLineOffset, maxOffset);
+    const int thumbTravel = trackHeight - thumbHeight;
+    const int thumbY = articleViewport.y +
+                       (maxOffset == 0 ? 0 : static_cast<int>((static_cast<uint64_t>(thumbTravel) * clampedOffset) /
+                                                              maxOffset));
+
+    screen.target().fill(
+        fui::Rect{static_cast<int16_t>(trackX), articleViewport.y, 1, static_cast<int16_t>(trackHeight)},
+        fui::Paint::solid(fui::Color::Black));
+    screen.target().fill(
+        fui::Rect{static_cast<int16_t>(trackX - 1), static_cast<int16_t>(thumbY), 3,
+                  static_cast<int16_t>(thumbHeight)},
+        fui::Paint::solid(fui::Color::Black));
+  }
 }
 
 void RssNewsActivity::buildStatusScreen(UiApp::ScreenType& screen) {
