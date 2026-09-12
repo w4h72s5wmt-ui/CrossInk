@@ -394,6 +394,52 @@ size_t normalizeRemovalBoundaries(char* text, const size_t length) {
   return write;
 }
 
+bool anchorBoundaryGluesAfterText(const char* text, const size_t length) {
+  if (!text || length == 0) return true;
+  const unsigned char last = static_cast<unsigned char>(text[length - 1]);
+  if (std::isspace(last) || text[length - 1] == RSS_REMOVAL_BOUNDARY) return true;
+  switch (text[length - 1]) {
+    case '\'':
+    case '"':
+    case '-':
+    case '/':
+    case '(':
+    case '[':
+    case '{':
+      return true;
+    default:
+      break;
+  }
+  if (length >= 3) {
+    const unsigned char a = static_cast<unsigned char>(text[length - 3]);
+    const unsigned char b = static_cast<unsigned char>(text[length - 2]);
+    const unsigned char c = static_cast<unsigned char>(text[length - 1]);
+    // Curly apostrophes/opening quote can legitimately bind directly to the
+    // following linked phrase. A closing quote is intentionally not included:
+    // a card following quoted prose still needs a separator.
+    if (a == 0xe2 && b == 0x80 && (c == 0x98 || c == 0x99 || c == 0x9c)) return true;
+  }
+  return false;
+}
+
+bool anchorBoundaryGluesBeforeSource(const char* html, const size_t length, const size_t pos) {
+  if (!html || pos >= length) return true;
+  const unsigned char c = static_cast<unsigned char>(html[pos]);
+  if (htmlSpace(static_cast<char>(c))) return true;
+  if (html[pos] == '\'' || html[pos] == '"' || html[pos] == '-' || html[pos] == '/') return true;
+  if (pos + 3 <= length && c == 0xe2 && static_cast<unsigned char>(html[pos + 1]) == 0x80) {
+    const unsigned char tail = static_cast<unsigned char>(html[pos + 2]);
+    if (tail == 0x99 || tail == 0x9d) return true;  // closing curly quote/apostrophe
+  }
+  static constexpr const char* GLUE_ENTITIES[] = {
+      "&apos;", "&rsquo;", "&#39;", "&#x27;", "&#8217;", "&#x2019;",
+  };
+  for (const char* entity : GLUE_ENTITIES) {
+    if (startsWithInsensitive(html, length, pos, entity)) return true;
+  }
+  return false;
+}
+
 bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {
   textLength = 0;
   if (!html || !text || htmlLength == 0) return false;
@@ -402,6 +448,7 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
   size_t pos = begin;
   size_t anchorTextStart = 0;
   size_t anchorMarkerStart = 0;
+  bool anchorLeadingBoundary = false;
   bool inAnchor = false;
   while (pos < end && textLength < MAX_TEXT_BYTES) {
     if (html[pos] == '<') {
@@ -433,26 +480,51 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
         if (textLength > 0 && pos < end) appendRemovalBoundary(text, textLength);
         continue;
       }
+      // Images and <source> nodes contribute no visible text to our reader.
+      // Preserve a seam when they sit directly between prose/caption text so
+      // "phrase.<img>© Crédit" cannot collapse into "phrase.© Crédit".
+      if (!tag.closing && (tagEquals(tag.name, "img") || tagEquals(tag.name, "source"))) {
+        if (!inAnchor && textLength > 0 && next < end) appendRemovalBoundary(text, textLength);
+        pos = next;
+        continue;
+      }
       if (tagEquals(tag.name, "a")) {
         if (!tag.closing && !tag.selfClosing && !inAnchor) {
           inAnchor = true;
           anchorMarkerStart = textLength;
+          anchorLeadingBoundary = textLength > 0 && !anchorBoundaryGluesAfterText(text, textLength);
           for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_START[i]);
           anchorTextStart = textLength;
         } else if (tag.closing && inAnchor) {
-          if (looksLikeVisibleUrl(text + anchorTextStart, textLength - anchorTextStart)) {
+          const size_t anchorTextBytes = textLength > anchorTextStart ? textLength - anchorTextStart : 0;
+          if (looksLikeVisibleUrl(text + anchorTextStart, anchorTextBytes)) {
             textLength = anchorMarkerStart;
             while (textLength > 0 && text[textLength - 1] == ' ' &&
                    (next < end && htmlSpace(html[next]))) {
               --textLength;
             }
             if (next < end) appendRemovalBoundary(text, textLength);
-          } else if (textLength > anchorTextStart) {
+          } else if (anchorTextBytes > 0) {
+            // Long linked labels are frequently CSS cards/teasers. Their HTML
+            // often has no literal whitespace around the <a>, even though the
+            // browser lays them out as separate blocks. Only repair these long
+            // labels; short inline links keep their exact grammar.
+            const bool cardLikeAnchor = anchorTextBytes >= 24;
+            if (cardLikeAnchor && anchorLeadingBoundary && textLength < MAX_TEXT_BYTES) {
+              std::memmove(text + anchorMarkerStart + 1, text + anchorMarkerStart,
+                           textLength - anchorMarkerStart);
+              text[anchorMarkerStart] = RSS_REMOVAL_BOUNDARY;
+              ++textLength;
+            }
             for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_END[i]);
+            if (cardLikeAnchor && next < end && !anchorBoundaryGluesBeforeSource(html, end, next)) {
+              appendRemovalBoundary(text, textLength);
+            }
           } else {
             textLength = anchorMarkerStart;
             if (next < end) appendRemovalBoundary(text, textLength);
           }
+          anchorLeadingBoundary = false;
           inAnchor = false;
         }
       }
