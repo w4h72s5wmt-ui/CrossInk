@@ -1,4 +1,4 @@
-name: CrossInk X4 Pro RSS metadata candidate
+name: CrossInk X4 Pro RSS metadata freeze
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  build-x4-pro-rss-metadata:
+  freeze-x4-pro-rss-metadata:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout CrossInk sources
@@ -17,28 +17,7 @@ jobs:
           submodules: recursive
           fetch-depth: 2
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-          enable-cache: true
-
-      - name: Cache PlatformIO packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.platformio/packages
-            ~/.platformio/platforms
-          key: ${{ runner.os }}-crossink-notes-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
-
-      - name: Install PlatformIO Core
-        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
-
-      - name: Apply RSS metadata optimization candidate
+      - name: Apply validated RSS metadata candidate
         run: |
           python3 tools/fix_x4_rss_metadata_generator.py
           python3 tools/x4_rss_metadata_opt_candidate.py
@@ -53,24 +32,15 @@ jobs:
           p.write_text(text.replace(old, new, 1))
           PY
           git diff --check
-          git diff --stat
 
-      - name: Test RSS cache with ASan and UBSan
+      - name: Test validated RSS tree
         run: sh tests/rss/run.sh
 
-      - name: Clean X4 Pro build output
-        run: pio run -e x4-pro -t clean
-
-      - name: Build X4 Pro candidate
-        run: |
-          set -euo pipefail
-          pio run -e x4-pro | tee pio-x4-pro-notes.log
-
-      - name: Freeze clean validated source tree
+      - name: Freeze clean source tree
         run: |
           git fetch origin x4-pro-notes --depth=1
           git checkout FETCH_HEAD -- .github/workflows/notes-build.yml
-          git rm tools/x4_rss_metadata_opt_candidate.py tools/fix_x4_rss_metadata_generator.py
+          git rm -f tools/x4_rss_metadata_opt_candidate.py tools/fix_x4_rss_metadata_generator.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src tests/rss .github/workflows/notes-build.yml
@@ -78,18 +48,3 @@ jobs:
           git diff --cached --stat
           git commit -m "perf(rss): shrink historical metadata memory"
           git push --force origin HEAD:x4-pro-rss-metadata-generated
-
-      - name: Upload candidate firmware
-        uses: actions/upload-artifact@v7
-        with:
-          name: firmware-x4-pro-rss-metadata-candidate-${{ github.run_number }}
-          path: .pio/build/x4-pro/firmware-x4-pro.bin
-          if-no-files-found: error
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: x4-pro-rss-metadata-candidate-${{ github.run_number }}-log
-          path: pio-x4-pro-notes.log
-          if-no-files-found: ignore
