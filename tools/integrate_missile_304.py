@@ -11,9 +11,7 @@ PIO = ROOT / "platformio.ini"
 
 def git_show(path: str) -> str:
     return subprocess.check_output(
-        ["git", "show", f"origin/x4-pro-missile-command:{path}"],
-        cwd=ROOT,
-        text=True,
+        ["git", "show", f"origin/x4-pro-missile-command:{path}"], cwd=ROOT, text=True
     )
 
 
@@ -23,12 +21,8 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-# Start from the already validated V2 app source, but integrate it into build 304
-# and replace the animation renderer. No compatibility layer or helper remains in
-# the final branch: this script deletes itself after a successful CI build.
 HDR.write_text(git_show("src/activities/home/MissileCommandActivity.h"))
 cpp = git_show("src/activities/home/MissileCommandActivity.cpp")
-
 cpp = replace_once(cpp, "constexpr int64_t LOGIC_TICK_US = 40000;", "constexpr int64_t LOGIC_TICK_US = 33333;", "logic 30 Hz")
 cpp = replace_once(cpp, "constexpr int64_t FRAME_INTERVAL_US = 120000;", "constexpr int64_t FRAME_INTERVAL_US = 33333;", "frame target 30 Hz")
 cpp = replace_once(cpp, "constexpr int MAX_CATCHUP_TICKS = 5;", "constexpr int MAX_CATCHUP_TICKS = 8;", "catchup")
@@ -49,10 +43,8 @@ new_renderers = r'''void MissileCommandActivity::drawFullPlayingScene() {
 
   renderer.drawRoundedRect(geometry.status.x, geometry.status.y, geometry.status.width, geometry.status.height, 1, 6, true);
   renderer.drawRect(geometry.field.x, geometry.field.y, geometry.field.width, geometry.field.height, 1, true);
-
   const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
-
   resetRenderCaches();
   sceneNeedsFullRedraw_ = false;
 }
@@ -60,11 +52,9 @@ new_renderers = r'''void MissileCommandActivity::drawFullPlayingScene() {
 bool MissileCommandActivity::drawIncrementalPlayingScene() {
   const GameGeometry geometry = gameGeometry(renderer, mappedInput);
 
-  // Recompose the complete play field in RAM for every visible frame. This is
-  // intentionally NOT a full-screen clear: fillRect() only touches the field
-  // bytes, while the panel still receives a FAST differential refresh. The
-  // previous V2 appended line segments forever, so every missile trajectory
-  // remained black. Here every old missile position is white in the next frame.
+  // Recompose the whole gameplay field in RAM each visible frame. This clears
+  // the previous missile positions while retaining FAST differential e-ink
+  // refresh. No permanent trajectory accumulation remains.
   renderer.fillRect(geometry.field.x + 1, geometry.field.y + 1,
                     std::max(1, geometry.field.width - 2), std::max(1, geometry.field.height - 2), false);
   renderer.drawLine(geometry.field.x, geometry.groundY,
@@ -87,17 +77,13 @@ bool MissileCommandActivity::drawIncrementalPlayingScene() {
     drawCenteredText(renderer, UI_10_FONT_ID, battery, ammoText);
   }
 
-  // Missiles are sprites, not permanent trails. Keep a short tail so direction
-  // remains readable on e-ink, but erase it on the next frame with the field
-  // recomposition above.
   for (const auto& missile : enemies_) {
     if (!missile.active) continue;
     const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
     const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
     const uint16_t tailProgress = missile.progress > 45 ? static_cast<uint16_t>(missile.progress - 45) : 0;
-    const int tx = lerpInt(missile.startX, missile.targetX, tailProgress);
-    const int ty = lerpInt(missile.startY, missile.targetY, tailProgress);
-    renderer.drawLine(tx, ty, x, y, 1, true);
+    renderer.drawLine(lerpInt(missile.startX, missile.targetX, tailProgress),
+                      lerpInt(missile.startY, missile.targetY, tailProgress), x, y, 1, true);
     renderer.fillRect(x - 1, y - 1, 3, 3, true);
   }
 
@@ -106,15 +92,13 @@ bool MissileCommandActivity::drawIncrementalPlayingScene() {
     const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
     const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
     const uint16_t tailProgress = missile.progress > 70 ? static_cast<uint16_t>(missile.progress - 70) : 0;
-    const int tx = lerpInt(missile.startX, missile.targetX, tailProgress);
-    const int ty = lerpInt(missile.startY, missile.targetY, tailProgress);
-    renderer.drawLine(tx, ty, x, y, 1, true);
+    renderer.drawLine(lerpInt(missile.startX, missile.targetX, tailProgress),
+                      lerpInt(missile.startY, missile.targetY, tailProgress), x, y, 1, true);
     renderer.drawRect(x - 2, y - 2, 5, 5, 1, true);
   }
 
   for (const auto& explosion : explosions_) {
-    if (!explosion.active) continue;
-    drawExplosion(renderer, explosion.x, explosion.y, explosionRadius(explosion.phase));
+    if (explosion.active) drawExplosion(renderer, explosion.x, explosion.y, explosionRadius(explosion.phase));
   }
 
   renderer.fillRect(geometry.status.x + 2, geometry.status.y + 2,
@@ -124,7 +108,6 @@ bool MissileCommandActivity::drawIncrementalPlayingScene() {
                 static_cast<unsigned long>(score_), static_cast<unsigned long>(highScore_),
                 static_cast<unsigned>(wave_), aliveCityCount());
   drawCenteredText(renderer, UI_10_FONT_ID, geometry.status, status);
-
   return true;
 }
 '''
@@ -135,23 +118,33 @@ home = HOME_CPP.read_text()
 home = replace_once(home, '#include "Game2048Activity.h"\n', '#include "Game2048Activity.h"\n#include "MissileCommandActivity.h"\n', "home include")
 home = replace_once(home, '  Game2048,\n  RssNews,', '  Game2048,\n  MissileCommand,\n  RssNews,', "home enum")
 home = replace_once(home, 'static constexpr int kCapacity = 12;', 'static constexpr int kCapacity = 13;', "menu capacity")
-home = home.replace('items.push({"2048", Chart, HomeMenuAction::Game2048});\n  items.push({"RSS", Library, HomeMenuAction::RssNews});',
-                    'items.push({"2048", Chart, HomeMenuAction::Game2048});\n  items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});\n  items.push({"RSS", Library, HomeMenuAction::RssNews});')
-if home.count('HomeMenuAction::MissileCommand') < 3:
-    raise RuntimeError("menu item integration incomplete")
 home = replace_once(home, 'constexpr uint16_t CAROUSEL_CACHE_VERSION = 6;', 'constexpr uint16_t CAROUSEL_CACHE_VERSION = 7;', "carousel cache version")
 home = replace_once(home, 'int count = 7;  // File Browser, Recents, Notes, Demineur, 2048, File transfer, Settings',
                     'int count = 8;  // File Browser, Recents, Notes, Demineur, 2048, Missile Command, File transfer, Settings',
                     "menu count")
 
-switch_old = '''    case HomeMenuAction::Game2048:\n      onGame2048Open();\n      break;\n    case HomeMenuAction::RssNews:'''
-switch_new = '''    case HomeMenuAction::Game2048:\n      onGame2048Open();\n      break;\n    case HomeMenuAction::MissileCommand:\n      onMissileCommandOpen();\n      break;\n    case HomeMenuAction::RssNews:'''
-if switch_old not in home:
-    raise RuntimeError("missing Game2048 switch pattern")
+# Insert the menu row after every 2048 row (normal and minimal menus).
+lines = []
+inserted_menu_rows = 0
+for line in home.splitlines(keepends=True):
+    lines.append(line)
+    if 'items.push({"2048", Chart, HomeMenuAction::Game2048});' in line:
+        indent = line[:len(line) - len(line.lstrip())]
+        lines.append(indent + 'items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});\n')
+        inserted_menu_rows += 1
+home = ''.join(lines)
+if inserted_menu_rows < 2:
+    raise RuntimeError(f"expected two Home menu insertions, got {inserted_menu_rows}")
+
+switch_old = "    case HomeMenuAction::Game2048:\n      onGame2048Open();\n      break;\n    case HomeMenuAction::RssNews:"
+switch_new = "    case HomeMenuAction::Game2048:\n      onGame2048Open();\n      break;\n    case HomeMenuAction::MissileCommand:\n      onMissileCommandOpen();\n      break;\n    case HomeMenuAction::RssNews:"
+switch_count = home.count(switch_old)
+if switch_count == 0:
+    raise RuntimeError("missing Game2048 launch switch")
 home = home.replace(switch_old, switch_new)
 
-impl_old = '''void HomeActivity::onGame2048Open() {\n  startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput), [](const ActivityResult&) {});\n}\n'''
-impl_new = impl_old + '''\nvoid HomeActivity::onMissileCommandOpen() {\n  startActivityForResult(std::make_unique<MissileCommandActivity>(renderer, mappedInput), [](const ActivityResult&) {});\n}\n'''
+impl_old = "void HomeActivity::onGame2048Open() {\n  startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput), [](const ActivityResult&) {});\n}\n"
+impl_new = impl_old + "\nvoid HomeActivity::onMissileCommandOpen() {\n  startActivityForResult(std::make_unique<MissileCommandActivity>(renderer, mappedInput), [](const ActivityResult&) {});\n}\n"
 home = replace_once(home, impl_old, impl_new, "launcher implementation")
 HOME_CPP.write_text(home)
 
@@ -159,13 +152,10 @@ home_h = HOME_HDR.read_text()
 home_h = replace_once(home_h, '  void onGame2048Open();\n', '  void onGame2048Open();\n  void onMissileCommandOpen();\n', "launcher declaration")
 HOME_HDR.write_text(home_h)
 
-# Dedicated build environment: the standard x4-pro environment remains exactly
-# build 304. Missile Command opts into FreeInk's X4 Pro DU shortcut (~77 ms on
-# SSD1677 units) only for this firmware target, avoiding a global foundation
-# change to the normal X4 Pro build.
+# App-specific environment only: standard build 304 x4-pro remains unchanged.
 pio = PIO.read_text()
 if '[env:x4-pro-missile]' not in pio:
-    pio += '''\n\n; --- Missile Command X4 Pro -------------------------------------------------\n; App-specific target. The normal x4-pro build above stays unchanged.\n; FreeInk documents the SSD1677 fast-DU shortcut at roughly 77 ms/refresh;\n; UC8179/UC8279 X4 Pro batches keep their own driver path.\n[env:x4-pro-missile]\nextends = env:x4-pro\nbuild_flags =\n  ${env:x4-pro.build_flags}\n  -DFREEINK_X4PRO_FAST_DU_SHORTCUT\n'''
+    pio += '''\n\n; --- Missile Command X4 Pro -------------------------------------------------\n; App-specific target. FreeInk documents this SSD1677 DU shortcut at ~77 ms.\n; UC8179/UC8279 X4 Pro batches stay on their own driver path.\n[env:x4-pro-missile]\nextends = env:x4-pro\nbuild_flags =\n  ${env:x4-pro.build_flags}\n  -DFREEINK_X4PRO_FAST_DU_SHORTCUT\n'''
 PIO.write_text(pio)
 
-print("Missile Command integrated on build 304")
+print(f"Missile Command integrated on build 304; menu rows={inserted_menu_rows}, switches={switch_count}")
