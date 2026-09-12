@@ -9,8 +9,10 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <memory>
 
 #include "MappedInputManager.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
@@ -27,7 +29,16 @@ constexpr uint32_t SAVE_MAGIC = 0x4D434D31;   // MCM1
 constexpr uint32_t SCORE_MAGIC = 0x4D435331;  // MCS1
 constexpr uint8_t SAVE_VERSION = 1;
 constexpr uint8_t SCORE_VERSION = 1;
-constexpr int64_t TICK_US = 220000;
+
+// Simulation and panel cadence are deliberately independent. The old version
+// advanced the game once per screen refresh, so a slow e-ink waveform made the
+// whole game slow. We now simulate at 25 Hz and only ask for a new visible frame
+// every 120 ms. If the panel is still busy the render task waits, while the main
+// task continues simulating and accepting touch input.
+constexpr int64_t LOGIC_TICK_US = 40000;
+constexpr int64_t FRAME_INTERVAL_US = 120000;
+constexpr int MAX_CATCHUP_TICKS = 5;
+constexpr int EXPLOSION_PHASE_TICKS = 2;
 constexpr const char* DIFFICULTY_LABELS[] = {"Facile", "Normal", "Difficile"};
 
 Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
@@ -91,6 +102,10 @@ void drawCenteredText(GfxRenderer& renderer, int fontId, const Rect& rect, const
                     rect.y + std::max(0, (rect.height - h) / 2), text);
 }
 
+int explosionRadius(uint8_t phase) {
+  return phase <= 3 ? 8 + phase * 9 : 8 + (6 - phase) * 9;
+}
+
 void drawExplosion(GfxRenderer& renderer, int x, int y, int radius) {
   if (radius <= 1) {
     renderer.fillRect(x - 1, y - 1, 3, 3, true);
@@ -115,16 +130,21 @@ void MissileCommandActivity::onEnter() {
   visibleRows_ = 1;
   initialViewportPending_ = true;
   uiReady_ = false;
+  frameDirty_ = false;
+  sceneNeedsFullRedraw_ = true;
+  refreshInFlight_ = false;
   loadHighScore();
   hasSavedGame_ = loadSavedGame();
   selectedIndex_ = difficulty_;
   applySharedUiTheme(app_, uiTarget_);
   app_.on(ACTION_ROW, &MissileCommandActivity::onRowEvent, this);
   app_.setScreen(&MissileCommandActivity::menuScreen, this);
+  resetRenderCaches();
   requestUpdate();
 }
 
 void MissileCommandActivity::onExit() {
+  waitForPendingRefresh();
   if (viewMode_ == ViewMode::Playing && aliveCityCount() > 0) saveGame();
   saveHighScore();
   Activity::onExit();
@@ -167,6 +187,17 @@ void MissileCommandActivity::loopMenu() {
     return;
   }
 
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+    const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleRows_ : -visibleRows_;
+    const int next = scrollListBy(topIndex_, delta, visibleRows_, kMenuRowCount);
+    if (next != topIndex_) {
+      topIndex_ = next;
+      requestUpdate();
+    }
+    return;
+  }
+
   const auto moveSelection = [this](int index) {
     selectedIndex_ = index;
     topIndex_ = followListSelection(selectedIndex_, topIndex_, visibleRows_, kMenuRowCount);
@@ -176,6 +207,12 @@ void MissileCommandActivity::loopMenu() {
       [this, &moveSelection] { moveSelection(ButtonNavigator::nextIndex(selectedIndex_, kMenuRowCount)); });
   buttonNavigator_.onPreviousRelease(
       [this, &moveSelection] { moveSelection(ButtonNavigator::previousIndex(selectedIndex_, kMenuRowCount)); });
+  buttonNavigator_.onNextContinuous([this, &moveSelection] {
+    moveSelection(ButtonNavigator::nextPageIndex(selectedIndex_, kMenuRowCount, visibleRows_));
+  });
+  buttonNavigator_.onPreviousContinuous([this, &moveSelection] {
+    moveSelection(ButtonNavigator::previousPageIndex(selectedIndex_, kMenuRowCount, visibleRows_));
+  });
 }
 
 void MissileCommandActivity::loopPlaying() {
@@ -191,14 +228,26 @@ void MissileCommandActivity::loopPlaying() {
   int ty = 0;
   if (mappedInput.wasScreenTapped(tx, ty) && pointInRect(geometry.field, tx, ty) && ty < geometry.groundY) {
     launchPlayerMissile(tx, ty);
-    requestUpdate();
+    frameDirty_ = true;
   }
 
   const int64_t now = esp_timer_get_time();
-  if (lastTickUs_ == 0) lastTickUs_ = now;
-  if (now - lastTickUs_ >= TICK_US) {
-    tickGame(now);
-    lastTickUs_ = now;
+  if (lastLogicTickUs_ == 0) lastLogicTickUs_ = now;
+
+  int ticks = 0;
+  while (now - lastLogicTickUs_ >= LOGIC_TICK_US && ticks < MAX_CATCHUP_TICKS && viewMode_ == ViewMode::Playing) {
+    lastLogicTickUs_ += LOGIC_TICK_US;
+    tickGame(lastLogicTickUs_);
+    frameDirty_ = true;
+    ++ticks;
+  }
+  if (ticks == MAX_CATCHUP_TICKS && now - lastLogicTickUs_ >= LOGIC_TICK_US) {
+    lastLogicTickUs_ = now;
+  }
+
+  if (viewMode_ == ViewMode::Playing && frameDirty_ && now - lastFrameRequestUs_ >= FRAME_INTERVAL_US) {
+    frameDirty_ = false;
+    lastFrameRequestUs_ = now;
     requestUpdate();
   }
 }
@@ -214,7 +263,7 @@ void MissileCommandActivity::loopGameOver() {
 }
 
 void MissileCommandActivity::activateRow(int row) {
-  if (row >= 0 && row < 3) {
+  if (row >= 0 && row < kDifficultyCount) {
     difficulty_ = row;
     selectedIndex_ = row;
     requestUpdate();
@@ -224,10 +273,26 @@ void MissileCommandActivity::activateRow(int row) {
     if (hasSavedGame_) continueGame();
     return;
   }
-  if (row == 4) newGame();
+  if (row != 4) return;
+
+  if (!hasSavedGame_) {
+    newGame();
+    return;
+  }
+
+  startActivityForResult(
+      std::make_unique<ConfirmationActivity>(renderer, mappedInput, "Effacer la partie en cours :", ""),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          requestUpdate();
+          return;
+        }
+        newGame();
+      });
 }
 
 void MissileCommandActivity::newGame() {
+  waitForPendingRefresh();
   clearSavedGame();
   enemies_ = {};
   players_ = {};
@@ -239,24 +304,40 @@ void MissileCommandActivity::newGame() {
   startWave();
   viewMode_ = ViewMode::Playing;
   uiReady_ = false;
-  lastTickUs_ = esp_timer_get_time();
+  lastLogicTickUs_ = esp_timer_get_time();
+  lastFrameRequestUs_ = 0;
+  frameDirty_ = false;
+  sceneNeedsFullRedraw_ = true;
+  resetRenderCaches();
   requestUpdate();
 }
 
 void MissileCommandActivity::continueGame() {
+  waitForPendingRefresh();
+  enemies_ = {};
+  players_ = {};
+  explosions_ = {};
+  enemiesSpawned_ = 0;
+  enemiesResolved_ = 0;
   viewMode_ = ViewMode::Playing;
   uiReady_ = false;
-  lastTickUs_ = esp_timer_get_time();
-  nextSpawnUs_ = lastTickUs_ + 500000;
+  lastLogicTickUs_ = esp_timer_get_time();
+  lastFrameRequestUs_ = 0;
+  nextSpawnUs_ = lastLogicTickUs_ + 500000;
+  frameDirty_ = false;
+  sceneNeedsFullRedraw_ = true;
+  resetRenderCaches();
   requestUpdate();
 }
 
 void MissileCommandActivity::returnToMenu() {
+  waitForPendingRefresh();
   if (aliveCityCount() > 0) saveGame();
   viewMode_ = ViewMode::Menu;
   selectedIndex_ = difficulty_;
   topIndex_ = 0;
   initialViewportPending_ = true;
+  sceneNeedsFullRedraw_ = true;
   requestUpdate();
 }
 
@@ -267,8 +348,9 @@ void MissileCommandActivity::startWave() {
   ammo_.fill(static_cast<uint8_t>(10 + std::min<int>(wave_ / 2, 5)));
   enemiesSpawned_ = 0;
   enemiesResolved_ = 0;
-  const int64_t now = esp_timer_get_time();
-  nextSpawnUs_ = now + 500000;
+  nextSpawnUs_ = esp_timer_get_time() + 500000;
+  sceneNeedsFullRedraw_ = true;
+  resetRenderCaches();
 }
 
 void MissileCommandActivity::tickGame(int64_t nowUs) {
@@ -316,6 +398,8 @@ void MissileCommandActivity::tickGame(int64_t nowUs) {
 
   for (auto& explosion : explosions_) {
     if (!explosion.active) continue;
+    if (++explosion.phaseTicks < EXPLOSION_PHASE_TICKS) continue;
+    explosion.phaseTicks = 0;
     if (++explosion.phase >= 7) explosion.active = false;
   }
 
@@ -349,7 +433,9 @@ void MissileCommandActivity::spawnEnemy(int64_t nowUs) {
   slot->targetX = static_cast<int16_t>(geometry.field.x + (geometry.field.width * (city + 1)) / (kCityCount + 1));
   slot->targetY = static_cast<int16_t>(geometry.groundY);
   slot->progress = 0;
-  slot->speed = static_cast<uint16_t>(18 + difficulty_ * 6 + std::min<int>(wave_, 8));
+  // Speeds are per 40 ms simulation tick. These values preserve roughly the
+  // original real-time descent speed while producing much finer movement.
+  slot->speed = static_cast<uint16_t>(4 + difficulty_ + std::min<int>(wave_ / 2, 4));
   slot->active = true;
   ++enemiesSpawned_;
 
@@ -378,7 +464,7 @@ void MissileCommandActivity::launchPlayerMissile(int x, int y) {
   slot->targetX = static_cast<int16_t>(std::clamp(x, geometry.field.x, geometry.field.x + geometry.field.width - 1));
   slot->targetY = static_cast<int16_t>(std::clamp(y, geometry.field.y, geometry.groundY - 4));
   slot->progress = 0;
-  slot->speed = 170;
+  slot->speed = 34;
   slot->active = true;
 }
 
@@ -388,6 +474,7 @@ void MissileCommandActivity::createExplosion(int x, int y) {
     explosion.x = static_cast<int16_t>(x);
     explosion.y = static_cast<int16_t>(y);
     explosion.phase = 0;
+    explosion.phaseTicks = 0;
     explosion.active = true;
     return;
   }
@@ -400,7 +487,7 @@ void MissileCommandActivity::resolveCollisions() {
     const int ey = lerpInt(enemy.startY, enemy.targetY, enemy.progress);
     for (const auto& explosion : explosions_) {
       if (!explosion.active) continue;
-      const int radius = explosion.phase <= 3 ? 8 + explosion.phase * 9 : 8 + (6 - explosion.phase) * 9;
+      const int radius = explosionRadius(explosion.phase);
       const int dx = ex - explosion.x;
       const int dy = ey - explosion.y;
       if (dx * dx + dy * dy > radius * radius) continue;
@@ -433,6 +520,8 @@ void MissileCommandActivity::finishGame() {
   }
   clearSavedGame();
   viewMode_ = ViewMode::GameOver;
+  frameDirty_ = false;
+  sceneNeedsFullRedraw_ = true;
   requestUpdate();
 }
 
@@ -487,14 +576,22 @@ void MissileCommandActivity::buildMenuScreen(UiApp::ScreenType& screen) {
       static_cast<int16_t>(renderer.getScreenHeight() - bounds.y - bounds.height), 0});
 
   std::array<fui::ListItem, kMenuRowCount> items{};
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < kDifficultyCount; ++i) {
     items[static_cast<size_t>(i)].label = DIFFICULTY_LABELS[i];
-    items[static_cast<size_t>(i)].value = i == difficulty_ ? "Selectionne" : nullptr;
+    items[static_cast<size_t>(i)].value = nullptr;
     items[static_cast<size_t>(i)].actionValue = static_cast<int16_t>(i);
   }
+
   items[3].label = "Continuer";
-  items[3].value = hasSavedGame_ ? "Partie sauvegardee" : "Aucune partie";
+  if (hasSavedGame_) {
+    std::snprintf(continueValue_.data(), continueValue_.size(), "Vague %u - %lu pts",
+                  static_cast<unsigned>(wave_), static_cast<unsigned long>(score_));
+    items[3].value = continueValue_.data();
+  } else {
+    items[3].value = "Aucune partie";
+  }
   items[3].actionValue = 3;
+
   items[4].label = "Nouvelle partie";
   items[4].value = DIFFICULTY_LABELS[difficulty_];
   items[4].actionValue = 4;
@@ -517,6 +614,7 @@ void MissileCommandActivity::buildMenuScreen(UiApp::ScreenType& screen) {
 }
 
 void MissileCommandActivity::render(RenderLock&&) {
+  waitForPendingRefresh();
   switch (viewMode_) {
     case ViewMode::Menu:
       renderMenu();
@@ -533,12 +631,62 @@ void MissileCommandActivity::render(RenderLock&&) {
 void MissileCommandActivity::renderMenu() {
   renderer.clearScreen();
   const Rect header = headerRect(renderer, mappedInput);
-  if (mappedInput.hasTouchHardware()) TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Missile Command", false);
-  else GUI.drawHeader(renderer, header, "Missile Command", nullptr, false);
+  if (mappedInput.hasTouchHardware()) {
+    TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Missile Command", false);
+  } else {
+    GUI.drawHeader(renderer, header, "Missile Command", nullptr, false);
+  }
 
   uiReady_ = false;
   app_.render();
   uiReady_ = true;
+
+  // Match Minesweeper/2048: real e-ink checkboxes for options, action rows
+  // outlined as buttons, and a dithered disabled Continue action.
+  const Rect listBounds = menuRect(renderer, mappedInput);
+  const int drawnRows = std::max(1, visibleRows_);
+  const int boxSize = 22;
+  const int innerSize = 10;
+  const int boxX = renderer.getScreenWidth() - UITheme::getInstance().getMetrics().contentSidePadding - boxSize - 10;
+  for (int visible = 0; visible < drawnRows; ++visible) {
+    const int itemIndex = topIndex_ + visible;
+    if (itemIndex < 0 || itemIndex >= kDifficultyCount) continue;
+    const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;
+    const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;
+    const int boxY = rowTop + std::max(0, (rowBottom - rowTop - boxSize) / 2);
+    renderer.fillRect(boxX, boxY, boxSize, boxSize, false);
+    renderer.drawRect(boxX, boxY, boxSize, boxSize, 2, true);
+    if (itemIndex == difficulty_) {
+      const int inset = (boxSize - innerSize) / 2;
+      renderer.fillRect(boxX + inset, boxY + inset, innerSize, innerSize, true);
+    }
+  }
+
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  constexpr int actionInsetY = 4;
+  const int actionX = metrics.contentSidePadding;
+  const int actionWidth = renderer.getScreenWidth() - 2 * metrics.contentSidePadding;
+  for (int visible = 0; visible < drawnRows; ++visible) {
+    const int itemIndex = topIndex_ + visible;
+    if (itemIndex != 3 && itemIndex != 4) continue;
+    const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;
+    const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;
+    const int actionY = rowTop + actionInsetY;
+    const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);
+    renderer.drawRoundedRect(actionX, actionY, actionWidth, actionHeight, 1, 6, true);
+    if (itemIndex == 3 && !hasSavedGame_) {
+      for (int y = actionY; y < actionY + actionHeight; y += 2) {
+        renderer.fillRect(actionX, y, actionWidth, 1, false);
+      }
+    }
+  }
+
+  char record[48];
+  std::snprintf(record, sizeof(record), "Meilleur score : %lu", static_cast<unsigned long>(highScore_));
+  const int footerTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
+  drawCenteredText(renderer, UI_10_FONT_ID,
+                   Rect{metrics.contentSidePadding, std::max(listBounds.y, footerTop - 34),
+                        renderer.getScreenWidth() - 2 * metrics.contentSidePadding, 28}, record);
 
   const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT),
                                              tr(STR_DIR_UP), tr(STR_DIR_DOWN));
@@ -546,66 +694,195 @@ void MissileCommandActivity::renderMenu() {
   renderer.displayBuffer();
 }
 
-void MissileCommandActivity::renderPlaying() {
+void MissileCommandActivity::resetRenderCaches() {
+  enemyDrawValid_.fill(0);
+  playerDrawValid_.fill(0);
+  explosionDrawValid_.fill(0);
+  drawnCitiesAlive_.fill(0xFF);
+  drawnAmmo_.fill(0xFF);
+  drawnScore_ = UINT32_MAX;
+  drawnWave_ = UINT16_MAX;
+  drawnCityCount_ = -1;
+}
+
+void MissileCommandActivity::waitForPendingRefresh() {
+  if (!refreshInFlight_) return;
+  renderer.waitRefreshComplete();
+  refreshInFlight_ = false;
+}
+
+void MissileCommandActivity::startFastRefresh() {
+  if (renderer.supportsAsyncRefresh()) {
+    renderer.displayBufferAsync(HalDisplay::FAST_REFRESH);
+    refreshInFlight_ = true;
+  } else {
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  }
+}
+
+void MissileCommandActivity::drawFullPlayingScene() {
   renderer.clearScreen();
   const GameGeometry geometry = gameGeometry(renderer, mappedInput);
-  if (mappedInput.hasTouchHardware()) TouchHeaderBackButton::draw(renderer, uiTarget_, geometry.header, "Missile Command", false);
-  else GUI.drawHeader(renderer, geometry.header, "Missile Command", nullptr, false);
+  if (mappedInput.hasTouchHardware()) {
+    TouchHeaderBackButton::draw(renderer, uiTarget_, geometry.header, "Missile Command", false);
+  } else {
+    GUI.drawHeader(renderer, geometry.header, "Missile Command", nullptr, false);
+  }
 
-  char status[96];
-  std::snprintf(status, sizeof(status), "Score %lu   Record %lu   Vague %u   Villes %d",
-                static_cast<unsigned long>(score_), static_cast<unsigned long>(highScore_),
-                static_cast<unsigned>(wave_), aliveCityCount());
   renderer.drawRoundedRect(geometry.status.x, geometry.status.y, geometry.status.width, geometry.status.height, 1, 6, true);
-  drawCenteredText(renderer, UI_10_FONT_ID, geometry.status, status);
-
   renderer.drawRect(geometry.field.x, geometry.field.y, geometry.field.width, geometry.field.height, 1, true);
   renderer.drawLine(geometry.field.x, geometry.groundY, geometry.field.x + geometry.field.width, geometry.groundY, 1, true);
 
   for (int i = 0; i < kCityCount; ++i) {
     const int x = geometry.field.x + geometry.field.width * (i + 1) / (kCityCount + 1);
-    if (citiesAlive_[static_cast<size_t>(i)]) {
-      renderer.drawRect(x - 10, geometry.groundY - 11, 20, 11, 1, true);
-      renderer.drawLine(x - 8, geometry.groundY - 11, x, geometry.groundY - 20, 1, true);
-      renderer.drawLine(x, geometry.groundY - 20, x + 8, geometry.groundY - 11, 1, true);
-    }
+    if (!citiesAlive_[static_cast<size_t>(i)]) continue;
+    renderer.drawRect(x - 10, geometry.groundY - 11, 20, 11, 1, true);
+    renderer.drawLine(x - 8, geometry.groundY - 11, x, geometry.groundY - 20, 1, true);
+    renderer.drawLine(x, geometry.groundY - 20, x + 8, geometry.groundY - 11, 1, true);
   }
 
   for (int i = 0; i < kBatteryCount; ++i) {
     const int x = geometry.field.x + geometry.field.width * (i * 2 + 1) / (kBatteryCount * 2);
     renderer.drawRect(x - 14, geometry.groundY + 5, 28, 16, 1, true);
-    char ammoText[8];
-    std::snprintf(ammoText, sizeof(ammoText), "%u", static_cast<unsigned>(ammo_[static_cast<size_t>(i)]));
-    drawCenteredText(renderer, UI_10_FONT_ID, Rect{x - 18, geometry.groundY + 21, 36, 24}, ammoText);
   }
 
-  for (const auto& missile : enemies_) {
-    if (!missile.active) continue;
-    const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
-    const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
-    renderer.drawLine(missile.startX, missile.startY, x, y, 1, true);
-    renderer.fillRect(x - 1, y - 1, 3, 3, true);
-  }
-  for (const auto& missile : players_) {
-    if (!missile.active) continue;
-    const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
-    const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
-    renderer.drawLine(missile.startX, missile.startY, x, y, 1, true);
-    renderer.drawRect(x - 2, y - 2, 5, 5, 1, true);
-  }
-  for (const auto& explosion : explosions_) {
-    if (!explosion.active) continue;
-    const int radius = explosion.phase <= 3 ? 8 + explosion.phase * 9 : 8 + (6 - explosion.phase) * 9;
-    drawExplosion(renderer, explosion.x, explosion.y, radius);
-  }
-
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "Tirer", "", "");
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
-  renderer.displayBuffer();
+
+  resetRenderCaches();
+  sceneNeedsFullRedraw_ = false;
+}
+
+bool MissileCommandActivity::drawIncrementalPlayingScene() {
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+  bool changed = false;
+
+  const int cityCount = aliveCityCount();
+  if (drawnScore_ != score_ || drawnWave_ != wave_ || drawnCityCount_ != cityCount) {
+    renderer.fillRect(geometry.status.x + 2, geometry.status.y + 2, geometry.status.width - 4, geometry.status.height - 4, false);
+    char status[96];
+    std::snprintf(status, sizeof(status), "Score %lu   Record %lu   Vague %u   Villes %d",
+                  static_cast<unsigned long>(score_), static_cast<unsigned long>(highScore_),
+                  static_cast<unsigned>(wave_), cityCount);
+    drawCenteredText(renderer, UI_10_FONT_ID, geometry.status, status);
+    drawnScore_ = score_;
+    drawnWave_ = wave_;
+    drawnCityCount_ = cityCount;
+    changed = true;
+  }
+
+  for (int i = 0; i < kCityCount; ++i) {
+    const uint8_t alive = citiesAlive_[static_cast<size_t>(i)];
+    if (drawnCitiesAlive_[static_cast<size_t>(i)] == alive) continue;
+    const int x = geometry.field.x + geometry.field.width * (i + 1) / (kCityCount + 1);
+    const Rect cityArea{x - 12, geometry.groundY - 23, 24, 23};
+    renderer.fillRect(cityArea.x, cityArea.y, cityArea.width, cityArea.height, false);
+    renderer.drawLine(cityArea.x, geometry.groundY, cityArea.x + cityArea.width, geometry.groundY, 1, true);
+    if (alive) {
+      renderer.drawRect(x - 10, geometry.groundY - 11, 20, 11, 1, true);
+      renderer.drawLine(x - 8, geometry.groundY - 11, x, geometry.groundY - 20, 1, true);
+      renderer.drawLine(x, geometry.groundY - 20, x + 8, geometry.groundY - 11, 1, true);
+    }
+    drawnCitiesAlive_[static_cast<size_t>(i)] = alive;
+    changed = true;
+  }
+
+  for (int i = 0; i < kBatteryCount; ++i) {
+    const uint8_t ammo = ammo_[static_cast<size_t>(i)];
+    if (drawnAmmo_[static_cast<size_t>(i)] == ammo) continue;
+    const int x = geometry.field.x + geometry.field.width * (i * 2 + 1) / (kBatteryCount * 2);
+    const Rect ammoArea{x - 22, geometry.groundY + 22, 44, 22};
+    renderer.fillRect(ammoArea.x, ammoArea.y, ammoArea.width, ammoArea.height, false);
+    char ammoText[8];
+    std::snprintf(ammoText, sizeof(ammoText), "%u", static_cast<unsigned>(ammo));
+    drawCenteredText(renderer, UI_10_FONT_ID, ammoArea, ammoText);
+    drawnAmmo_[static_cast<size_t>(i)] = ammo;
+    changed = true;
+  }
+
+  for (int i = 0; i < kMaxEnemyMissiles; ++i) {
+    const auto& missile = enemies_[static_cast<size_t>(i)];
+    if (!missile.active) {
+      enemyDrawValid_[static_cast<size_t>(i)] = 0;
+      continue;
+    }
+    const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
+    const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
+    if (!enemyDrawValid_[static_cast<size_t>(i)]) {
+      enemyDrawX_[static_cast<size_t>(i)] = missile.startX;
+      enemyDrawY_[static_cast<size_t>(i)] = missile.startY;
+      enemyDrawProgress_[static_cast<size_t>(i)] = 0;
+      enemyDrawValid_[static_cast<size_t>(i)] = 1;
+    }
+    if (enemyDrawProgress_[static_cast<size_t>(i)] != missile.progress) {
+      renderer.drawLine(enemyDrawX_[static_cast<size_t>(i)], enemyDrawY_[static_cast<size_t>(i)], x, y, 1, true);
+      renderer.fillRect(x - 1, y - 1, 3, 3, true);
+      enemyDrawX_[static_cast<size_t>(i)] = static_cast<int16_t>(x);
+      enemyDrawY_[static_cast<size_t>(i)] = static_cast<int16_t>(y);
+      enemyDrawProgress_[static_cast<size_t>(i)] = missile.progress;
+      changed = true;
+    }
+  }
+
+  for (int i = 0; i < kMaxPlayerMissiles; ++i) {
+    const auto& missile = players_[static_cast<size_t>(i)];
+    if (!missile.active) {
+      playerDrawValid_[static_cast<size_t>(i)] = 0;
+      continue;
+    }
+    const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
+    const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
+    if (!playerDrawValid_[static_cast<size_t>(i)]) {
+      playerDrawX_[static_cast<size_t>(i)] = missile.startX;
+      playerDrawY_[static_cast<size_t>(i)] = missile.startY;
+      playerDrawProgress_[static_cast<size_t>(i)] = 0;
+      playerDrawValid_[static_cast<size_t>(i)] = 1;
+    }
+    if (playerDrawProgress_[static_cast<size_t>(i)] != missile.progress) {
+      renderer.drawLine(playerDrawX_[static_cast<size_t>(i)], playerDrawY_[static_cast<size_t>(i)], x, y, 1, true);
+      renderer.drawRect(x - 2, y - 2, 5, 5, 1, true);
+      playerDrawX_[static_cast<size_t>(i)] = static_cast<int16_t>(x);
+      playerDrawY_[static_cast<size_t>(i)] = static_cast<int16_t>(y);
+      playerDrawProgress_[static_cast<size_t>(i)] = missile.progress;
+      changed = true;
+    }
+  }
+
+  // Explosions are the only animated objects we erase. Their footprint is
+  // small, so repainting a local white square is much cheaper than clearing and
+  // rebuilding the entire 800x480 framebuffer each frame.
+  for (int i = 0; i < kMaxExplosions; ++i) {
+    const auto& explosion = explosions_[static_cast<size_t>(i)];
+    const bool wasValid = explosionDrawValid_[static_cast<size_t>(i)] != 0;
+    const uint8_t oldPhase = explosionDrawPhase_[static_cast<size_t>(i)];
+    if (wasValid && (!explosion.active || oldPhase != explosion.phase)) {
+      const int oldRadius = explosionRadius(oldPhase) + 2;
+      renderer.fillRect(explosion.x - oldRadius, explosion.y - oldRadius, oldRadius * 2 + 1, oldRadius * 2 + 1, false);
+      changed = true;
+    }
+    if (!explosion.active) {
+      explosionDrawValid_[static_cast<size_t>(i)] = 0;
+      continue;
+    }
+    if (!wasValid || oldPhase != explosion.phase) {
+      drawExplosion(renderer, explosion.x, explosion.y, explosionRadius(explosion.phase));
+      explosionDrawPhase_[static_cast<size_t>(i)] = explosion.phase;
+      explosionDrawValid_[static_cast<size_t>(i)] = 1;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+void MissileCommandActivity::renderPlaying() {
+  if (sceneNeedsFullRedraw_) drawFullPlayingScene();
+  if (drawIncrementalPlayingScene()) startFastRefresh();
 }
 
 void MissileCommandActivity::renderGameOver() {
-  renderPlaying();
+  drawFullPlayingScene();
+  drawIncrementalPlayingScene();
   const int width = std::min(380, renderer.getScreenWidth() - 36);
   const int height = 170;
   const Rect box{(renderer.getScreenWidth() - width) / 2, (renderer.getScreenHeight() - height) / 2, width, height};
@@ -617,6 +894,7 @@ void MissileCommandActivity::renderGameOver() {
   drawCenteredText(renderer, UI_10_FONT_ID, Rect{box.x + 12, box.y + 68, box.width - 24, 30}, scoreText);
   drawCenteredText(renderer, UI_10_FONT_ID, Rect{box.x + 12, box.y + 112, box.width - 24, 30}, "OK / Retour : menu");
   renderer.displayBuffer();
+  sceneNeedsFullRedraw_ = true;
 }
 
 bool MissileCommandActivity::saveGame() {
