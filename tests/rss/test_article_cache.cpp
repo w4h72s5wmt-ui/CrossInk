@@ -110,6 +110,21 @@ void htmlTests() {
             text.find("fin.") != std::string::npos,
         "URL used as anchor label is removed");
 
+
+  text = extract("<article><p>" + longBody + "</p><p>Avant<a href='https://example.test/page'>https://example.test/page</a>Apres.</p></article>");
+  check(text.find("Avant Apres.") != std::string::npos, "removed visible URL keeps a word boundary");
+  text = extract("<article><p>" + longBody + "</p><p>Avant<a href='https://example.test/page'>https://example.test/page</a>.Apres.</p></article>");
+  check(text.find("Avant. Apres.") != std::string::npos, "removed visible URL moves separator after punctuation");
+  text = extract("<article><p>" + longBody + "</p><p>Avant<div class='share'>PARASITE</div>Apres.</p></article>");
+  check(text.find("Avant Apres.") != std::string::npos && text.find("PARASITE") == std::string::npos,
+        "removed noise container keeps a word boundary");
+  text = extract("<article><p>" + longBody + "</p><p>Avant<div class='share'>PARASITE</div>.Apres.</p></article>");
+  check(text.find("Avant. Apres.") != std::string::npos, "removed noise container preserves punctuation spacing");
+  text = extract("<article><p>" + longBody + "</p><p>Avant<script>parasite()</script>Apres.</p></article>");
+  check(text.find("Avant Apres.") != std::string::npos, "removed raw script keeps a word boundary");
+  text = extract("<article><p>" + longBody + "</p><p>Avant<!-- parasite -->Apres.</p></article>");
+  check(text.find("Avant Apres.") != std::string::npos, "removed HTML comment keeps a word boundary");
+
   bool ok = true;
   extract("<article><p>" + std::string(RC::MAX_TEXT_BYTES + 100, 'x') + "</p></article>", &ok);
   check(!ok, "text capacity is not successful extraction");
@@ -154,6 +169,15 @@ void figaroCleanupTests() {
   const std::string sharedMiddleOut(sharedMiddleBuffer.data(), sharedMiddleLength);
   check(sharedMiddleOut == "Avant Apres", "Figaro mid-article share controls removed without losing prose");
 
+
+  std::string sharedPunctuation = "Avant -Lien copie- Mail- X- Messenger.Apres";
+  std::vector<char> sharedPunctuationBuffer(sharedPunctuation.begin(), sharedPunctuation.end());
+  sharedPunctuationBuffer.push_back('\0');
+  const size_t sharedPunctuationLength = RC::stripFigaroShareControls(
+      sharedPunctuationBuffer.data(), sharedPunctuation.size(), "https://www.lefigaro.fr/test");
+  check(std::string(sharedPunctuationBuffer.data(), sharedPunctuationLength) == "Avant. Apres",
+        "Figaro share removal keeps punctuation readable");
+
   std::string sharedTwice =
       "Debut -Lien copié- Mail- X- MessengerMilieu -Lien copie- Mail- X- MessengerFin";
   std::vector<char> sharedTwiceBuffer(sharedTwice.begin(), sharedTwice.end());
@@ -197,29 +221,39 @@ void metadataTests() {
 }
 
 void cacheTests() {
+  {
+    char fallback[] = "Avant https://example.test/page Apres";
+    const size_t cleaned = RC::removeFallbackUrls(fallback, std::strlen(fallback));
+    check(std::string(fallback, cleaned) == "Avant Apres", "fallback URL removal keeps word boundary");
+  }
+  {
+    char fallback[] = "Avant https://example.test/page .Apres";
+    const size_t cleaned = RC::removeFallbackUrls(fallback, std::strlen(fallback));
+    check(std::string(fallback, cleaned) == "Avant. Apres", "fallback URL removal fixes punctuation seam");
+  }
   auto item = makeItem();
   std::string out;
   reset();
   const std::string path = RC::bodyPath(item);
   check(fetch(item) == RC::CacheResult::FALLBACK_READY, "network failure -> persisted summary fallback");
-  check(testFiles[path].rfind("XRSSF1\n", 0) == 0, "fallback has distinct SD marker");
+  check(testFiles[path].rfind("XRSSF2\n", 0) == 0, "fallback has distinct SD marker");
   check(RC::hasReadableBody(item) && !RC::hasCurrentBody(item), "fallback readable but not a full body");
   check(load(item, out) == RC::CacheResult::FALLBACK_READY && out == "Le resume du flux reste disponible.",
         "persisted summary fallback loads without RssItem history summary");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY, "manual retry replaces fallback with full body");
-  check(testFiles[path].rfind("XRSS11\n", 0) == 0, "full body keeps XRSS11 marker");
+  check(testFiles[path].rfind("XRSS12\n", 0) == 0, "full body keeps XRSS12 marker");
   check(load(item, out) == RC::CacheResult::READY && out.find("FIN_UTILE") != std::string::npos, "body loads");
   const auto cachedCalls = H::publicCalls;
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid full cache reused");
   check(RC::hasCurrentBody(item) && RC::hasReadableBody(item), "full body probes current/readable");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS10\\nAncien corps de developpement";
+  testFiles[RC::bodyPath(item)] = "XRSS11\\nAncien corps de developpement";
   check(!RC::hasCurrentBody(item) && !RC::hasReadableBody(item), "obsolete marker rejected");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "obsolete body invalidated and refetched");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS11\n", 0) == 0, "refetched full body version");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS12\n", 0) == 0, "refetched full body version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});

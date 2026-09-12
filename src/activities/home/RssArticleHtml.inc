@@ -10,6 +10,12 @@ bool htmlSpace(const char c) {
 constexpr char RSS_LINK_START[] = "\xEE\x80\x80";  // U+E000
 constexpr char RSS_LINK_END[] = "\xEE\x80\x81";    // U+E001
 constexpr size_t RSS_LINK_MARKER_BYTES = 3;
+// Internal one-byte marker used only while extracting. Whenever a block of
+// non-editorial inline content is removed, keep the seam explicit until a
+// final pass can decide whether the separator belongs before or after
+// punctuation. Source HTML control bytes are never copied into output, so
+// 0x1e cannot collide with real article text or the UTF-8 link markers.
+constexpr char RSS_REMOVAL_BOUNDARY = '\x1e';
 
 bool htmlEquals(const char* data, const size_t length, const char* literal) {
   const size_t n = std::strlen(literal);
@@ -326,6 +332,68 @@ bool looksLikeVisibleUrl(const char* text, size_t length) {
          startsWithInsensitive(text + start, visible, 0, "www.");
 }
 
+bool cleanupPunctuationAttachesLeft(const char value) {
+  switch (value) {
+    case '.':
+    case ',':
+    case ';':
+    case ':':
+    case '!':
+    case '?':
+    case '%':
+    case ')':
+    case ']':
+    case '}':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool cleanupPunctuationNeedsFollowingSpace(const char value) {
+  return cleanupPunctuationAttachesLeft(value);
+}
+
+void appendRemovalBoundary(char* text, size_t& length) {
+  if (!text || length == 0 || length >= MAX_TEXT_BYTES) return;
+  const unsigned char previous = static_cast<unsigned char>(text[length - 1]);
+  if (std::isspace(previous) || text[length - 1] == RSS_REMOVAL_BOUNDARY) return;
+  appendChar(text, length, RSS_REMOVAL_BOUNDARY);
+}
+
+size_t normalizeRemovalBoundaries(char* text, const size_t length) {
+  if (!text || length == 0) return 0;
+  size_t read = 0;
+  size_t write = 0;
+  bool pendingBoundary = false;
+  while (read < length) {
+    const char value = text[read++];
+    if (value == RSS_REMOVAL_BOUNDARY) {
+      pendingBoundary = true;
+      continue;
+    }
+    if (pendingBoundary) {
+      const unsigned char c = static_cast<unsigned char>(value);
+      if (std::isspace(c)) {
+        pendingBoundary = false;
+      } else if (write == 0 || std::isspace(static_cast<unsigned char>(text[write - 1]))) {
+        pendingBoundary = false;
+      } else if (cleanupPunctuationAttachesLeft(value)) {
+        text[write++] = value;
+        pendingBoundary = cleanupPunctuationNeedsFollowingSpace(value);
+        continue;
+      } else {
+        text[write++] = ' ';
+        pendingBoundary = false;
+      }
+    }
+    text[write++] = value;
+  }
+  while (write > 0 && text[write - 1] == ' ') --write;
+  text[write] = '\0';
+  return write;
+}
+
 bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {
   textLength = 0;
   if (!html || !text || htmlLength == 0) return false;
@@ -339,7 +407,9 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
     if (html[pos] == '<') {
       if (startsWithInsensitive(html, end, pos, "<!--")) {
         const size_t close = findInsensitive(html, end, "-->", pos + 4);
-        pos = close == std::string::npos ? end : close + 3;
+        const size_t afterRemoved = close == std::string::npos ? end : close + 3;
+        if (textLength > 0 && afterRemoved < end) appendRemovalBoundary(text, textLength);
+        pos = afterRemoved;
         continue;
       }
       HtmlTag tag;
@@ -352,12 +422,15 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
         continue;
       }
       if (!tag.closing && htmlRawText(tag.name)) {
-        pos = skipHtmlRaw(html, end, tag);
+        const size_t afterRemoved = skipHtmlRaw(html, end, tag);
+        if (textLength > 0 && afterRemoved < end) appendRemovalBoundary(text, textLength);
+        pos = afterRemoved;
         continue;
       }
       if (!tag.closing && isNoiseContainer(tag.name, html, tag.start, tag.end)) {
         if (tag.selfClosing) pos = next;
         else htmlElementEnd(html, end, tag, pos);
+        if (textLength > 0 && pos < end) appendRemovalBoundary(text, textLength);
         continue;
       }
       if (tagEquals(tag.name, "a")) {
@@ -373,10 +446,12 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
                    (next < end && htmlSpace(html[next]))) {
               --textLength;
             }
+            if (next < end) appendRemovalBoundary(text, textLength);
           } else if (textLength > anchorTextStart) {
             for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_END[i]);
           } else {
             textLength = anchorMarkerStart;
+            if (next < end) appendRemovalBoundary(text, textLength);
           }
           inAnchor = false;
         }
@@ -400,6 +475,7 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
     else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));
   }
   const bool atCapacity = textLength >= MAX_TEXT_BYTES;
+  textLength = normalizeRemovalBoundaries(text, textLength);
   while (textLength > 0 && (text[textLength - 1] == ' ' || text[textLength - 1] == '\n')) --textLength;
   text[textLength] = '\0';
   return !atCapacity && textLength >= MIN_EXTRACTED_TEXT;
