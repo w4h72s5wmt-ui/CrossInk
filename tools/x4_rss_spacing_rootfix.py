@@ -28,13 +28,22 @@ bool rawStructuralBoundaryTag(const char* name) {
          tagEquals(name, "output") || std::strchr(name, '-') != nullptr;
 }
 
-bool pendingInlineNeedsRawBoundary(const char* text, const size_t length) {
-  if (!text || length == 0) return false;
-  size_t pos = length;
-  while (pos > 0 && (text[pos - 1] == RSS_REMOVAL_BOUNDARY ||
-                     std::isspace(static_cast<unsigned char>(text[pos - 1])))) --pos;
-  if (pos == 0) return false;
-  return cleanupPunctuationNeedsFollowingSpace(text[pos - 1]);
+bool inlineRangeLooksPhrase(const char* text, const size_t begin, const size_t end) {
+  if (!text || begin >= end) return false;
+  bool hasVisible = false;
+  for (size_t i = begin; i < end; ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    if (text[i] == RSS_REMOVAL_BOUNDARY) continue;
+    if (std::isspace(c)) {
+      if (hasVisible) return true;  // multi-word inline wrapper
+      continue;
+    }
+    hasVisible = true;
+  }
+  size_t pos = end;
+  while (pos > begin && (text[pos - 1] == RSS_REMOVAL_BOUNDARY ||
+                         std::isspace(static_cast<unsigned char>(text[pos - 1])))) --pos;
+  return pos > begin && cleanupPunctuationNeedsFollowingSpace(text[pos - 1]);
 }
 
 ''' + helper_anchor
@@ -43,28 +52,28 @@ html = replace_once(html, helper_anchor, helper_insert, "insert boundary helpers
 html = replace_once(
     html,
     '''  bool inAnchor = false;\n  bool closedSemanticInline = false;''',
-    '''  bool inAnchor = false;\n  bool pendingElementBoundary = false;\n  bool pendingRawBoundary = false;''',
+    '''  bool inAnchor = false;\n  bool pendingElementBoundary = false;\n  bool pendingRawBoundary = false;\n  static constexpr size_t INLINE_STACK_CAPACITY = 12;\n  size_t inlineStarts[INLINE_STACK_CAPACITY] = {};\n  size_t inlineDepth = 0;''',
     "replace inline boundary state",
 )
 
 html = replace_once(
     html,
     '''      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {\n        closedSemanticInline = false;\n        pos = next;\n        continue;\n      }\n      const bool semanticInline = semanticInlineBoundaryTag(tag.name);\n      if (!tag.closing && semanticInline && closedSemanticInline && !inAnchor && textLength > 0 &&\n          !anchorBoundaryGluesAfterText(text, textLength)) {\n        // Adjacent wrappers are commonly independent CSS cells despite having\n        // no literal whitespace in source: </span><strong>, </span><span>, …\n        appendRemovalBoundary(text, textLength);\n      }\n      if (!tag.closing) closedSemanticInline = false;''',
-    '''      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {\n        pendingElementBoundary = false;\n        pendingRawBoundary = false;\n        pos = next;\n        continue;\n      }\n      const bool semanticInline = semanticInlineBoundaryTag(tag.name);\n      const bool structuralInline = rawStructuralBoundaryTag(tag.name);\n      const bool glueTag = inlineBoundaryGlueTag(tag.name);\n      if (!tag.closing) {\n        // Keep a semantic seam alive through closing parent wrappers. This is\n        // the real-page case missed by the old immediate </span><span> rule:\n        // </span></data><data><span> must still separate the two cells.\n        if ((pendingElementBoundary || structuralInline) && !glueTag && !inAnchor && textLength > 0 &&\n            !anchorBoundaryGluesAfterText(text, textLength)) {\n          appendRemovalBoundary(text, textLength);\n        }\n        pendingElementBoundary = false;\n        pendingRawBoundary = false;\n      }''',
+    '''      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {\n        pendingElementBoundary = false;\n        pendingRawBoundary = false;\n        pos = next;\n        continue;\n      }\n      const bool semanticInline = semanticInlineBoundaryTag(tag.name);\n      const bool structuralInline = rawStructuralBoundaryTag(tag.name);\n      const bool glueTag = inlineBoundaryGlueTag(tag.name);\n      if (!tag.closing) {\n        // Keep a semantic seam alive through closing parent wrappers. This is\n        // the real-page case missed by the old immediate </span><span> rule:\n        // </span></data><data><span> must still separate the two cells.\n        if ((pendingElementBoundary || structuralInline) && !glueTag && !inAnchor && textLength > 0 &&\n            !anchorBoundaryGluesAfterText(text, textLength)) {\n          appendRemovalBoundary(text, textLength);\n        }\n        pendingElementBoundary = false;\n        pendingRawBoundary = false;\n        if (semanticInline && !tag.selfClosing && inlineDepth < INLINE_STACK_CAPACITY) {\n          inlineStarts[inlineDepth++] = textLength;\n        }\n      }''',
     "replace opening boundary logic",
 )
 
 html = replace_once(
     html,
     '''      if (tag.closing && semanticInline && !inAnchor) closedSemanticInline = true;''',
-    '''      if (tag.closing && !inAnchor && !tagEquals(tag.name, "a") && !glueTag &&\n          (semanticInline || structuralInline)) {\n        // Closing parents must not erase the fact that visible text just ended.\n        pendingElementBoundary = true;\n        pendingRawBoundary = pendingRawBoundary || structuralInline;\n      }''',
+    '''      if (tag.closing && !inAnchor && !tagEquals(tag.name, "a") && !glueTag &&\n          (semanticInline || structuralInline)) {\n        // Closing parents must not erase the fact that visible text just ended.\n        // For plain semantic wrappers, crossing into raw text is safe only when\n        // the wrapper contained a phrase or ended a sentence. This preserves\n        // <span>mot</span>s while fixing <span>dans une</span>éponge and\n        // <span>stable.</span>Le contraste.\n        bool phraseBoundary = false;\n        if (semanticInline && inlineDepth > 0) {\n          const size_t start = inlineStarts[--inlineDepth];\n          phraseBoundary = inlineRangeLooksPhrase(text, start, textLength);\n        }\n        pendingElementBoundary = true;\n        pendingRawBoundary = pendingRawBoundary || structuralInline || phraseBoundary;\n      }''',
     "replace closing boundary logic",
 )
 
 html = replace_once(
     html,
     '''    if (html[pos] == '&') {\n      closedSemanticInline = false;\n      pos = decodeEntityUtf8(html, end, pos, text, textLength);\n      continue;\n    }\n    closedSemanticInline = false;\n    const unsigned char c = static_cast<unsigned char>(html[pos++]);''',
-    '''    if (html[pos] == '&') {\n      if ((pendingRawBoundary || (pendingElementBoundary && pendingInlineNeedsRawBoundary(text, textLength))) &&\n          !inAnchor && textLength > 0 && !anchorBoundaryGluesAfterText(text, textLength) &&\n          !anchorBoundaryGluesBeforeSource(html, end, pos)) {\n        appendRemovalBoundary(text, textLength);\n      }\n      pendingElementBoundary = false;\n      pendingRawBoundary = false;\n      pos = decodeEntityUtf8(html, end, pos, text, textLength);\n      continue;\n    }\n    if ((pendingRawBoundary || (pendingElementBoundary && pendingInlineNeedsRawBoundary(text, textLength))) &&\n        !inAnchor && textLength > 0 && !anchorBoundaryGluesAfterText(text, textLength) &&\n        !anchorBoundaryGluesBeforeSource(html, end, pos)) {\n      appendRemovalBoundary(text, textLength);\n    }\n    pendingElementBoundary = false;\n    pendingRawBoundary = false;\n    const unsigned char c = static_cast<unsigned char>(html[pos++]);''',
+    '''    if (html[pos] == '&') {\n      if (pendingRawBoundary && !inAnchor && textLength > 0 &&\n          !anchorBoundaryGluesAfterText(text, textLength) &&\n          !anchorBoundaryGluesBeforeSource(html, end, pos)) {\n        appendRemovalBoundary(text, textLength);\n      }\n      pendingElementBoundary = false;\n      pendingRawBoundary = false;\n      pos = decodeEntityUtf8(html, end, pos, text, textLength);\n      continue;\n    }\n    if (pendingRawBoundary && !inAnchor && textLength > 0 &&\n        !anchorBoundaryGluesAfterText(text, textLength) &&\n        !anchorBoundaryGluesBeforeSource(html, end, pos)) {\n      appendRemovalBoundary(text, textLength);\n    }\n    pendingElementBoundary = false;\n    pendingRawBoundary = false;\n    const unsigned char c = static_cast<unsigned char>(html[pos++]);''',
     "replace raw/entity boundary consumption",
 )
 
@@ -100,7 +109,7 @@ test_path = Path("tests/rss/test_article_cache.cpp")
 test = test_path.read_text()
 insert_before = '''  // Ordinary inline formatting is not a cell boundary and must not split words.\n'''
 new_tests = r'''  // Real screenshot shapes missed by the direct-sibling-only implementation:
-  // cells can be nested, and a structural field can touch raw prose/entities.
+  // cells can be nested, and a structural/phrase field can touch raw prose/entities.
   text = extract("<article><p>" + longBody +
                  "</p><p><data><span>très chaud.</span></data><data><span>Une vapeur très chaude</span></data>"
                  "<data><span>classiques.</span></data><data>Dans le sous-sol</data></p></article>");
@@ -116,15 +125,15 @@ new_tests = r'''  // Real screenshot shapes missed by the direct-sibling-only im
   text = extract("<article><p>" + longBody +
                  "</p><p><span>Trois conditions se cumulent dans une</span>&eacute;ponge de cuisine "
                  "<span>stable.</span>Le contraste reste lisible.</p></article>");
-  check(text.find("dans uneéponge de cuisine stable. Le contraste") != std::string::npos,
-        "plain span does not invent a space before entity, sentence seam remains readable");
+  check(text.find("dans une éponge de cuisine stable. Le contraste") != std::string::npos,
+        "phrase span boundaries survive entity/raw text transitions");
 
   text = extract("<article><p>" + longBody +
-                 "</p><p><span>Futura</span>Secrétaire de rédaction<data>14 min.</data>Publié le 6 juillet. "
+                 "</p><p><data>Futura</data>Secrétaire de rédaction<data>14 min.</data>Publié le 6 juillet. "
                  "<figcaption>iStock</figcaption>Jusqu'à présent.</p></article>");
-  check(text.find("FuturaSecrétaire de rédaction 14 min. Publié le 6 juillet. iStock Jusqu'à présent.") !=
+  check(text.find("Futura Secrétaire de rédaction 14 min. Publié le 6 juillet. iStock Jusqu'à présent.") !=
             std::string::npos,
-        "strong metadata/caption boundaries survive raw text transitions");
+        "metadata/caption boundaries survive raw text transitions");
 
   text = extract("<article><p>" + longBody +
                  "</p><p><span>Bastié.</span>La valeur du texte doit rester lisible. "
