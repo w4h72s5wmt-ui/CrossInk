@@ -1,0 +1,128 @@
+name: Missile Command X4 Pro integration
+
+on:
+  push:
+    branches: [x4-pro-missile-command]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: x4-pro-missile-command
+          submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Integrate Missile Command into Home source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          cpp_path = Path('src/activities/home/HomeActivity.cpp')
+          h_path = Path('src/activities/home/HomeActivity.h')
+          cpp = cpp_path.read_text()
+          h = h_path.read_text()
+
+          def once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 occurrence, found {count}')
+              return text.replace(old, new, 1)
+
+          cpp = once(cpp,
+              '#include "Game2048Activity.h"\n',
+              '#include "Game2048Activity.h"\n#include "MissileCommandActivity.h"\n',
+              'Missile include')
+          cpp = once(cpp,
+              '  Game2048,\n  RssNews,',
+              '  Game2048,\n  MissileCommand,\n  RssNews,',
+              'Home action enum')
+          cpp = once(cpp,
+              '  static constexpr int kCapacity = 12;',
+              '  static constexpr int kCapacity = 13;',
+              'Home menu capacity')
+
+          old = '  items.push({"2048", Chart, HomeMenuAction::Game2048});\n  items.push({"RSS", Library, HomeMenuAction::RssNews});'
+          new = '  items.push({"2048", Chart, HomeMenuAction::Game2048});\n  items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});\n  items.push({"RSS", Library, HomeMenuAction::RssNews});'
+          if cpp.count(old) != 2:
+              raise SystemExit(f'Menu entries: expected 2 occurrences, found {cpp.count(old)}')
+          cpp = cpp.replace(old, new)
+
+          old = '          case HomeMenuAction::Game2048:\n            onGame2048Open();\n            break;\n          case HomeMenuAction::RssNews:'
+          new = '          case HomeMenuAction::Game2048:\n            onGame2048Open();\n            break;\n          case HomeMenuAction::MissileCommand:\n            onMissileCommandOpen();\n            break;\n          case HomeMenuAction::RssNews:'
+          cpp = once(cpp, old, new, 'Touch/select switch')
+
+          old = '      case HomeMenuAction::Game2048:\n        onGame2048Open();\n        break;\n      case HomeMenuAction::RssNews:'
+          new = '      case HomeMenuAction::Game2048:\n        onGame2048Open();\n        break;\n      case HomeMenuAction::MissileCommand:\n        onMissileCommandOpen();\n        break;\n      case HomeMenuAction::RssNews:'
+          cpp = once(cpp, old, new, 'Button switch')
+
+          old = '''void HomeActivity::onGame2048Open() {
+            startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput), [](const ActivityResult&) {});
+          }
+          '''
+          if old not in cpp:
+              old = '''void HomeActivity::onGame2048Open() {
+  startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+'''
+          new = old + '''
+void HomeActivity::onMissileCommandOpen() {
+  startActivityForResult(std::make_unique<MissileCommandActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+'''
+          cpp = once(cpp, old, new, 'Open method')
+
+          h = once(h,
+              '  void onGame2048Open();\n  void onRssNewsOpen();',
+              '  void onGame2048Open();\n  void onMissileCommandOpen();\n  void onRssNewsOpen();',
+              'Home header declaration')
+
+          cpp_path.write_text(cpp)
+          h_path.write_text(h)
+          PY
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-missile-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Build X4 Pro
+        run: |
+          set -euo pipefail
+          pio run -e x4-pro | tee pio-x4-pro-missile.log
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-missile-command-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Commit clean integrated source and remove bootstrap workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/missile-command-integrate.yml
+          git add src/activities/home/HomeActivity.cpp src/activities/home/HomeActivity.h
+          git commit -m "feat(missile): integrate Missile Command into Home"
+          git push origin HEAD:x4-pro-missile-command
