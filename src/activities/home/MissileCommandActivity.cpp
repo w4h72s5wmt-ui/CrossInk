@@ -1,0 +1,710 @@
+#include "MissileCommandActivity.h"
+
+#include <GfxRenderer.h>
+#include <HalStorage.h>
+#include <I18n.h>
+#include <esp_random.h>
+#include <esp_timer.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdio>
+
+#include "MappedInputManager.h"
+#include "components/TouchHeaderBackButton.h"
+#include "components/UITheme.h"
+#include "components/UiAppHelpers.h"
+#include "fontIds.h"
+
+namespace fui = freeink::ui;
+
+namespace {
+constexpr fui::ActionId ACTION_ROW = 1;
+constexpr const char SAVE_DIR[] = "/.crosspoint";
+constexpr const char SAVE_PATH[] = "/.crosspoint/missile-command.bin";
+constexpr const char SCORE_PATH[] = "/.crosspoint/missile-command-score.bin";
+constexpr uint32_t SAVE_MAGIC = 0x4D434D31;   // MCM1
+constexpr uint32_t SCORE_MAGIC = 0x4D435331;  // MCS1
+constexpr uint8_t SAVE_VERSION = 1;
+constexpr uint8_t SCORE_VERSION = 1;
+constexpr int64_t TICK_US = 220000;
+constexpr const char* DIFFICULTY_LABELS[] = {"Facile", "Normal", "Difficile"};
+
+Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int height = mappedInput.hasTouchHardware() ? TouchHeaderBackButton::height(metrics, mappedInput)
+                                                     : metrics.headerHeight;
+  return Rect{0, metrics.topPadding, renderer.getScreenWidth(), height};
+}
+
+Rect menuRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect header = headerRect(renderer, mappedInput);
+  const int top = header.y + header.height + metrics.verticalSpacing;
+  return Rect{0, top, renderer.getScreenWidth(),
+              renderer.getScreenHeight() - top - metrics.buttonHintsHeight - metrics.verticalSpacing};
+}
+
+struct GameGeometry {
+  Rect header;
+  Rect status;
+  Rect field;
+  int groundY = 0;
+};
+
+GameGeometry gameGeometry(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect header = headerRect(renderer, mappedInput);
+  const int statusH = std::max(44, renderer.getLineHeight(UI_10_FONT_ID) + 16);
+  const Rect status{metrics.contentSidePadding, header.y + header.height + metrics.verticalSpacing,
+                    renderer.getScreenWidth() - 2 * metrics.contentSidePadding, statusH};
+  const int fieldTop = status.y + status.height + metrics.verticalSpacing;
+  const int footerTop = renderer.getScreenHeight() - metrics.buttonHintsHeight;
+  const Rect field{metrics.contentSidePadding, fieldTop,
+                   renderer.getScreenWidth() - 2 * metrics.contentSidePadding,
+                   std::max(80, footerTop - fieldTop - metrics.verticalSpacing)};
+  return GameGeometry{header, status, field, field.y + field.height - 34};
+}
+
+bool pointInRect(const Rect& rect, int x, int y) {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+}
+
+template <typename T>
+bool writeValue(FsFile& file, const T& value) {
+  return file.write(reinterpret_cast<const uint8_t*>(&value), sizeof(T)) == sizeof(T);
+}
+
+template <typename T>
+bool readValue(FsFile& file, T& value) {
+  return file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T)) == static_cast<int>(sizeof(T));
+}
+
+int lerpInt(int a, int b, uint16_t progress) {
+  return a + static_cast<int>((static_cast<int32_t>(b - a) * progress) / 1000);
+}
+
+void drawCenteredText(GfxRenderer& renderer, int fontId, const Rect& rect, const char* text) {
+  const int w = renderer.getTextWidth(fontId, text);
+  const int h = renderer.getLineHeight(fontId);
+  renderer.drawText(fontId, rect.x + std::max(0, (rect.width - w) / 2),
+                    rect.y + std::max(0, (rect.height - h) / 2), text);
+}
+
+void drawExplosion(GfxRenderer& renderer, int x, int y, int radius) {
+  if (radius <= 1) {
+    renderer.fillRect(x - 1, y - 1, 3, 3, true);
+    return;
+  }
+  renderer.drawRect(x - radius, y - radius, radius * 2, radius * 2, 1, true);
+  const int inner = std::max(1, radius / 2);
+  renderer.drawRect(x - inner, y - inner, inner * 2, inner * 2, 1, true);
+}
+}  // namespace
+
+MissileCommandActivity::MissileCommandActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
+    : Activity("Missile Command", renderer, mappedInput),
+      uiTarget_(makeUiTarget(renderer)),
+      app_(uiTarget_, uiTarget_.deviceContext()) {}
+
+void MissileCommandActivity::onEnter() {
+  Activity::onEnter();
+  viewMode_ = ViewMode::Menu;
+  selectedIndex_ = difficulty_;
+  topIndex_ = 0;
+  visibleRows_ = 1;
+  initialViewportPending_ = true;
+  uiReady_ = false;
+  loadHighScore();
+  hasSavedGame_ = loadSavedGame();
+  selectedIndex_ = difficulty_;
+  applySharedUiTheme(app_, uiTarget_);
+  app_.on(ACTION_ROW, &MissileCommandActivity::onRowEvent, this);
+  app_.setScreen(&MissileCommandActivity::menuScreen, this);
+  requestUpdate();
+}
+
+void MissileCommandActivity::onExit() {
+  if (viewMode_ == ViewMode::Playing && aliveCityCount() > 0) saveGame();
+  saveHighScore();
+  Activity::onExit();
+}
+
+void MissileCommandActivity::loop() {
+  switch (viewMode_) {
+    case ViewMode::Menu:
+      loopMenu();
+      break;
+    case ViewMode::Playing:
+      loopPlaying();
+      break;
+    case ViewMode::GameOver:
+      loopGameOver();
+      break;
+  }
+}
+
+void MissileCommandActivity::loopMenu() {
+  const Rect header = headerRect(renderer, mappedInput);
+  if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    mappedInput.suppressNextBackRelease();
+    onGoHome();
+    return;
+  }
+
+  if (uiReady_) {
+    const fui::InputSnapshot snap = touchSnapshotFrom(mappedInput);
+    if (snap.touchPressed || snap.touchReleased) {
+      const auto event = app_.route(snap);
+      if (app_.invalidated()) requestUpdate();
+      if (event) return;
+    }
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    activateRow(selectedIndex_);
+    return;
+  }
+
+  const auto moveSelection = [this](int index) {
+    selectedIndex_ = index;
+    topIndex_ = followListSelection(selectedIndex_, topIndex_, visibleRows_, kMenuRowCount);
+    requestUpdate();
+  };
+  buttonNavigator_.onNextRelease(
+      [this, &moveSelection] { moveSelection(ButtonNavigator::nextIndex(selectedIndex_, kMenuRowCount)); });
+  buttonNavigator_.onPreviousRelease(
+      [this, &moveSelection] { moveSelection(ButtonNavigator::previousIndex(selectedIndex_, kMenuRowCount)); });
+}
+
+void MissileCommandActivity::loopPlaying() {
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+  if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, geometry.header)) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    mappedInput.suppressNextBackRelease();
+    returnToMenu();
+    return;
+  }
+
+  int tx = 0;
+  int ty = 0;
+  if (mappedInput.wasScreenTapped(tx, ty) && pointInRect(geometry.field, tx, ty) && ty < geometry.groundY) {
+    launchPlayerMissile(tx, ty);
+    requestUpdate();
+  }
+
+  const int64_t now = esp_timer_get_time();
+  if (lastTickUs_ == 0) lastTickUs_ = now;
+  if (now - lastTickUs_ >= TICK_US) {
+    tickGame(now);
+    lastTickUs_ = now;
+    requestUpdate();
+  }
+}
+
+void MissileCommandActivity::loopGameOver() {
+  const Rect header = headerRect(renderer, mappedInput);
+  if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
+      mappedInput.wasPressed(MappedInputManager::Button::Back) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    mappedInput.suppressNextBackRelease();
+    returnToMenu();
+  }
+}
+
+void MissileCommandActivity::activateRow(int row) {
+  if (row >= 0 && row < 3) {
+    difficulty_ = row;
+    selectedIndex_ = row;
+    requestUpdate();
+    return;
+  }
+  if (row == 3) {
+    if (hasSavedGame_) continueGame();
+    return;
+  }
+  if (row == 4) newGame();
+}
+
+void MissileCommandActivity::newGame() {
+  clearSavedGame();
+  enemies_ = {};
+  players_ = {};
+  explosions_ = {};
+  citiesAlive_.fill(1);
+  ammo_.fill(10);
+  score_ = 0;
+  wave_ = 1;
+  startWave();
+  viewMode_ = ViewMode::Playing;
+  uiReady_ = false;
+  lastTickUs_ = esp_timer_get_time();
+  requestUpdate();
+}
+
+void MissileCommandActivity::continueGame() {
+  viewMode_ = ViewMode::Playing;
+  uiReady_ = false;
+  lastTickUs_ = esp_timer_get_time();
+  nextSpawnUs_ = lastTickUs_ + 500000;
+  requestUpdate();
+}
+
+void MissileCommandActivity::returnToMenu() {
+  if (aliveCityCount() > 0) saveGame();
+  viewMode_ = ViewMode::Menu;
+  selectedIndex_ = difficulty_;
+  topIndex_ = 0;
+  initialViewportPending_ = true;
+  requestUpdate();
+}
+
+void MissileCommandActivity::startWave() {
+  enemies_ = {};
+  players_ = {};
+  explosions_ = {};
+  ammo_.fill(static_cast<uint8_t>(10 + std::min<int>(wave_ / 2, 5)));
+  enemiesSpawned_ = 0;
+  enemiesResolved_ = 0;
+  const int64_t now = esp_timer_get_time();
+  nextSpawnUs_ = now + 500000;
+}
+
+void MissileCommandActivity::tickGame(int64_t nowUs) {
+  if (aliveCityCount() <= 0) {
+    finishGame();
+    return;
+  }
+
+  const int targetCount = 5 + difficulty_ * 2 + std::min<int>(wave_, 7);
+  if (enemiesSpawned_ < targetCount && nowUs >= nextSpawnUs_ && activeEnemyCount() < kMaxEnemyMissiles) {
+    spawnEnemy(nowUs);
+  }
+
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+  for (auto& missile : enemies_) {
+    if (!missile.active) continue;
+    missile.progress = static_cast<uint16_t>(std::min<int>(1000, missile.progress + missile.speed));
+    if (missile.progress < 1000) continue;
+    missile.active = false;
+    ++enemiesResolved_;
+
+    int nearest = 0;
+    int nearestDist = 1 << 30;
+    for (int i = 0; i < kCityCount; ++i) {
+      if (!citiesAlive_[static_cast<size_t>(i)]) continue;
+      const int cityX = geometry.field.x + (geometry.field.width * (i + 1)) / (kCityCount + 1);
+      const int d = std::abs(cityX - missile.targetX);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearest = i;
+      }
+    }
+    if (nearestDist < std::max(24, geometry.field.width / 10)) citiesAlive_[static_cast<size_t>(nearest)] = 0;
+    createExplosion(missile.targetX, missile.targetY);
+  }
+
+  for (auto& missile : players_) {
+    if (!missile.active) continue;
+    missile.progress = static_cast<uint16_t>(std::min<int>(1000, missile.progress + missile.speed));
+    if (missile.progress >= 1000) {
+      missile.active = false;
+      createExplosion(missile.targetX, missile.targetY);
+    }
+  }
+
+  for (auto& explosion : explosions_) {
+    if (!explosion.active) continue;
+    if (++explosion.phase >= 7) explosion.active = false;
+  }
+
+  resolveCollisions();
+  finishWaveIfNeeded();
+}
+
+void MissileCommandActivity::spawnEnemy(int64_t nowUs) {
+  Missile* slot = nullptr;
+  for (auto& missile : enemies_) {
+    if (!missile.active) {
+      slot = &missile;
+      break;
+    }
+  }
+  if (!slot) return;
+
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+  const int margin = 8;
+  slot->startX = static_cast<int16_t>(geometry.field.x + margin +
+      static_cast<int>(esp_random() % static_cast<uint32_t>(std::max(1, geometry.field.width - margin * 2))));
+  slot->startY = static_cast<int16_t>(geometry.field.y + 2);
+
+  std::array<int, kCityCount> alive{};
+  int aliveCount = 0;
+  for (int i = 0; i < kCityCount; ++i) {
+    if (citiesAlive_[static_cast<size_t>(i)]) alive[static_cast<size_t>(aliveCount++)] = i;
+  }
+  if (aliveCount <= 0) return;
+  const int city = alive[static_cast<size_t>(esp_random() % static_cast<uint32_t>(aliveCount))];
+  slot->targetX = static_cast<int16_t>(geometry.field.x + (geometry.field.width * (city + 1)) / (kCityCount + 1));
+  slot->targetY = static_cast<int16_t>(geometry.groundY);
+  slot->progress = 0;
+  slot->speed = static_cast<uint16_t>(18 + difficulty_ * 6 + std::min<int>(wave_, 8));
+  slot->active = true;
+  ++enemiesSpawned_;
+
+  const int delayMs = std::max(420, 1150 - difficulty_ * 180 - static_cast<int>(wave_) * 45);
+  nextSpawnUs_ = nowUs + static_cast<int64_t>(delayMs) * 1000;
+}
+
+void MissileCommandActivity::launchPlayerMissile(int x, int y) {
+  Missile* slot = nullptr;
+  for (auto& missile : players_) {
+    if (!missile.active) {
+      slot = &missile;
+      break;
+    }
+  }
+  if (!slot) return;
+
+  const int battery = nearestBatteryForX(x);
+  if (battery < 0 || battery >= kBatteryCount || ammo_[static_cast<size_t>(battery)] == 0) return;
+
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+  const int batteryX = geometry.field.x + geometry.field.width * (battery * 2 + 1) / (kBatteryCount * 2);
+  --ammo_[static_cast<size_t>(battery)];
+  slot->startX = static_cast<int16_t>(batteryX);
+  slot->startY = static_cast<int16_t>(geometry.groundY + 18);
+  slot->targetX = static_cast<int16_t>(std::clamp(x, geometry.field.x, geometry.field.x + geometry.field.width - 1));
+  slot->targetY = static_cast<int16_t>(std::clamp(y, geometry.field.y, geometry.groundY - 4));
+  slot->progress = 0;
+  slot->speed = 170;
+  slot->active = true;
+}
+
+void MissileCommandActivity::createExplosion(int x, int y) {
+  for (auto& explosion : explosions_) {
+    if (explosion.active) continue;
+    explosion.x = static_cast<int16_t>(x);
+    explosion.y = static_cast<int16_t>(y);
+    explosion.phase = 0;
+    explosion.active = true;
+    return;
+  }
+}
+
+void MissileCommandActivity::resolveCollisions() {
+  for (auto& enemy : enemies_) {
+    if (!enemy.active) continue;
+    const int ex = lerpInt(enemy.startX, enemy.targetX, enemy.progress);
+    const int ey = lerpInt(enemy.startY, enemy.targetY, enemy.progress);
+    for (const auto& explosion : explosions_) {
+      if (!explosion.active) continue;
+      const int radius = explosion.phase <= 3 ? 8 + explosion.phase * 9 : 8 + (6 - explosion.phase) * 9;
+      const int dx = ex - explosion.x;
+      const int dy = ey - explosion.y;
+      if (dx * dx + dy * dy > radius * radius) continue;
+      enemy.active = false;
+      ++enemiesResolved_;
+      score_ += static_cast<uint32_t>(25 + wave_ * 2);
+      createExplosion(ex, ey);
+      break;
+    }
+  }
+}
+
+void MissileCommandActivity::finishWaveIfNeeded() {
+  const int targetCount = 5 + difficulty_ * 2 + std::min<int>(wave_, 7);
+  if (enemiesSpawned_ < targetCount || activeEnemyCount() > 0 || activePlayerCount() > 0) return;
+
+  for (int i = 0; i < kCityCount; ++i) {
+    if (citiesAlive_[static_cast<size_t>(i)]) score_ += 100;
+  }
+  for (uint8_t ammo : ammo_) score_ += static_cast<uint32_t>(ammo) * 5;
+  ++wave_;
+  startWave();
+  saveGame();
+}
+
+void MissileCommandActivity::finishGame() {
+  if (score_ > highScore_) {
+    highScore_ = score_;
+    saveHighScore();
+  }
+  clearSavedGame();
+  viewMode_ = ViewMode::GameOver;
+  requestUpdate();
+}
+
+int MissileCommandActivity::aliveCityCount() const {
+  int count = 0;
+  for (uint8_t alive : citiesAlive_) count += alive ? 1 : 0;
+  return count;
+}
+
+int MissileCommandActivity::activeEnemyCount() const {
+  int count = 0;
+  for (const auto& missile : enemies_) count += missile.active ? 1 : 0;
+  return count;
+}
+
+int MissileCommandActivity::activePlayerCount() const {
+  int count = 0;
+  for (const auto& missile : players_) count += missile.active ? 1 : 0;
+  return count;
+}
+
+int MissileCommandActivity::nearestBatteryForX(int x) const {
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+  int best = 0;
+  int bestDistance = 1 << 30;
+  for (int i = 0; i < kBatteryCount; ++i) {
+    const int bx = geometry.field.x + geometry.field.width * (i * 2 + 1) / (kBatteryCount * 2);
+    const int d = std::abs(bx - x);
+    if (d < bestDistance && ammo_[static_cast<size_t>(i)] > 0) {
+      bestDistance = d;
+      best = i;
+    }
+  }
+  return bestDistance == (1 << 30) ? -1 : best;
+}
+
+void MissileCommandActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
+  auto* self = static_cast<MissileCommandActivity*>(user);
+  if (event.value < 0 || event.value >= kMenuRowCount) return;
+  self->selectedIndex_ = event.value;
+  self->app_.clearTapFlash();
+  self->activateRow(event.value);
+}
+
+void MissileCommandActivity::menuScreen(UiApp::ScreenType& screen, void* user) {
+  static_cast<MissileCommandActivity*>(user)->buildMenuScreen(screen);
+}
+
+void MissileCommandActivity::buildMenuScreen(UiApp::ScreenType& screen) {
+  const Rect bounds = menuRect(renderer, mappedInput);
+  screen.setContentMargin(fui::Insets{static_cast<int16_t>(bounds.y), 0,
+      static_cast<int16_t>(renderer.getScreenHeight() - bounds.y - bounds.height), 0});
+
+  std::array<fui::ListItem, kMenuRowCount> items{};
+  for (int i = 0; i < 3; ++i) {
+    items[static_cast<size_t>(i)].label = DIFFICULTY_LABELS[i];
+    items[static_cast<size_t>(i)].value = i == difficulty_ ? "Selectionne" : nullptr;
+    items[static_cast<size_t>(i)].actionValue = static_cast<int16_t>(i);
+  }
+  items[3].label = "Continuer";
+  items[3].value = hasSavedGame_ ? "Partie sauvegardee" : "Aucune partie";
+  items[3].actionValue = 3;
+  items[4].label = "Nouvelle partie";
+  items[4].value = DIFFICULTY_LABELS[difficulty_];
+  items[4].actionValue = 4;
+
+  fui::ListProps props;
+  props.items = items.data();
+  props.count = static_cast<uint16_t>(items.size());
+  props.selectedIndex = static_cast<int16_t>(selectedIndex_);
+  props.action = ACTION_ROW;
+  props.inputMask = fui::InputTouch;
+  props.valueInset = 8;
+  props.labelText = screen.theme().bodyText;
+  const auto rows = configureUiList(props, screen.theme(), screen.body());
+  visibleRows_ = rows > 0 ? rows : 1;
+  topIndex_ = initialViewportPending_ ? followListSelection(selectedIndex_, 0, visibleRows_, kMenuRowCount)
+                                      : scrollListBy(topIndex_, 0, visibleRows_, kMenuRowCount);
+  initialViewportPending_ = false;
+  props.topIndex = static_cast<uint16_t>(topIndex_);
+  screen.list(props);
+}
+
+void MissileCommandActivity::render(RenderLock&&) {
+  switch (viewMode_) {
+    case ViewMode::Menu:
+      renderMenu();
+      break;
+    case ViewMode::Playing:
+      renderPlaying();
+      break;
+    case ViewMode::GameOver:
+      renderGameOver();
+      break;
+  }
+}
+
+void MissileCommandActivity::renderMenu() {
+  renderer.clearScreen();
+  const Rect header = headerRect(renderer, mappedInput);
+  if (mappedInput.hasTouchHardware()) TouchHeaderBackButton::draw(renderer, uiTarget_, header, "Missile Command", false);
+  else GUI.drawHeader(renderer, header, "Missile Command", nullptr, false);
+
+  uiReady_ = false;
+  app_.render();
+  uiReady_ = true;
+
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT),
+                                             tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
+  renderer.displayBuffer();
+}
+
+void MissileCommandActivity::renderPlaying() {
+  renderer.clearScreen();
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+  if (mappedInput.hasTouchHardware()) TouchHeaderBackButton::draw(renderer, uiTarget_, geometry.header, "Missile Command", false);
+  else GUI.drawHeader(renderer, geometry.header, "Missile Command", nullptr, false);
+
+  char status[96];
+  std::snprintf(status, sizeof(status), "Score %lu   Record %lu   Vague %u   Villes %d",
+                static_cast<unsigned long>(score_), static_cast<unsigned long>(highScore_),
+                static_cast<unsigned>(wave_), aliveCityCount());
+  renderer.drawRoundedRect(geometry.status.x, geometry.status.y, geometry.status.width, geometry.status.height, 1, 6, true);
+  drawCenteredText(renderer, UI_10_FONT_ID, geometry.status, status);
+
+  renderer.drawRect(geometry.field.x, geometry.field.y, geometry.field.width, geometry.field.height, 1, true);
+  renderer.drawLine(geometry.field.x, geometry.groundY, geometry.field.x + geometry.field.width, geometry.groundY, 1, true);
+
+  for (int i = 0; i < kCityCount; ++i) {
+    const int x = geometry.field.x + geometry.field.width * (i + 1) / (kCityCount + 1);
+    if (citiesAlive_[static_cast<size_t>(i)]) {
+      renderer.drawRect(x - 10, geometry.groundY - 11, 20, 11, 1, true);
+      renderer.drawLine(x - 8, geometry.groundY - 11, x, geometry.groundY - 20, 1, true);
+      renderer.drawLine(x, geometry.groundY - 20, x + 8, geometry.groundY - 11, 1, true);
+    }
+  }
+
+  for (int i = 0; i < kBatteryCount; ++i) {
+    const int x = geometry.field.x + geometry.field.width * (i * 2 + 1) / (kBatteryCount * 2);
+    renderer.drawRect(x - 14, geometry.groundY + 5, 28, 16, 1, true);
+    char ammoText[8];
+    std::snprintf(ammoText, sizeof(ammoText), "%u", static_cast<unsigned>(ammo_[static_cast<size_t>(i)]));
+    drawCenteredText(renderer, UI_10_FONT_ID, Rect{x - 18, geometry.groundY + 21, 36, 24}, ammoText);
+  }
+
+  for (const auto& missile : enemies_) {
+    if (!missile.active) continue;
+    const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
+    const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
+    renderer.drawLine(missile.startX, missile.startY, x, y, 1, true);
+    renderer.fillRect(x - 1, y - 1, 3, 3, true);
+  }
+  for (const auto& missile : players_) {
+    if (!missile.active) continue;
+    const int x = lerpInt(missile.startX, missile.targetX, missile.progress);
+    const int y = lerpInt(missile.startY, missile.targetY, missile.progress);
+    renderer.drawLine(missile.startX, missile.startY, x, y, 1, true);
+    renderer.drawRect(x - 2, y - 2, 5, 5, 1, true);
+  }
+  for (const auto& explosion : explosions_) {
+    if (!explosion.active) continue;
+    const int radius = explosion.phase <= 3 ? 8 + explosion.phase * 9 : 8 + (6 - explosion.phase) * 9;
+    drawExplosion(renderer, explosion.x, explosion.y, radius);
+  }
+
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "Tirer", "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, false);
+  renderer.displayBuffer();
+}
+
+void MissileCommandActivity::renderGameOver() {
+  renderPlaying();
+  const int width = std::min(380, renderer.getScreenWidth() - 36);
+  const int height = 170;
+  const Rect box{(renderer.getScreenWidth() - width) / 2, (renderer.getScreenHeight() - height) / 2, width, height};
+  renderer.fillRect(box.x, box.y, box.width, box.height, false);
+  renderer.drawRoundedRect(box.x, box.y, box.width, box.height, 2, 8, true);
+  drawCenteredText(renderer, UI_12_FONT_ID, Rect{box.x + 12, box.y + 18, box.width - 24, 36}, "Toutes les villes sont perdues");
+  char scoreText[64];
+  std::snprintf(scoreText, sizeof(scoreText), "Score final : %lu", static_cast<unsigned long>(score_));
+  drawCenteredText(renderer, UI_10_FONT_ID, Rect{box.x + 12, box.y + 68, box.width - 24, 30}, scoreText);
+  drawCenteredText(renderer, UI_10_FONT_ID, Rect{box.x + 12, box.y + 112, box.width - 24, 30}, "OK / Retour : menu");
+  renderer.displayBuffer();
+}
+
+bool MissileCommandActivity::saveGame() {
+  if (aliveCityCount() <= 0) return false;
+  Storage.mkdir(SAVE_DIR);
+  FsFile file;
+  if (!Storage.openFileForWrite("MISSILE", SAVE_PATH, file)) return false;
+  const uint8_t difficulty = static_cast<uint8_t>(std::clamp(difficulty_, 0, 2));
+  bool ok = writeValue(file, SAVE_MAGIC) && writeValue(file, SAVE_VERSION) && writeValue(file, difficulty) &&
+            writeValue(file, wave_) && writeValue(file, score_);
+  if (ok) ok = file.write(citiesAlive_.data(), citiesAlive_.size()) == citiesAlive_.size();
+  if (ok) ok = file.write(ammo_.data(), ammo_.size()) == ammo_.size();
+  file.close();
+  if (!ok) {
+    Storage.remove(SAVE_PATH);
+    hasSavedGame_ = false;
+    return false;
+  }
+  hasSavedGame_ = true;
+  return true;
+}
+
+bool MissileCommandActivity::loadSavedGame() {
+  if (!Storage.exists(SAVE_PATH)) return false;
+  FsFile file;
+  if (!Storage.openFileForRead("MISSILE", SAVE_PATH, file)) return false;
+  uint32_t magic = 0;
+  uint8_t version = 0;
+  uint8_t difficulty = 0;
+  uint16_t wave = 0;
+  uint32_t score = 0;
+  std::array<uint8_t, kCityCount> cities{};
+  std::array<uint8_t, kBatteryCount> ammo{};
+  bool ok = readValue(file, magic) && readValue(file, version) && readValue(file, difficulty) &&
+            readValue(file, wave) && readValue(file, score);
+  if (ok) ok = file.read(cities.data(), cities.size()) == static_cast<int>(cities.size());
+  if (ok) ok = file.read(ammo.data(), ammo.size()) == static_cast<int>(ammo.size());
+  file.close();
+  if (!ok || magic != SAVE_MAGIC || version != SAVE_VERSION || difficulty > 2 || wave == 0) {
+    clearSavedGame();
+    return false;
+  }
+  for (uint8_t alive : cities) {
+    if (alive > 1) {
+      clearSavedGame();
+      return false;
+    }
+  }
+  difficulty_ = difficulty;
+  wave_ = wave;
+  score_ = score;
+  citiesAlive_ = cities;
+  ammo_ = ammo;
+  enemies_ = {};
+  players_ = {};
+  explosions_ = {};
+  enemiesSpawned_ = 0;
+  enemiesResolved_ = 0;
+  hasSavedGame_ = aliveCityCount() > 0;
+  return hasSavedGame_;
+}
+
+void MissileCommandActivity::clearSavedGame() {
+  if (Storage.exists(SAVE_PATH)) Storage.remove(SAVE_PATH);
+  hasSavedGame_ = false;
+}
+
+bool MissileCommandActivity::loadHighScore() {
+  highScore_ = 0;
+  if (!Storage.exists(SCORE_PATH)) return false;
+  FsFile file;
+  if (!Storage.openFileForRead("MISSILE", SCORE_PATH, file)) return false;
+  uint32_t magic = 0;
+  uint8_t version = 0;
+  uint32_t score = 0;
+  const bool ok = readValue(file, magic) && readValue(file, version) && readValue(file, score);
+  file.close();
+  if (!ok || magic != SCORE_MAGIC || version != SCORE_VERSION) return false;
+  highScore_ = score;
+  return true;
+}
+
+bool MissileCommandActivity::saveHighScore() {
+  if (score_ > highScore_) highScore_ = score_;
+  Storage.mkdir(SAVE_DIR);
+  FsFile file;
+  if (!Storage.openFileForWrite("MISSILE", SCORE_PATH, file)) return false;
+  const bool ok = writeValue(file, SCORE_MAGIC) && writeValue(file, SCORE_VERSION) && writeValue(file, highScore_);
+  file.close();
+  return ok;
+}
