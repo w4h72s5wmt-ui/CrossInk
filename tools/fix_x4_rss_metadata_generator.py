@@ -34,5 +34,15 @@ if count != 1:
     raise SystemExit(f"generator cache-version anchor expected one match, got {count}")
 text = text.replace(old_version_anchor, actual_version_anchor, 1)
 
+# These checks live inside a Python raw string that emits C++ source. The C++
+# literal needs one backslash before n, not two literal backslashes.
+for marker in ("XRSSF1", "XRSS11"):
+    old = f'{marker}\\\\n'
+    new = f'{marker}\\n'
+    count = text.count(old)
+    if count < 1:
+        raise SystemExit(f"generated test marker escape missing: {marker}")
+    text = text.replace(old, new)
+
 path.write_text(text)
-print("Fixed candidate generator boundaries and #259 cache-version anchor.")
+print("Fixed candidate generator boundaries, cache-version anchor and marker assertions.")
