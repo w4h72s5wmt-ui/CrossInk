@@ -151,6 +151,25 @@ void htmlTests() {
                   " reste un lien inline.") != std::string::npos,
         "short inline anchor keeps apostrophe grammar unchanged");
 
+
+  const std::string linkStart = "\xEE\x80\x80";
+  const std::string linkEnd = "\xEE\x80\x81";
+  text = extract("<article><p>" + longBody +
+                 "</p><p>du Sénat publié en 2024.<a href='https://example.test/discover'>À découvrir</a> "
+                 "PODCAST - <a href='https://example.test/club'>Écoutez le club Le Figaro International</a>Pour éviter "
+                 "cette route, voir le <a href='https://example.test/report'>rapport</a>du Sénat.</p></article>");
+  check(text.find(std::string("2024. ") + linkStart + "À découvrir") != std::string::npos,
+        "short/ordinary link gets a boundary after sentence punctuation");
+  check(text.find(std::string("International") + linkEnd + " Pour éviter") != std::string::npos,
+        "ordinary link gets a boundary before following prose");
+  check(text.find(std::string("rapport") + linkEnd + " du Sénat") != std::string::npos,
+        "short link gets a boundary before following prose");
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p>Avant<a href='https://example.test/mot'>mot</a>.Suite.</p></article>");
+  check(text.find(std::string("Avant ") + linkStart + "mot" + linkEnd + ". Suite.") != std::string::npos,
+        "ordinary link keeps punctuation attached then separates next sentence");
+
   bool ok = true;
   extract("<article><p>" + std::string(RC::MAX_TEXT_BYTES + 100, 'x') + "</p></article>", &ok);
   check(!ok, "text capacity is not successful extraction");
@@ -262,24 +281,24 @@ void cacheTests() {
   reset();
   const std::string path = RC::bodyPath(item);
   check(fetch(item) == RC::CacheResult::FALLBACK_READY, "network failure -> persisted summary fallback");
-  check(testFiles[path].rfind("XRSSF3\n", 0) == 0, "fallback has current SD marker");
+  check(testFiles[path].rfind("XRSSF4\n", 0) == 0, "fallback has current SD marker");
   check(RC::hasReadableBody(item) && !RC::hasCurrentBody(item), "fallback readable but not a full body");
   check(load(item, out) == RC::CacheResult::FALLBACK_READY && out == "Le resume du flux reste disponible.",
         "persisted summary fallback loads without RssItem history summary");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY, "manual retry replaces fallback with full body");
-  check(testFiles[path].rfind("XRSS13\n", 0) == 0, "full body keeps XRSS12 marker");
+  check(testFiles[path].rfind("XRSS14\n", 0) == 0, "full body keeps current marker");
   check(load(item, out) == RC::CacheResult::READY && out.find("FIN_UTILE") != std::string::npos, "body loads");
   const auto cachedCalls = H::publicCalls;
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid full cache reused");
   check(RC::hasCurrentBody(item) && RC::hasReadableBody(item), "full body probes current/readable");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS12\nAncien corps de developpement";
+  testFiles[RC::bodyPath(item)] = "XRSS13\nAncien corps de developpement";
   check(!RC::hasCurrentBody(item) && !RC::hasReadableBody(item), "previous body generation rejected");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "obsolete body invalidated and refetched");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS13\n", 0) == 0, "refetched current full body version");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS14\n", 0) == 0, "refetched current full body version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});

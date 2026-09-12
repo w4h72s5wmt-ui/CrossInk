@@ -448,7 +448,6 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
   size_t pos = begin;
   size_t anchorTextStart = 0;
   size_t anchorMarkerStart = 0;
-  bool anchorLeadingBoundary = false;
   bool inAnchor = false;
   while (pos < end && textLength < MAX_TEXT_BYTES) {
     if (html[pos] == '<') {
@@ -490,9 +489,15 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
       }
       if (tagEquals(tag.name, "a")) {
         if (!tag.closing && !tag.selfClosing && !inAnchor) {
+          // HTML/CSS frequently makes links visually separate even when the
+          // source omits literal whitespace. Keep a semantic seam for every
+          // anchor, not only long teaser/card links. Grammar that genuinely
+          // binds to the link (apostrophe, opening parenthesis, etc.) is kept.
+          if (textLength > 0 && !anchorBoundaryGluesAfterText(text, textLength)) {
+            appendRemovalBoundary(text, textLength);
+          }
           inAnchor = true;
           anchorMarkerStart = textLength;
-          anchorLeadingBoundary = textLength > 0 && !anchorBoundaryGluesAfterText(text, textLength);
           for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_START[i]);
           anchorTextStart = textLength;
         } else if (tag.closing && inAnchor) {
@@ -505,26 +510,14 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
             }
             if (next < end) appendRemovalBoundary(text, textLength);
           } else if (anchorTextBytes > 0) {
-            // Long linked labels are frequently CSS cards/teasers. Their HTML
-            // often has no literal whitespace around the <a>, even though the
-            // browser lays them out as separate blocks. Only repair these long
-            // labels; short inline links keep their exact grammar.
-            const bool cardLikeAnchor = anchorTextBytes >= 24;
-            if (cardLikeAnchor && anchorLeadingBoundary && textLength < MAX_TEXT_BYTES) {
-              std::memmove(text + anchorMarkerStart + 1, text + anchorMarkerStart,
-                           textLength - anchorMarkerStart);
-              text[anchorMarkerStart] = RSS_REMOVAL_BOUNDARY;
-              ++textLength;
-            }
             for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_END[i]);
-            if (cardLikeAnchor && next < end && !anchorBoundaryGluesBeforeSource(html, end, next)) {
+            if (next < end && !anchorBoundaryGluesBeforeSource(html, end, next)) {
               appendRemovalBoundary(text, textLength);
             }
           } else {
             textLength = anchorMarkerStart;
             if (next < end) appendRemovalBoundary(text, textLength);
           }
-          anchorLeadingBoundary = false;
           inAnchor = false;
         }
       }
