@@ -136,12 +136,22 @@ home = ''.join(lines)
 if inserted_menu_rows < 2:
     raise RuntimeError(f"expected two Home menu insertions, got {inserted_menu_rows}")
 
-switch_old = "    case HomeMenuAction::Game2048:\n      onGame2048Open();\n      break;\n    case HomeMenuAction::RssNews:"
-switch_new = "    case HomeMenuAction::Game2048:\n      onGame2048Open();\n      break;\n    case HomeMenuAction::MissileCommand:\n      onMissileCommandOpen();\n      break;\n    case HomeMenuAction::RssNews:"
-switch_count = home.count(switch_old)
-if switch_count == 0:
-    raise RuntimeError("missing Game2048 launch switch")
-home = home.replace(switch_old, switch_new)
+# Build 304 has several Home dispatch switches with different indentation.
+# Inject the Missile case immediately before every RSS case instead of matching
+# a whole multi-line block inherited from older builds.
+lines = []
+inserted_switches = 0
+for line in home.splitlines(keepends=True):
+    if line.strip() == 'case HomeMenuAction::RssNews:':
+        indent = line[:len(line) - len(line.lstrip())]
+        lines.append(indent + 'case HomeMenuAction::MissileCommand:\n')
+        lines.append(indent + '  onMissileCommandOpen();\n')
+        lines.append(indent + '  break;\n')
+        inserted_switches += 1
+    lines.append(line)
+home = ''.join(lines)
+if inserted_switches < 2:
+    raise RuntimeError(f"expected Home dispatch insertions, got {inserted_switches}")
 
 impl_old = "void HomeActivity::onGame2048Open() {\n  startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput), [](const ActivityResult&) {});\n}\n"
 impl_new = impl_old + "\nvoid HomeActivity::onMissileCommandOpen() {\n  startActivityForResult(std::make_unique<MissileCommandActivity>(renderer, mappedInput), [](const ActivityResult&) {});\n}\n"
@@ -158,4 +168,4 @@ if '[env:x4-pro-missile]' not in pio:
     pio += '''\n\n; --- Missile Command X4 Pro -------------------------------------------------\n; App-specific target. FreeInk documents this SSD1677 DU shortcut at ~77 ms.\n; UC8179/UC8279 X4 Pro batches stay on their own driver path.\n[env:x4-pro-missile]\nextends = env:x4-pro\nbuild_flags =\n  ${env:x4-pro.build_flags}\n  -DFREEINK_X4PRO_FAST_DU_SHORTCUT\n'''
 PIO.write_text(pio)
 
-print(f"Missile Command integrated on build 304; menu rows={inserted_menu_rows}, switches={switch_count}")
+print(f"Missile Command integrated on build 304; menu rows={inserted_menu_rows}, switches={inserted_switches}")
