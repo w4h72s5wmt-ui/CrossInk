@@ -21,6 +21,9 @@ using CancelCallback = std::function<bool()>;
 // from the RSS metadata cache so hundreds of entries do not consume PSRAM.
 std::string bodyPath(const RssItem& item);
 
+// True only when the dedicated body matches the current cache format and size.
+bool hasCurrentBody(const RssItem& item);
+
 // Removes the dedicated offline body for an article. Missing files count as
 // success so callers can prune history without special cases.
 bool remove(const RssItem& item);

@@ -254,70 +254,82 @@ void RssNewsActivity::onExit() {
       WiFi.disconnect(false);
       delay(30);
     }
-    // Keep the post-WiFi reboot that defragments the ESP network heap, but
-    // resume with the Home application menu open on RSS instead of plain Home.
-    silentRestartAfterNetworkToRssMenu();
+    // Keep the post-WiFi reboot that defragments the ESP network heap and
+    // resume at the normal Home screen, like native applications.
+    silentRestartAfterNetwork();
   }
 #endif
 }
 
 bool RssNewsActivity::ensureBuffers() {
+  size_t requestedArticleCapacity = 0;
+  size_t requestedFeedCapacity = 1;
+  for (size_t i = 0; i < sourceCount; ++i) {
+    requestedArticleCapacity += std::clamp<size_t>(sources[i].historyLimit, 1, ITEMS_PER_SOURCE);
+    requestedFeedCapacity = std::max(
+        requestedFeedCapacity, std::clamp<size_t>(sources[i].syncLimit, 1, FEED_ITEM_CAPACITY));
+  }
+  articleCapacity = std::clamp<size_t>(requestedArticleCapacity, 1, MAX_ARTICLES);
+  feedItemCapacity = std::clamp<size_t>(requestedFeedCapacity, 1, FEED_ITEM_CAPACITY);
+  LOG_DBG("RSS", "Runtime capacities: articles=%zu/%zu feed=%zu/%zu", articleCapacity, MAX_ARTICLES,
+          feedItemCapacity, FEED_ITEM_CAPACITY);
+
   if (!articleStorage) {
-    articleStorage = allocateRssBuffer(sizeof(CachedArticle) * MAX_ARTICLES);
+    articleStorage = allocateRssBuffer(sizeof(CachedArticle) * articleCapacity);
     if (!articleStorage) {
-      LOG_ERR("RSS", "OOM allocating article cache (%zu records)", MAX_ARTICLES);
+      LOG_ERR("RSS", "OOM allocating article cache (%zu records)", articleCapacity);
       return false;
     }
     articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
-    std::memset(articles, 0, sizeof(CachedArticle) * MAX_ARTICLES);
+    std::memset(articles, 0, sizeof(CachedArticle) * articleCapacity);
   } else if (!articles) {
     articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
   }
 
   if (!feedStorage) {
-    feedStorage = allocateRssBuffer(sizeof(RssItem) * FEED_ITEM_CAPACITY);
+    feedStorage = allocateRssBuffer(sizeof(RssItem) * feedItemCapacity);
     if (!feedStorage) {
-      LOG_ERR("RSS", "OOM allocating feed scratch (%zu records)", FEED_ITEM_CAPACITY);
+      LOG_ERR("RSS", "OOM allocating feed scratch (%zu records)", feedItemCapacity);
       return false;
     }
     feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
-    std::memset(feedItems, 0, sizeof(RssItem) * FEED_ITEM_CAPACITY);
+    std::memset(feedItems, 0, sizeof(RssItem) * feedItemCapacity);
   } else if (!feedItems) {
     feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
   }
 
   if (!listItemStorage) {
-    listItemStorage = allocateRssBuffer(sizeof(fui::ListItem) * (MAX_ARTICLES + 1));
+    listItemStorage = allocateRssBuffer(sizeof(fui::ListItem) * (articleCapacity + 1));
     if (!listItemStorage) {
       LOG_ERR("RSS", "OOM allocating RSS list items");
       return false;
     }
     listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
-    std::memset(listItems, 0, sizeof(fui::ListItem) * (MAX_ARTICLES + 1));
+    std::memset(listItems, 0, sizeof(fui::ListItem) * (articleCapacity + 1));
   } else if (!listItems) {
     listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
   }
 
   if (!listMetaStorage) {
-    listMetaStorage = allocateRssBuffer(MAX_ARTICLES * LIST_META_CAPACITY);
+    listMetaStorage = allocateRssBuffer(articleCapacity * LIST_META_CAPACITY);
     if (!listMetaStorage) {
       LOG_ERR("RSS", "OOM allocating RSS list metadata");
       return false;
     }
     listMetaText = reinterpret_cast<char*>(listMetaStorage.get());
-    std::memset(listMetaText, 0, MAX_ARTICLES * LIST_META_CAPACITY);
+    std::memset(listMetaText, 0, articleCapacity * LIST_META_CAPACITY);
   } else if (!listMetaText) {
     listMetaText = reinterpret_cast<char*>(listMetaStorage.get());
   }
 
   if (!displayOrderStorage) {
-    displayOrderStorage = allocateRssBuffer(sizeof(uint16_t) * MAX_ARTICLES);
+    displayOrderStorage = allocateRssBuffer(sizeof(uint16_t) * articleCapacity);
     if (!displayOrderStorage) {
       LOG_ERR("RSS", "OOM allocating RSS sort index");
       return false;
     }
     displayOrder = reinterpret_cast<uint16_t*>(displayOrderStorage.get());
-    std::memset(displayOrder, 0, sizeof(uint16_t) * MAX_ARTICLES);
+    std::memset(displayOrder, 0, sizeof(uint16_t) * articleCapacity);
   } else if (!displayOrder) {
     displayOrder = reinterpret_cast<uint16_t*>(displayOrderStorage.get());
   }
@@ -524,10 +536,18 @@ uint32_t RssNewsActivity::sourceConfigHash() const {
     hash ^= static_cast<uint8_t>(c);
     hash *= UINT32_C(16777619);
   };
+  const auto mixLimit = [&mix](const uint16_t value) {
+    mix(static_cast<char>(value & 0xffU));
+    mix(static_cast<char>((value >> 8U) & 0xffU));
+  };
   for (size_t i = 0; i < sourceCount; ++i) {
     for (const char c : sources[i].name) mix(c);
     mix('|');
     for (const char c : sources[i].url) mix(c);
+    mix('|');
+    mixLimit(sources[i].syncLimit);
+    mix('|');
+    mixLimit(sources[i].historyLimit);
     mix('|');
     for (const char c : sources[i].dropRules) mix(c);
     mix('|');
@@ -568,6 +588,14 @@ bool RssNewsActivity::loadCache() {
     file.close();
     Storage.remove(CACHE_PATH);
     LOG_DBG("RSS", "Purged article bodies for obsolete feed configuration");
+    return false;
+  }
+
+  if (header.count > articleCapacity) {
+    LOG_ERR("RSS", "RSS cache exceeds configured capacity (%u > %zu)",
+            static_cast<unsigned>(header.count), articleCapacity);
+    file.close();
+    Storage.remove(CACHE_PATH);
     return false;
   }
 
@@ -627,9 +655,7 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
   const size_t historyLimit = std::clamp<size_t>(sources[sourceIndex].historyLimit, 1, ITEMS_PER_SOURCE);
   const bool requiresCachedBody = RssFigaroAuth::isConfiguredFor(sources[sourceIndex].url);
   const auto keepHistoryItem = [requiresCachedBody](const RssItem& item) {
-    if (!requiresCachedBody) return true;
-    const std::string path = RssArticleCache::bodyPath(item);
-    return Storage.exists(path.c_str());
+    return !requiresCachedBody || RssArticleCache::hasCurrentBody(item);
   };
 
   size_t mergedCount = 0;
@@ -694,7 +720,9 @@ void RssNewsActivity::mergeSourceArticles(const uint8_t sourceIndex, RssItem* it
   }
   articleCount = writeIndex;
 
-  const size_t addCount = std::min(mergedCount, MAX_ARTICLES - articleCount);
+  const size_t addCount = articleCount < articleCapacity
+                              ? std::min(mergedCount, articleCapacity - articleCount)
+                              : 0;
   for (size_t i = 0; i < addCount; ++i) {
     CachedArticle& article = articles[articleCount++];
     article = CachedArticle{};
@@ -1032,9 +1060,9 @@ void RssNewsActivity::onWifiSelectionComplete(const bool connected) {
 bool RssNewsActivity::fetchSource(const uint8_t sourceIndex, size_t& outCount, bool& cancelled) {
   outCount = 0;
   if (!feedItems || sourceIndex >= sourceCount) return false;
-  std::memset(feedItems, 0, sizeof(RssItem) * FEED_ITEM_CAPACITY);
+  std::memset(feedItems, 0, sizeof(RssItem) * feedItemCapacity);
 
-  const size_t syncLimit = std::clamp<size_t>(sources[sourceIndex].syncLimit, 1, FEED_ITEM_CAPACITY);
+  const size_t syncLimit = std::clamp<size_t>(sources[sourceIndex].syncLimit, 1, feedItemCapacity);
   RssParser parser(feedItems, syncLimit);
   HttpDownloader::DownloadOptions options;
   options.bufferSize = HTTP_BUFFER_SIZE;
@@ -1184,8 +1212,8 @@ void RssNewsActivity::refreshFeeds() {
 void RssNewsActivity::seedSimulatorArticles() {
   if (!articles) return;
   articleCount = 0;
-  for (uint8_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex) {
-    for (size_t sample = 0; sample < 3; ++sample) {
+  for (uint8_t sourceIndex = 0; sourceIndex < sourceCount && articleCount < articleCapacity; ++sourceIndex) {
+    for (size_t sample = 0; sample < 3 && articleCount < articleCapacity; ++sample) {
       CachedArticle& article = articles[articleCount++];
       article = CachedArticle{};
       article.sourceIndex = sourceIndex;
@@ -1207,7 +1235,7 @@ void RssNewsActivity::loop() {
       closeArticle();
     } else {
       mappedInput.suppressNextBackRelease();
-      finish();
+      onGoHome();
     }
     return;
   }
@@ -1249,7 +1277,7 @@ void RssNewsActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    finish();
+    onGoHome();
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {

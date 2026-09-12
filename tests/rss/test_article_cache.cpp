@@ -176,12 +176,15 @@ void cacheTests() {
   check(load(item, out) == RC::CacheResult::READY && out.find("FIN_UTILE") != std::string::npos, "body loads");
   const auto cachedCalls = H::publicCalls;
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid cache reused");
+  check(RC::hasCurrentBody(item), "current body probe accepts XRSS11 cache");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS9\nAncien corps sans marqueurs de liens";
+  testFiles[RC::bodyPath(item)] = "XRSS10\nAncien corps nettoye par compatibilite";
+  check(!RC::hasCurrentBody(item), "XRSS10 rejected by current body probe");
   H::replies.push_back({page});
-  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS9 pre-link-markup body invalidated");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS10\n", 0) == 0, "XRSS10 body cache version");
+  check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS10 body invalidated and refetched");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS11\n", 0) == 0, "XRSS11 body cache version");
+  check(RC::hasCurrentBody(item), "refetched XRSS11 body is current");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});

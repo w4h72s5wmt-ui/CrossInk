@@ -263,7 +263,7 @@ void Game2048Activity::loopMenu() {
   if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
       mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     mappedInput.suppressNextBackRelease();
-    finish();
+    onGoHome();
     return;
   }
 

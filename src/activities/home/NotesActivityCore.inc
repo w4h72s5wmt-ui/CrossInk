@@ -1378,7 +1378,7 @@ void NotesActivity::loop() {
   int ty = 0;
   if (mappedInput.wasScreenTapped(tx, ty)) {
     if (pointInRect(backRect, tx, ty)) {
-      finish();
+      onGoHome();
       return;
     }
     if (pointInRect(addRect, tx, ty)) {
@@ -1484,7 +1484,7 @@ void NotesActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    finish();
+    onGoHome();
   }
 }
 

@@ -340,7 +340,6 @@ constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 constexpr uint32_t SILENT_REBOOT_READER_CLEAN_IMAGE_BASE = 1U << 0;
 constexpr uint32_t SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY = 1U << 1;
-constexpr uint32_t SILENT_REBOOT_HOME_RSS_MENU = 1U << 2;
 constexpr uint32_t SILENT_READER_PAGE_BUILD_MAGIC = 0xC1EAB017;
 constexpr uint32_t SILENT_READER_PAGE_BUILD_AUTO_TURN = 1U << 0;
 constexpr uint32_t NETWORK_RENDER_TASK_STACK_BYTES = 8192;
@@ -397,11 +396,6 @@ void silentRestart() { silentRestartToHome(0, "target=home"); }
 
 void silentRestartAfterNetwork() {
   silentRestartToHome(SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY, "target=home after network");
-}
-
-void silentRestartAfterNetworkToRssMenu() {
-  silentRestartToHome(SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY | SILENT_REBOOT_HOME_RSS_MENU,
-                      "target=RSS menu after network");
 }
 
 void restartToHomeAfterStorageHandoff() {
@@ -1490,11 +1484,8 @@ void setup() {
   } else if (resume == BootResume::Silent) {
     // target == home (or reader with no open book): land on home — don't fall
     // through to the sleep-wake "resume reader" logic, which fires on stale
-    // openEpubPath + lastSleepFromReader from a prior session. RSS can request
-    // its application-menu selection after the network-defragmentation reboot.
-    const HomeMenuItem resumeMenuItem =
-        (snapshotPayload & SILENT_REBOOT_HOME_RSS_MENU) != 0 ? HomeMenuItem::RSS_NEWS : HomeMenuItem::NONE;
-    activityManager.goHome(resumeMenuItem, true);
+    // openEpubPath + lastSleepFromReader from a prior session.
+    activityManager.goHome(HomeMenuItem::NONE, true);
   } else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
              mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
     // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
