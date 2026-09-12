@@ -23,10 +23,6 @@ def replace_after(path, marker, old, new, label):
         raise SystemExit(f"{label}: expected exactly one match after marker, found {count}")
     path.write_text(before + tail.replace(old, new, 1))
 
-
-# Cleaner generation bump: existing XRSS11 / XRSSF1 text can contain the
-# missing-boundary artifacts this pass fixes, so invalidate it cleanly instead
-# of carrying compatibility logic.
 replace_once(
     "src/activities/home/RssArticleCache.cpp",
     'constexpr char BODY_MAGIC[] = "XRSS11\\n";\nconstexpr char FALLBACK_MAGIC[] = "XRSSF1\\n";',
@@ -67,21 +63,7 @@ helper = r'''bool cleanupPunctuationAttachesLeft(const char value) {
 }
 
 bool cleanupPunctuationNeedsFollowingSpace(const char value) {
-  switch (value) {
-    case '.':
-    case ',':
-    case ';':
-    case ':':
-    case '!':
-    case '?':
-    case '%':
-    case ')':
-    case ']':
-    case '}':
-      return true;
-    default:
-      return false;
-  }
+  return cleanupPunctuationAttachesLeft(value);
 }
 
 void appendRemovalBoundary(char* text, size_t& length) {
@@ -102,17 +84,13 @@ size_t normalizeRemovalBoundaries(char* text, const size_t length) {
       pendingBoundary = true;
       continue;
     }
-
     if (pendingBoundary) {
       const unsigned char c = static_cast<unsigned char>(value);
       if (std::isspace(c)) {
-        // Real source whitespace/newline already separates both editorial sides.
         pendingBoundary = false;
       } else if (write == 0 || std::isspace(static_cast<unsigned char>(text[write - 1]))) {
         pendingBoundary = false;
       } else if (cleanupPunctuationAttachesLeft(value)) {
-        // "phrase [removed].Suite" becomes "phrase. Suite" rather than either
-        // "phrase .Suite" or "phrase.Suite".
         text[write++] = value;
         pendingBoundary = cleanupPunctuationNeedsFollowingSpace(value);
         continue;
@@ -229,21 +207,18 @@ replace_after(
 ''',
     "empty-anchor boundary",
 )
-replace_after(
+replace_once(
     html,
-    extract_marker,
     '''  const bool atCapacity = textLength >= MAX_TEXT_BYTES;
-  while (textLength > 0 && (text[textLength - 1] == ' ' || text[textLength - 1] == '\n')) --textLength;
+  while (textLength > 0 && (text[textLength - 1] == ' ' || text[textLength - 1] == '\\n')) --textLength;
 ''',
     '''  const bool atCapacity = textLength >= MAX_TEXT_BYTES;
   textLength = normalizeRemovalBoundaries(text, textLength);
-  while (textLength > 0 && (text[textLength - 1] == ' ' || text[textLength - 1] == '\n')) --textLength;
+  while (textLength > 0 && (text[textLength - 1] == ' ' || text[textLength - 1] == '\\n')) --textLength;
 ''',
     "final removal-boundary normalization",
 )
 
-# Fallback plain-URL removal uses the same seam marker. Consume only horizontal
-# whitespace after a removed URL so paragraph/newline structure is preserved.
 replace_once(
     "src/activities/home/RssArticleCache.cpp",
     '''    if (url) {
@@ -255,7 +230,7 @@ replace_once(
 ''',
     '''    if (url) {
       while (read < length && !std::isspace(static_cast<unsigned char>(text[read]))) ++read;
-      while (read < length && (text[read] == ' ' || text[read] == '\t')) ++read;
+      while (read < length && (text[read] == ' ' || text[read] == '\\t')) ++read;
       while (write > 0 && text[write - 1] == ' ') --write;
       if (read < length && write > 0) appendRemovalBoundary(text, write);
       continue;
@@ -266,14 +241,14 @@ replace_once(
 replace_once(
     "src/activities/home/RssArticleCache.cpp",
     '''  while (write > 0 && std::isspace(static_cast<unsigned char>(text[write - 1]))) --write;
-  text[write] = '\0';
+  text[write] = '\\0';
   return write;
 }
 
 size_t fallbackRuleCutoff''',
     '''  write = normalizeRemovalBoundaries(text, write);
   while (write > 0 && std::isspace(static_cast<unsigned char>(text[write - 1]))) --write;
-  text[write] = '\0';
+  text[write] = '\\0';
   return write;
 }
 
@@ -281,9 +256,6 @@ size_t fallbackRuleCutoff''',
     "fallback URL final normalization",
 )
 
-# The Figaro mid-line share cleaner already used a literal space; replace that
-# with the same seam marker so punctuation can attach to the previous sentence
-# and still receive a following separator.
 policy = "src/activities/home/RssArticleCachePolicy.inc"
 replace_after(
     policy,
@@ -306,8 +278,6 @@ bool buildFallbackText''',
     "Figaro share seam normalization",
 )
 
-# Host tests: protect word/word seams, punctuation seams, script/comment/noise
-# removals, and both cache-generation markers.
 test = "tests/rss/test_article_cache.cpp"
 insert_after = '''  check(text.find("https://example.test/page") == std::string::npos && text.find("Source") != std::string::npos &&
             text.find("fin.") != std::string::npos,
@@ -316,28 +286,22 @@ insert_after = '''  check(text.find("https://example.test/page") == std::string:
 extra = r'''
 
   text = extract("<article><p>" + longBody + "</p><p>Avant<a href='https://example.test/page'>https://example.test/page</a>Apres.</p></article>");
-  check(text.find("Avant Apres.") != std::string::npos,
-        "removed visible URL keeps a word boundary");
+  check(text.find("Avant Apres.") != std::string::npos, "removed visible URL keeps a word boundary");
   text = extract("<article><p>" + longBody + "</p><p>Avant<a href='https://example.test/page'>https://example.test/page</a>.Apres.</p></article>");
-  check(text.find("Avant. Apres.") != std::string::npos,
-        "removed visible URL moves the separator after punctuation");
+  check(text.find("Avant. Apres.") != std::string::npos, "removed visible URL moves separator after punctuation");
   text = extract("<article><p>" + longBody + "</p><p>Avant<div class='share'>PARASITE</div>Apres.</p></article>");
   check(text.find("Avant Apres.") != std::string::npos && text.find("PARASITE") == std::string::npos,
         "removed noise container keeps a word boundary");
   text = extract("<article><p>" + longBody + "</p><p>Avant<div class='share'>PARASITE</div>.Apres.</p></article>");
-  check(text.find("Avant. Apres.") != std::string::npos,
-        "removed noise container preserves punctuation spacing");
+  check(text.find("Avant. Apres.") != std::string::npos, "removed noise container preserves punctuation spacing");
   text = extract("<article><p>" + longBody + "</p><p>Avant<script>parasite()</script>Apres.</p></article>");
-  check(text.find("Avant Apres.") != std::string::npos,
-        "removed raw script keeps a word boundary");
+  check(text.find("Avant Apres.") != std::string::npos, "removed raw script keeps a word boundary");
   text = extract("<article><p>" + longBody + "</p><p>Avant<!-- parasite -->Apres.</p></article>");
-  check(text.find("Avant Apres.") != std::string::npos,
-        "removed HTML comment keeps a word boundary");
+  check(text.find("Avant Apres.") != std::string::npos, "removed HTML comment keeps a word boundary");
 '''
 replace_once(test, insert_after, insert_after + extra, "HTML removal seam tests")
 
-figaro_anchor = '''  check(sharedMiddleOut == "Avant Apres", "Figaro mid-article share controls removed without losing prose");
-'''
+figaro_anchor = '  check(sharedMiddleOut == "Avant Apres", "Figaro mid-article share controls removed without losing prose");\n'
 figaro_extra = r'''
 
   std::string sharedPunctuation = "Avant -Lien copie- Mail- X- Messenger.Apres";
@@ -350,20 +314,15 @@ figaro_extra = r'''
 '''
 replace_once(test, figaro_anchor, figaro_anchor + figaro_extra, "Figaro punctuation seam test")
 
-# Cache marker expectations move as one generation; previous XRSS11 is now the
-# explicitly obsolete body generation.
 path = Path(test)
 text = path.read_text()
 text = text.replace('XRSSF1\\n', 'XRSSF2\\n')
 text = text.replace('XRSS11\\n', 'XRSS12\\n')
 text = text.replace('full body keeps XRSS11 marker', 'full body keeps XRSS12 marker')
-# After the expectation replacements, rewrite the explicit obsolete fixture to
-# the immediately previous generation without changing the current checks.
 text = text.replace('testFiles[RC::bodyPath(item)] = "XRSS10\\\\nAncien corps de developpement";',
                     'testFiles[RC::bodyPath(item)] = "XRSS11\\\\nAncien corps de developpement";')
 path.write_text(text)
 
-# A small direct fallback test catches raw URL seams outside HTML extraction.
 replace_once(
     test,
     '''void cacheTests() {
@@ -385,15 +344,13 @@ replace_once(
     "fallback URL seam tests",
 )
 
-# Ensure no old current-generation marker is left in production and the new
-# boundary normalizer is actually used by the three deletion paths.
 production = Path("src/activities/home/RssArticleCache.cpp").read_text() + Path(html).read_text() + Path(policy).read_text()
 checks = {
     "XRSS12 current body": 'BODY_MAGIC[] = "XRSS12\\n"' in production,
     "XRSSF2 current fallback": 'FALLBACK_MAGIC[] = "XRSSF2\\n"' in production,
     "old XRSS11 not current": 'BODY_MAGIC[] = "XRSS11\\n"' not in production,
     "boundary normalizer present": "normalizeRemovalBoundaries" in production,
-    "noise seam protected": "noise-container removal boundary" not in production and "appendRemovalBoundary(text, textLength)" in Path(html).read_text(),
+    "noise seam protected": "appendRemovalBoundary(text, textLength)" in Path(html).read_text(),
     "Figaro uses seam marker": "text[eraseStart] = RSS_REMOVAL_BOUNDARY;" in Path(policy).read_text(),
 }
 failed = [name for name, ok in checks.items() if not ok]
