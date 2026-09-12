@@ -1,12 +1,11 @@
-name: CrossInk Notes + Demineur + 2048 X4 Pro
+name: CrossInk X4 Pro optimization candidate
 
 on:
   push:
-    branches: [x4-pro-notes]
-  workflow_dispatch:
+    branches: [x4-pro-opt-bootstrap]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-x4-pro-notes:
@@ -16,6 +15,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          fetch-depth: 2
 
       - uses: actions/setup-python@v6
         with:
@@ -38,21 +38,607 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      - name: Apply native exit and RSS optimization candidate
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              path = Path(path)
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              path.write_text(text.replace(old, new, 1))
+
+          def replace_section(path, start, end, replacement, label):
+              path = Path(path)
+              text = path.read_text()
+              start_pos = text.find(start)
+              if start_pos < 0:
+                  raise SystemExit(f"{label}: start marker missing")
+              end_pos = text.find(end, start_pos)
+              if end_pos < 0:
+                  raise SystemExit(f"{label}: end marker missing")
+              path.write_text(text[:start_pos] + replacement + text[end_pos:])
+
+          # Our top-level apps now leave their application menu and return to Home,
+          # while their internal screens still use Back to return inside the app.
+          replace_once(
+              "src/activities/home/MinesweeperActivity.cpp",
+              '''void MinesweeperActivity::loopMenu() {
+            const Rect header = headerRect(renderer, mappedInput);
+            if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
+                mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+              mappedInput.suppressNextBackRelease();
+              finish();
+              return;
+            }
+          ''',
+              '''void MinesweeperActivity::loopMenu() {
+            const Rect header = headerRect(renderer, mappedInput);
+            if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
+                mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+              mappedInput.suppressNextBackRelease();
+              onGoHome();
+              return;
+            }
+          ''',
+              "Minesweeper top-level Home exit")
+
+          replace_once(
+              "src/activities/home/Game2048Activity.cpp",
+              '''void Game2048Activity::loopMenu() {
+            const Rect header = headerRect(renderer, mappedInput);
+            if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
+                mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+              mappedInput.suppressNextBackRelease();
+              finish();
+              return;
+            }
+          ''',
+              '''void Game2048Activity::loopMenu() {
+            const Rect header = headerRect(renderer, mappedInput);
+            if ((mappedInput.hasTouchHardware() && TouchHeaderBackButton::wasTapped(mappedInput, header)) ||
+                mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+              mappedInput.suppressNextBackRelease();
+              onGoHome();
+              return;
+            }
+          ''',
+              "2048 top-level Home exit")
+
+          replace_once(
+              "src/activities/home/NotesActivityCore.inc",
+              '''    if (pointInRect(backRect, tx, ty)) {
+                finish();
+                return;
+              }
+          ''',
+              '''    if (pointInRect(backRect, tx, ty)) {
+                onGoHome();
+                return;
+              }
+          ''',
+              "Notes touch Home exit")
+          replace_once(
+              "src/activities/home/NotesActivityCore.inc",
+              '''  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+              finish();
+            }
+          }
+
+          void NotesActivity::render''',
+              '''  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+              onGoHome();
+            }
+          }
+
+          void NotesActivity::render''',
+              "Notes hardware Home exit")
+
+          rss_path = Path("src/activities/home/RssNewsActivity.cpp")
+          rss = rss_path.read_text()
+          old = '''  if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
+            if (state == State::ARTICLE) {
+              closeArticle();
+            } else {
+              mappedInput.suppressNextBackRelease();
+              finish();
+            }
+            return;
+          }
+          '''
+          new = '''  if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
+            if (state == State::ARTICLE) {
+              closeArticle();
+            } else {
+              mappedInput.suppressNextBackRelease();
+              onGoHome();
+            }
+            return;
+          }
+          '''
+          if rss.count(old) != 1:
+              raise SystemExit("RSS touch Home exit anchor mismatch")
+          rss = rss.replace(old, new, 1)
+          old = '''  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+            finish();
+            return;
+          }
+          if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+          '''
+          new = '''  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+            onGoHome();
+            return;
+          }
+          if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+          '''
+          if rss.count(old) != 1:
+              raise SystemExit("RSS hardware Home exit anchor mismatch")
+          rss = rss.replace(old, new, 1)
+          old = '''    // Keep the post-WiFi reboot that defragments the ESP network heap, but
+              // resume with the Home application menu open on RSS instead of plain Home.
+              silentRestartAfterNetworkToRssMenu();
+          '''
+          new = '''    // Keep the post-WiFi reboot that defragments the ESP network heap and
+              // resume at the normal Home screen, like native applications.
+              silentRestartAfterNetwork();
+          '''
+          if rss.count(old) != 1:
+              raise SystemExit("RSS restart Home anchor mismatch")
+          rss_path.write_text(rss.replace(old, new, 1))
+
+          # Remove the now-unused RSS host bridge from the foundation. RSS no longer
+          # needs a special reboot target or Home-menu restore path.
+          replace_once(
+              "src/activities/ActivityManager.h",
+              'enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU, RSS_NEWS };\n',
+              'enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };\n',
+              "remove RSS HomeMenuItem bridge")
+          replace_once(
+              "src/activities/home/HomeActivity.cpp",
+              '''    case HomeMenuItem::SETTINGS_MENU:
+                return HomeMenuAction::Settings;
+              case HomeMenuItem::RSS_NEWS:
+                return HomeMenuAction::RssNews;
+              case HomeMenuItem::NONE:
+          ''',
+              '''    case HomeMenuItem::SETTINGS_MENU:
+                return HomeMenuAction::Settings;
+              case HomeMenuItem::NONE:
+          ''',
+              "remove RSS initial-selection bridge")
+          replace_once(
+              "src/activities/home/HomeActivity.cpp",
+              '''    if (menuIndex >= 0) {
+                selectorIndex = getHomeMenuSelectionOffset(recentBooks) + menuIndex;
+              }
+
+              // Minimal/Dashboard Home normally hides its application list. A network
+              // reboot cannot preserve the previous Home instance on the activity stack,
+              // so explicitly reopen that list and restore the RSS selection.
+              if (usesMinimalHomeInteraction()) {
+                const auto minimalItems = buildMinimalMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings);
+                const int minimalIndex = findMenuActionIndex(minimalItems, homeActionForInitialMenuItem(initialMenuItem));
+                if (minimalIndex >= 0) {
+                  minimalMenuOpen = true;
+                  minimalMenuIndex = minimalIndex;
+                }
+              }
+            }
+          ''',
+              '''    if (menuIndex >= 0) {
+                selectorIndex = getHomeMenuSelectionOffset(recentBooks) + menuIndex;
+              }
+            }
+          ''',
+              "remove minimal RSS menu restore")
+          replace_once(
+              "src/SilentRestart.h",
+              '''void silentRestartAfterNetwork();
+          void silentRestartAfterNetworkToRssMenu();
+          void silentRestartToReaderAfterNetwork(bool cleanImageBaseOnEntry = false);
+          ''',
+              '''void silentRestartAfterNetwork();
+          void silentRestartToReaderAfterNetwork(bool cleanImageBaseOnEntry = false);
+          ''',
+              "remove RSS silent restart declaration")
+          replace_once(
+              "src/main.cpp",
+              '''constexpr uint32_t SILENT_REBOOT_READER_CLEAN_IMAGE_BASE = 1U << 0;
+          constexpr uint32_t SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY = 1U << 1;
+          constexpr uint32_t SILENT_REBOOT_HOME_RSS_MENU = 1U << 2;
+          ''',
+              '''constexpr uint32_t SILENT_REBOOT_READER_CLEAN_IMAGE_BASE = 1U << 0;
+          constexpr uint32_t SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY = 1U << 1;
+          ''',
+              "remove RSS reboot payload bit")
+          replace_once(
+              "src/main.cpp",
+              '''void silentRestartAfterNetwork() {
+            silentRestartToHome(SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY, "target=home after network");
+          }
+
+          void silentRestartAfterNetworkToRssMenu() {
+            silentRestartToHome(SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY | SILENT_REBOOT_HOME_RSS_MENU,
+                                "target=RSS menu after network");
+          }
+
+          void restartToHomeAfterStorageHandoff() {
+          ''',
+              '''void silentRestartAfterNetwork() {
+            silentRestartToHome(SILENT_REBOOT_FOLLOW_LIGHT_WAKE_POLICY, "target=home after network");
+          }
+
+          void restartToHomeAfterStorageHandoff() {
+          ''',
+              "remove RSS restart implementation")
+          replace_once(
+              "src/main.cpp",
+              '''  } else if (resume == BootResume::Silent) {
+              // target == home (or reader with no open book): land on home — don't fall
+              // through to the sleep-wake "resume reader" logic, which fires on stale
+              // openEpubPath + lastSleepFromReader from a prior session. RSS can request
+              // its application-menu selection after the network-defragmentation reboot.
+              const HomeMenuItem resumeMenuItem =
+                  (snapshotPayload & SILENT_REBOOT_HOME_RSS_MENU) != 0 ? HomeMenuItem::RSS_NEWS : HomeMenuItem::NONE;
+              activityManager.goHome(resumeMenuItem, true);
+          ''',
+              '''  } else if (resume == BootResume::Silent) {
+              // target == home (or reader with no open book): land on home — don't fall
+              // through to the sleep-wake "resume reader" logic, which fires on stale
+              // openEpubPath + lastSleepFromReader from a prior session.
+              activityManager.goHome(HomeMenuItem::NONE, true);
+          ''',
+              "remove RSS silent-resume routing")
+
+          # Runtime RSS capacity is now derived from feeds.txt instead of always
+          # allocating the hard 8 x 100 safety ceiling.
+          header_path = Path("src/activities/home/RssNewsActivity.h")
+          header = header_path.read_text()
+          old = '''  // Keep the existing eight-feed memory ceiling: each source may preserve up
+            // to 100 offline articles and RssItem includes a large cached body. The SD
+            // configuration can contain fewer sources without increasing PSRAM usage.
+            static constexpr size_t MAX_SOURCES = 8;
+          '''
+          new = '''  // Hard safety ceilings stay fixed, but runtime buffers are sized from the
+            // active feeds.txt limits so small configurations do not reserve the full
+            // eight-feed / 100-item PSRAM envelope.
+            static constexpr size_t MAX_SOURCES = 8;
+          '''
+          if header.count(old) != 1:
+              raise SystemExit("RSS capacity comment anchor mismatch")
+          header = header.replace(old, new, 1)
+          old = '''  // V4 binds the binary article cache to the current feeds.txt content so
+            // reordering/replacing sources can never relabel old articles incorrectly.
+            static constexpr uint16_t CACHE_VERSION = 4;
+          '''
+          new = '''  // V4 binds the binary article cache to the full feeds.txt configuration,
+            // including sync/history limits, so capacity changes invalidate metadata cleanly.
+            static constexpr uint16_t CACHE_VERSION = 4;
+          '''
+          if header.count(old) != 1:
+              raise SystemExit("RSS cache version comment anchor mismatch")
+          header = header.replace(old, new, 1)
+          old = '''  size_t articleCount = 0;
+            size_t articleLineOffset = 0;
+          '''
+          new = '''  size_t articleCount = 0;
+            size_t articleCapacity = MAX_ARTICLES;
+            size_t feedItemCapacity = FEED_ITEM_CAPACITY;
+            size_t articleLineOffset = 0;
+          '''
+          if header.count(old) != 1:
+              raise SystemExit("RSS runtime capacity fields anchor mismatch")
+          header_path.write_text(header.replace(old, new, 1))
+
+          rss_path = Path("src/activities/home/RssNewsActivity.cpp")
+          rss = rss_path.read_text()
+          ensure_start = "bool RssNewsActivity::ensureBuffers() {\n"
+          ensure_end = "\nvoid RssNewsActivity::loadSources() {\n"
+          start = rss.find(ensure_start)
+          end = rss.find(ensure_end, start)
+          if start < 0 or end < 0:
+              raise SystemExit("RSS ensureBuffers section anchors missing")
+          ensure_new = '''bool RssNewsActivity::ensureBuffers() {
+            size_t requestedArticleCapacity = 0;
+            size_t requestedFeedCapacity = 1;
+            for (size_t i = 0; i < sourceCount; ++i) {
+              requestedArticleCapacity += std::clamp<size_t>(sources[i].historyLimit, 1, ITEMS_PER_SOURCE);
+              requestedFeedCapacity = std::max(
+                  requestedFeedCapacity, std::clamp<size_t>(sources[i].syncLimit, 1, FEED_ITEM_CAPACITY));
+            }
+            articleCapacity = std::clamp<size_t>(requestedArticleCapacity, 1, MAX_ARTICLES);
+            feedItemCapacity = std::clamp<size_t>(requestedFeedCapacity, 1, FEED_ITEM_CAPACITY);
+            LOG_DBG("RSS", "Runtime capacities: articles=%zu/%zu feed=%zu/%zu", articleCapacity, MAX_ARTICLES,
+                    feedItemCapacity, FEED_ITEM_CAPACITY);
+
+            if (!articleStorage) {
+              articleStorage = allocateRssBuffer(sizeof(CachedArticle) * articleCapacity);
+              if (!articleStorage) {
+                LOG_ERR("RSS", "OOM allocating article cache (%zu records)", articleCapacity);
+                return false;
+              }
+              articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
+              std::memset(articles, 0, sizeof(CachedArticle) * articleCapacity);
+            } else if (!articles) {
+              articles = reinterpret_cast<CachedArticle*>(articleStorage.get());
+            }
+
+            if (!feedStorage) {
+              feedStorage = allocateRssBuffer(sizeof(RssItem) * feedItemCapacity);
+              if (!feedStorage) {
+                LOG_ERR("RSS", "OOM allocating feed scratch (%zu records)", feedItemCapacity);
+                return false;
+              }
+              feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
+              std::memset(feedItems, 0, sizeof(RssItem) * feedItemCapacity);
+            } else if (!feedItems) {
+              feedItems = reinterpret_cast<RssItem*>(feedStorage.get());
+            }
+
+            if (!listItemStorage) {
+              listItemStorage = allocateRssBuffer(sizeof(fui::ListItem) * (articleCapacity + 1));
+              if (!listItemStorage) {
+                LOG_ERR("RSS", "OOM allocating RSS list items");
+                return false;
+              }
+              listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
+              std::memset(listItems, 0, sizeof(fui::ListItem) * (articleCapacity + 1));
+            } else if (!listItems) {
+              listItems = reinterpret_cast<fui::ListItem*>(listItemStorage.get());
+            }
+
+            if (!listMetaStorage) {
+              listMetaStorage = allocateRssBuffer(articleCapacity * LIST_META_CAPACITY);
+              if (!listMetaStorage) {
+                LOG_ERR("RSS", "OOM allocating RSS list metadata");
+                return false;
+              }
+              listMetaText = reinterpret_cast<char*>(listMetaStorage.get());
+              std::memset(listMetaText, 0, articleCapacity * LIST_META_CAPACITY);
+            } else if (!listMetaText) {
+              listMetaText = reinterpret_cast<char*>(listMetaStorage.get());
+            }
+
+            if (!displayOrderStorage) {
+              displayOrderStorage = allocateRssBuffer(sizeof(uint16_t) * articleCapacity);
+              if (!displayOrderStorage) {
+                LOG_ERR("RSS", "OOM allocating RSS sort index");
+                return false;
+              }
+              displayOrder = reinterpret_cast<uint16_t*>(displayOrderStorage.get());
+              std::memset(displayOrder, 0, sizeof(uint16_t) * articleCapacity);
+            } else if (!displayOrder) {
+              displayOrder = reinterpret_cast<uint16_t*>(displayOrderStorage.get());
+            }
+
+            return true;
+          }
+          '''
+          rss = rss[:start] + ensure_new + rss[end:]
+
+          hash_start = "uint32_t RssNewsActivity::sourceConfigHash() const {\n"
+          hash_end = "\nbool RssNewsActivity::loadCache() {\n"
+          start = rss.find(hash_start)
+          end = rss.find(hash_end, start)
+          if start < 0 or end < 0:
+              raise SystemExit("RSS sourceConfigHash section anchors missing")
+          hash_new = '''uint32_t RssNewsActivity::sourceConfigHash() const {
+            uint32_t hash = UINT32_C(2166136261);
+            const auto mix = [&hash](const char c) {
+              hash ^= static_cast<uint8_t>(c);
+              hash *= UINT32_C(16777619);
+            };
+            const auto mixLimit = [&mix](const uint16_t value) {
+              mix(static_cast<char>(value & 0xffU));
+              mix(static_cast<char>((value >> 8U) & 0xffU));
+            };
+            for (size_t i = 0; i < sourceCount; ++i) {
+              for (const char c : sources[i].name) mix(c);
+              mix('|');
+              for (const char c : sources[i].url) mix(c);
+              mix('|');
+              mixLimit(sources[i].syncLimit);
+              mix('|');
+              mixLimit(sources[i].historyLimit);
+              mix('|');
+              for (const char c : sources[i].dropRules) mix(c);
+              mix('|');
+              for (const char c : sources[i].dropStartRules) mix(c);
+              mix('|');
+              for (const char c : sources[i].stopRules) mix(c);
+              mix('\\n');
+            }
+            return hash;
+          }
+          '''
+          rss = rss[:start] + hash_new + rss[end:]
+
+          old = '''    LOG_DBG("RSS", "Purged article bodies for obsolete feed configuration");
+              return false;
+            }
+
+            for (uint16_t i = 0; i < header.count; ++i) {
+          '''
+          new = '''    LOG_DBG("RSS", "Purged article bodies for obsolete feed configuration");
+              return false;
+            }
+
+            if (header.count > articleCapacity) {
+              LOG_ERR("RSS", "RSS cache exceeds configured capacity (%u > %zu)",
+                      static_cast<unsigned>(header.count), articleCapacity);
+              file.close();
+              Storage.remove(CACHE_PATH);
+              return false;
+            }
+
+            for (uint16_t i = 0; i < header.count; ++i) {
+          '''
+          if rss.count(old) != 1:
+              raise SystemExit("RSS cache capacity guard anchor mismatch")
+          rss = rss.replace(old, new, 1)
+
+          old = '''  const auto keepHistoryItem = [requiresCachedBody](const RssItem& item) {
+              if (!requiresCachedBody) return true;
+              const std::string path = RssArticleCache::bodyPath(item);
+              return Storage.exists(path.c_str());
+            };
+          '''
+          new = '''  const auto keepHistoryItem = [requiresCachedBody](const RssItem& item) {
+              return !requiresCachedBody || RssArticleCache::hasCurrentBody(item);
+            };
+          '''
+          if rss.count(old) != 1:
+              raise SystemExit("RSS current-body history anchor mismatch")
+          rss = rss.replace(old, new, 1)
+          rss = rss.replace("// Delete full-text bodies that just fell out of this source's 100-entry\n",
+                            "// Delete full-text bodies that just fell out of this source's configured\n", 1)
+          rss = rss.replace("  // history. A shared URL is kept when another configured source still points\n",
+                            "  // history. A shared URL is kept when another configured source still points\n", 1)
+          old = "  const size_t addCount = std::min(mergedCount, MAX_ARTICLES - articleCount);\n"
+          new = '''  const size_t addCount = articleCount < articleCapacity
+                                      ? std::min(mergedCount, articleCapacity - articleCount)
+                                      : 0;
+          '''
+          if rss.count(old) != 1:
+              raise SystemExit("RSS merge capacity anchor mismatch")
+          rss = rss.replace(old, new, 1)
+          old = "  std::memset(feedItems, 0, sizeof(RssItem) * FEED_ITEM_CAPACITY);\n\n  const size_t syncLimit = std::clamp<size_t>(sources[sourceIndex].syncLimit, 1, FEED_ITEM_CAPACITY);\n"
+          new = "  std::memset(feedItems, 0, sizeof(RssItem) * feedItemCapacity);\n\n  const size_t syncLimit = std::clamp<size_t>(sources[sourceIndex].syncLimit, 1, feedItemCapacity);\n"
+          if rss.count(old) != 1:
+              raise SystemExit("RSS feed scratch capacity anchor mismatch")
+          rss_path.write_text(rss.replace(old, new, 1))
+
+          # One definition of a valid body: the same BODY_MAGIC/size validation used
+          # by ensureCached is now exposed to the history merge.
+          cache_h = Path("src/activities/home/RssArticleCache.h")
+          text = cache_h.read_text()
+          old = '''std::string bodyPath(const RssItem& item);
+
+          // Removes the dedicated offline body for an article. Missing files count as
+          '''
+          new = '''std::string bodyPath(const RssItem& item);
+
+          // True only when the dedicated body exists and matches the current cache
+          // format/size constraints. This is the single validity check for history.
+          bool hasCurrentBody(const RssItem& item);
+
+          // Removes the dedicated offline body for an article. Missing files count as
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("RssArticleCache hasCurrentBody header anchor mismatch")
+          cache_h.write_text(text.replace(old, new, 1))
+
+          cache_cpp = Path("src/activities/home/RssArticleCache.cpp")
+          text = cache_cpp.read_text()
+          if text.count('constexpr char BODY_MAGIC[] = "XRSS10\\n";') != 1:
+              raise SystemExit("XRSS10 marker anchor mismatch")
+          text = text.replace('constexpr char BODY_MAGIC[] = "XRSS10\\n";',
+                              'constexpr char BODY_MAGIC[] = "XRSS11\\n";', 1)
+          old = '''  return name;
+          }
+
+          bool remove(const RssItem& item) {
+          '''
+          new = '''  return name;
+          }
+
+          bool hasCurrentBody(const RssItem& item) { return bodyCacheIsCurrent(bodyPath(item)); }
+
+          bool remove(const RssItem& item) {
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("RssArticleCache public body probe anchor mismatch")
+          cache_cpp.write_text(text.replace(old, new, 1))
+
+          policy = Path("src/activities/home/RssArticleCachePolicy.inc")
+          text = policy.read_text()
+          old = '''      if (outText.size() == expected) {
+                  if (!outText.empty()) {
+                    const size_t cleaned = stripFigaroShareControls(&outText[0], outText.size(), item.link);
+                    outText.resize(cleaned);
+                  }
+                  return CacheResult::READY;
+                }
+          '''
+          new = '''      if (outText.size() == expected) return CacheResult::READY;
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("RSS load-time Figaro compatibility cleaner anchor mismatch")
+          policy.write_text(text.replace(old, new, 1))
+
+          tests = Path("tests/rss/test_article_cache.cpp")
+          text = tests.read_text()
+          old = '''  const auto cachedCalls = H::publicCalls;
+            check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid cache reused");
+
+            reset();
+            testFiles[RC::bodyPath(item)] = "XRSS9\\nAncien corps sans marqueurs de liens";
+            H::replies.push_back({page});
+            check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS9 pre-link-markup body invalidated");
+            check(testFiles[RC::bodyPath(item)].rfind("XRSS10\\n", 0) == 0, "XRSS10 body cache version");
+          '''
+          new = '''  const auto cachedCalls = H::publicCalls;
+            check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid cache reused");
+            check(RC::hasCurrentBody(item), "current body probe accepts XRSS11 cache");
+
+            reset();
+            testFiles[RC::bodyPath(item)] = "XRSS10\\nAncien corps nettoye par compatibilite";
+            check(!RC::hasCurrentBody(item), "XRSS10 rejected by current body probe");
+            H::replies.push_back({page});
+            check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "XRSS10 body invalidated and refetched");
+            check(testFiles[RC::bodyPath(item)].rfind("XRSS11\\n", 0) == 0, "XRSS11 body cache version");
+            check(RC::hasCurrentBody(item), "refetched XRSS11 body is current");
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("RSS body cache test anchor mismatch")
+          tests.write_text(text.replace(old, new, 1))
+
+          # Static regression assertions for the navigation/foundation cleanup.
+          checks = {
+              "Minesweeper Home exit": "onGoHome();" in Path("src/activities/home/MinesweeperActivity.cpp").read_text(),
+              "2048 Home exit": "onGoHome();" in Path("src/activities/home/Game2048Activity.cpp").read_text(),
+              "Notes Home exit": Path("src/activities/home/NotesActivityCore.inc").read_text().count("onGoHome();") >= 2,
+              "RSS Home exit": Path("src/activities/home/RssNewsActivity.cpp").read_text().count("onGoHome();") >= 2,
+              "RSS bridge removed": "RSS_NEWS" not in Path("src/activities/ActivityManager.h").read_text(),
+              "RSS special restart removed": "silentRestartAfterNetworkToRssMenu" not in Path("src/main.cpp").read_text(),
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit("candidate validation failed: " + ", ".join(failed))
+          PY
+
+          git diff --check
+          git diff --stat
+
       - name: Test RSS cache with ASan and UBSan
         run: sh tests/rss/run.sh
 
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
-      - name: Build X4 Pro firmware directly from sources
+      - name: Build X4 Pro optimized firmware
         run: |
           set -euo pipefail
           pio run -e x4-pro | tee pio-x4-pro-notes.log
 
-      - name: Upload X4 Pro firmware
+      - name: Freeze validated source tree
+        run: |
+          git checkout 3d896fb4377f58516a893c302b2e89bdbaaf28af -- .github/workflows/notes-build.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests/rss/test_article_cache.cpp .github/workflows/notes-build.yml
+          git diff --cached --check
+          git diff --cached --stat
+          git commit -m "perf(x4): optimize RSS memory and native app exit"
+          git push --force origin HEAD:x4-pro-opt-generated
+
+      - name: Upload X4 Pro candidate firmware
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-x4-pro-build-${{ github.run_number }}
+          name: firmware-x4-pro-optimization-candidate-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -60,6 +646,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: x4-pro-build-${{ github.run_number }}-log
+          name: x4-pro-optimization-candidate-${{ github.run_number }}-log
           path: pio-x4-pro-notes.log
           if-no-files-found: ignore
