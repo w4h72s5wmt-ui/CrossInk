@@ -44,6 +44,48 @@ class MissileCommandActivity final : public Activity {
     bool active = false;
   };
 
+
+  struct BenchmarkAccumulator {
+    uint32_t frames = 0;
+    uint64_t logicSumUs = 0;
+    uint64_t drawSumUs = 0;
+    uint64_t refreshSumUs = 0;
+    uint64_t cycleSumUs = 0;
+    uint64_t workSumUs = 0;
+    uint32_t logicMinUs = 0xFFFFFFFFu;
+    uint32_t logicMaxUs = 0;
+    uint32_t drawMinUs = 0xFFFFFFFFu;
+    uint32_t drawMaxUs = 0;
+    uint32_t refreshMinUs = 0xFFFFFFFFu;
+    uint32_t refreshMaxUs = 0;
+    uint32_t cycleMinUs = 0xFFFFFFFFu;
+    uint32_t cycleMaxUs = 0;
+    uint32_t workMaxUs = 0;
+    uint32_t overBudgetFrames = 0;
+  };
+
+  struct BenchmarkSnapshot {
+    uint32_t elapsedMs = 0;
+    uint16_t wave = 0;
+    uint32_t score = 0;
+    uint32_t frames = 0;
+    uint32_t cycleMinUs = 0;
+    uint32_t cycleAvgUs = 0;
+    uint32_t cycleMaxUs = 0;
+    uint32_t logicMinUs = 0;
+    uint32_t logicAvgUs = 0;
+    uint32_t logicMaxUs = 0;
+    uint32_t drawMinUs = 0;
+    uint32_t drawAvgUs = 0;
+    uint32_t drawMaxUs = 0;
+    uint32_t refreshMinUs = 0;
+    uint32_t refreshAvgUs = 0;
+    uint32_t refreshMaxUs = 0;
+    uint32_t workAvgUs = 0;
+    uint32_t workMaxUs = 0;
+    uint32_t overBudgetFrames = 0;
+  };
+
   struct Explosion {
     int16_t x = 0;
     int16_t y = 0;
@@ -90,6 +132,17 @@ class MissileCommandActivity final : public Activity {
   int16_t pendingTapY_ = 0;
   bool pendingBack_ = false;
 
+  // Timing samples cross the main gameplay task and the render task. Only a
+  // completed, synchronized frame becomes a benchmark sample.
+  std::atomic<uint32_t> lastLogicUs_{0};
+  std::atomic<uint32_t> lastCycleIntervalUs_{0};
+  std::atomic<bool> benchmarkSampleArmed_{false};
+  std::atomic<bool> benchmarkFlushPending_{false};
+  BenchmarkAccumulator benchmarkAccum_{};
+  BenchmarkSnapshot benchmarkSnapshot_{};
+  int64_t benchmarkSessionStartUs_ = 0;
+  bool benchmarkLogOpen_ = false;
+
   static void menuScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
 
@@ -103,6 +156,12 @@ class MissileCommandActivity final : public Activity {
   void renderGameOver();
   void drawFullPlayingScene();
   void drawPlayingFrame();
+
+  void resetBenchmarkAccumulator();
+  bool openBenchmarkLog();
+  void closeBenchmarkLog();
+  void recordBenchmarkSample(uint32_t logicUs, uint32_t drawUs, uint32_t refreshUs, uint32_t cycleUs);
+  void flushBenchmarkLog();
 
   void newGame();
   void continueGame();

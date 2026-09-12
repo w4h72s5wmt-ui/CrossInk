@@ -25,6 +25,7 @@ constexpr fui::ActionId ACTION_ROW = 1;
 constexpr const char SAVE_DIR[] = "/.crosspoint";
 constexpr const char SAVE_PATH[] = "/.crosspoint/missile-command.bin";
 constexpr const char SCORE_PATH[] = "/.crosspoint/missile-command-score.bin";
+constexpr const char BENCHMARK_PATH[] = "/missile-command-benchmark.csv";
 constexpr uint32_t SAVE_MAGIC = 0x4D434D31;   // MCM1
 constexpr uint32_t SCORE_MAGIC = 0x4D435331;  // MCS1
 constexpr uint8_t SAVE_VERSION = 1;
@@ -35,8 +36,10 @@ constexpr uint8_t SCORE_VERSION = 1;
 // one cycle consumes input, advances the world exactly once, renders that exact
 // state, then waits for the FAST refresh to complete before another cycle.
 constexpr int64_t GAME_FRAME_US = 100000;
+constexpr uint32_t BENCHMARK_BATCH_FRAMES = 100;
 constexpr int EXPLOSION_PHASE_TICKS = 1;
 constexpr const char* DIFFICULTY_LABELS[] = {"Facile", "Normal", "Difficile"};
+FsFile benchmarkLogFile;
 
 Rect headerRect(const GfxRenderer& renderer, const MappedInputManager& mappedInput) {
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -131,6 +134,15 @@ void MissileCommandActivity::onEnter() {
   cycleRenderPending_.store(false);
   pendingTap_ = false;
   pendingBack_ = false;
+  benchmarkSampleArmed_.store(false);
+  benchmarkFlushPending_.store(false);
+  lastLogicUs_.store(0);
+  lastCycleIntervalUs_.store(0);
+  resetBenchmarkAccumulator();
+  benchmarkLogFile.close();
+  benchmarkLogOpen_ = false;
+  benchmarkSessionStartUs_ = esp_timer_get_time();
+  openBenchmarkLog();
   loadHighScore();
   hasSavedGame_ = loadSavedGame();
   selectedIndex_ = difficulty_;
@@ -141,8 +153,10 @@ void MissileCommandActivity::onEnter() {
 }
 
 void MissileCommandActivity::onExit() {
+  if (benchmarkFlushPending_.load()) flushBenchmarkLog();
   if (viewMode_ == ViewMode::Playing && aliveCityCount() > 0) saveGame();
   saveHighScore();
+  closeBenchmarkLog();
   Activity::onExit();
 }
 
@@ -232,6 +246,14 @@ void MissileCommandActivity::loopPlaying() {
     pendingTap_ = true;
   }
 
+  // SD writes happen only between measured frames. Pausing here and resetting
+  // the cadence afterwards keeps filesystem latency out of the timing samples.
+  if (benchmarkFlushPending_.load() && !cycleRenderPending_.load()) {
+    flushBenchmarkLog();
+    lastCycleUs_ = esp_timer_get_time();
+    return;
+  }
+
   // A new world step is forbidden until the frame representing the previous
   // step has finished on the panel. This is the core 1:1 game/display lock.
   if (cycleRenderPending_.load()) return;
@@ -239,6 +261,7 @@ void MissileCommandActivity::loopPlaying() {
   const int64_t now = esp_timer_get_time();
   if (lastCycleUs_ == 0) lastCycleUs_ = now;
   if (now - lastCycleUs_ < GAME_FRAME_US) return;
+  const uint32_t cycleIntervalUs = static_cast<uint32_t>(now - lastCycleUs_);
   lastCycleUs_ = now;
 
   if (pendingBack_) {
@@ -248,14 +271,19 @@ void MissileCommandActivity::loopPlaying() {
     return;
   }
 
+  const int64_t logicStartUs = esp_timer_get_time();
   if (pendingTap_) {
     launchPlayerMissile(pendingTapX_, pendingTapY_);
     pendingTap_ = false;
   }
 
   tickGame(now);
+  const uint32_t logicUs = static_cast<uint32_t>(esp_timer_get_time() - logicStartUs);
+  lastLogicUs_.store(logicUs);
+  lastCycleIntervalUs_.store(cycleIntervalUs);
   if (viewMode_ != ViewMode::Playing) return;
 
+  benchmarkSampleArmed_.store(true);
   cycleRenderPending_.store(true);
   requestUpdate();
 }
@@ -775,12 +803,22 @@ void MissileCommandActivity::drawPlayingFrame() {
 }
 
 void MissileCommandActivity::renderPlaying() {
+  const int64_t drawStartUs = esp_timer_get_time();
   if (sceneNeedsFullRedraw_) drawFullPlayingScene();
   drawPlayingFrame();
+  const int64_t refreshStartUs = esp_timer_get_time();
 
   // Blocking FAST refresh is deliberate: the next 100 ms simulation/input
   // cycle cannot begin until this exact frame has completed on the panel.
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  const int64_t refreshEndUs = esp_timer_get_time();
+
+  if (benchmarkSampleArmed_.exchange(false)) {
+    recordBenchmarkSample(lastLogicUs_.load(),
+                          static_cast<uint32_t>(refreshStartUs - drawStartUs),
+                          static_cast<uint32_t>(refreshEndUs - refreshStartUs),
+                          lastCycleIntervalUs_.load());
+  }
   cycleRenderPending_.store(false);
 }
 
@@ -799,6 +837,122 @@ void MissileCommandActivity::renderGameOver() {
   drawCenteredText(renderer, UI_10_FONT_ID, Rect{box.x + 12, box.y + 112, box.width - 24, 30}, "OK / Retour : menu");
   renderer.displayBuffer();
   sceneNeedsFullRedraw_ = true;
+}
+
+
+void MissileCommandActivity::resetBenchmarkAccumulator() {
+  benchmarkAccum_ = {};
+  benchmarkAccum_.logicMinUs = 0xFFFFFFFFu;
+  benchmarkAccum_.drawMinUs = 0xFFFFFFFFu;
+  benchmarkAccum_.refreshMinUs = 0xFFFFFFFFu;
+  benchmarkAccum_.cycleMinUs = 0xFFFFFFFFu;
+}
+
+bool MissileCommandActivity::openBenchmarkLog() {
+  if (benchmarkLogOpen_) return true;
+  if (!Storage.openFileForWrite("MISSILE BENCH", BENCHMARK_PATH, benchmarkLogFile)) return false;
+
+  static constexpr char HEADER[] =
+      "elapsed_ms,target_ms,wave,score,frames,cycle_min_us,cycle_avg_us,cycle_max_us,"
+      "logic_min_us,logic_avg_us,logic_max_us,draw_min_us,draw_avg_us,draw_max_us,"
+      "refresh_min_us,refresh_avg_us,refresh_max_us,work_avg_us,work_max_us,"
+      "over_budget_frames,panel_fps,real_fps\n";
+  const size_t expected = sizeof(HEADER) - 1;
+  if (benchmarkLogFile.write(reinterpret_cast<const uint8_t*>(HEADER), expected) != expected) {
+    benchmarkLogFile.close();
+    return false;
+  }
+  benchmarkLogFile.sync();
+  benchmarkLogOpen_ = true;
+  return true;
+}
+
+void MissileCommandActivity::closeBenchmarkLog() {
+  if (!benchmarkLogOpen_) return;
+  benchmarkLogFile.sync();
+  benchmarkLogFile.close();
+  benchmarkLogOpen_ = false;
+}
+
+void MissileCommandActivity::recordBenchmarkSample(uint32_t logicUs, uint32_t drawUs,
+                                                   uint32_t refreshUs, uint32_t cycleUs) {
+  auto& b = benchmarkAccum_;
+  ++b.frames;
+  b.logicSumUs += logicUs;
+  b.drawSumUs += drawUs;
+  b.refreshSumUs += refreshUs;
+  b.cycleSumUs += cycleUs;
+  const uint32_t workUs = logicUs + drawUs + refreshUs;
+  b.workSumUs += workUs;
+
+  b.logicMinUs = std::min(b.logicMinUs, logicUs);
+  b.logicMaxUs = std::max(b.logicMaxUs, logicUs);
+  b.drawMinUs = std::min(b.drawMinUs, drawUs);
+  b.drawMaxUs = std::max(b.drawMaxUs, drawUs);
+  b.refreshMinUs = std::min(b.refreshMinUs, refreshUs);
+  b.refreshMaxUs = std::max(b.refreshMaxUs, refreshUs);
+  b.cycleMinUs = std::min(b.cycleMinUs, cycleUs);
+  b.cycleMaxUs = std::max(b.cycleMaxUs, cycleUs);
+  b.workMaxUs = std::max(b.workMaxUs, workUs);
+  if (workUs > static_cast<uint32_t>(GAME_FRAME_US)) ++b.overBudgetFrames;
+
+  if (b.frames < BENCHMARK_BATCH_FRAMES || benchmarkFlushPending_.load()) return;
+
+  benchmarkSnapshot_.elapsedMs = static_cast<uint32_t>((esp_timer_get_time() - benchmarkSessionStartUs_) / 1000);
+  benchmarkSnapshot_.wave = wave_;
+  benchmarkSnapshot_.score = score_;
+  benchmarkSnapshot_.frames = b.frames;
+  benchmarkSnapshot_.cycleMinUs = b.cycleMinUs;
+  benchmarkSnapshot_.cycleAvgUs = static_cast<uint32_t>(b.cycleSumUs / b.frames);
+  benchmarkSnapshot_.cycleMaxUs = b.cycleMaxUs;
+  benchmarkSnapshot_.logicMinUs = b.logicMinUs;
+  benchmarkSnapshot_.logicAvgUs = static_cast<uint32_t>(b.logicSumUs / b.frames);
+  benchmarkSnapshot_.logicMaxUs = b.logicMaxUs;
+  benchmarkSnapshot_.drawMinUs = b.drawMinUs;
+  benchmarkSnapshot_.drawAvgUs = static_cast<uint32_t>(b.drawSumUs / b.frames);
+  benchmarkSnapshot_.drawMaxUs = b.drawMaxUs;
+  benchmarkSnapshot_.refreshMinUs = b.refreshMinUs;
+  benchmarkSnapshot_.refreshAvgUs = static_cast<uint32_t>(b.refreshSumUs / b.frames);
+  benchmarkSnapshot_.refreshMaxUs = b.refreshMaxUs;
+  benchmarkSnapshot_.workAvgUs = static_cast<uint32_t>(b.workSumUs / b.frames);
+  benchmarkSnapshot_.workMaxUs = b.workMaxUs;
+  benchmarkSnapshot_.overBudgetFrames = b.overBudgetFrames;
+
+  resetBenchmarkAccumulator();
+  benchmarkFlushPending_.store(true);
+}
+
+void MissileCommandActivity::flushBenchmarkLog() {
+  if (!benchmarkFlushPending_.exchange(false)) return;
+  if (!benchmarkLogOpen_ && !openBenchmarkLog()) return;
+
+  const auto& b = benchmarkSnapshot_;
+  const uint32_t panelFpsX100 = b.refreshAvgUs > 0 ? 100000000u / b.refreshAvgUs : 0;
+  const uint32_t realFpsX100 = b.cycleAvgUs > 0 ? 100000000u / b.cycleAvgUs : 0;
+  char row[384];
+  const int length = std::snprintf(
+      row, sizeof(row),
+      "%lu,100,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu.%02lu,%lu.%02lu\n",
+      static_cast<unsigned long>(b.elapsedMs), static_cast<unsigned>(b.wave),
+      static_cast<unsigned long>(b.score), static_cast<unsigned long>(b.frames),
+      static_cast<unsigned long>(b.cycleMinUs), static_cast<unsigned long>(b.cycleAvgUs),
+      static_cast<unsigned long>(b.cycleMaxUs), static_cast<unsigned long>(b.logicMinUs),
+      static_cast<unsigned long>(b.logicAvgUs), static_cast<unsigned long>(b.logicMaxUs),
+      static_cast<unsigned long>(b.drawMinUs), static_cast<unsigned long>(b.drawAvgUs),
+      static_cast<unsigned long>(b.drawMaxUs), static_cast<unsigned long>(b.refreshMinUs),
+      static_cast<unsigned long>(b.refreshAvgUs), static_cast<unsigned long>(b.refreshMaxUs),
+      static_cast<unsigned long>(b.workAvgUs), static_cast<unsigned long>(b.workMaxUs),
+      static_cast<unsigned long>(b.overBudgetFrames),
+      static_cast<unsigned long>(panelFpsX100 / 100), static_cast<unsigned long>(panelFpsX100 % 100),
+      static_cast<unsigned long>(realFpsX100 / 100), static_cast<unsigned long>(realFpsX100 % 100));
+
+  if (length <= 0 || length >= static_cast<int>(sizeof(row)) ||
+      benchmarkLogFile.write(reinterpret_cast<const uint8_t*>(row), static_cast<size_t>(length)) !=
+          static_cast<size_t>(length)) {
+    closeBenchmarkLog();
+    return;
+  }
+  benchmarkLogFile.sync();
 }
 
 bool MissileCommandActivity::saveGame() {
