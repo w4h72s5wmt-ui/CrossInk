@@ -143,6 +143,24 @@ void figaroCleanupTests() {
   const size_t normalLength = RC::stripFigaroUiPreamble(normalBuffer.data(), normal.size(), "https://www.lefigaro.fr/test");
   check(normalLength == normal.size() && std::string(normalBuffer.data(), normalLength) == normal,
         "Figaro prose is not removed without multiple UI markers");
+
+
+  std::string sharedMiddle = "Avant -Lien copie- Mail- X- MessengerApres";
+  std::vector<char> sharedMiddleBuffer(sharedMiddle.begin(), sharedMiddle.end());
+  sharedMiddleBuffer.push_back('\0');
+  const size_t sharedMiddleLength = RC::stripFigaroShareControls(
+      sharedMiddleBuffer.data(), sharedMiddle.size(), "https://www.lefigaro.fr/test");
+  const std::string sharedMiddleOut(sharedMiddleBuffer.data(), sharedMiddleLength);
+  check(sharedMiddleOut == "Avant Apres", "Figaro mid-article share controls removed without losing prose");
+
+  std::string sharedTwice =
+      "Debut -Lien copié- Mail- X- MessengerMilieu -Lien copie- Mail- X- MessengerFin";
+  std::vector<char> sharedTwiceBuffer(sharedTwice.begin(), sharedTwice.end());
+  sharedTwiceBuffer.push_back('\0');
+  const size_t sharedTwiceLength = RC::stripFigaroShareControls(
+      sharedTwiceBuffer.data(), sharedTwice.size(), "https://www.lefigaro.fr/test");
+  const std::string sharedTwiceOut(sharedTwiceBuffer.data(), sharedTwiceLength);
+  check(sharedTwiceOut == "Debut Milieu Fin", "Figaro multiple share controls removed");
 }
 
 void cacheTests() {

@@ -26,6 +26,7 @@ class MinesweeperActivity final : public Activity {
   static constexpr int kMenuRowCount = 7;
   static constexpr int kMaxCells = 16 * 16;
   static constexpr int kPackedBytes = (kMaxCells + 7) / 8;
+  static constexpr int kMaxSaveStateBytes = 4 + 3 * kPackedBytes;
   static constexpr unsigned long kFlagHoldMs = 700;
 
   struct CellBits {
@@ -71,7 +72,7 @@ class MinesweeperActivity final : public Activity {
     }
   };
 
-  enum class ViewMode {
+  enum class ViewMode : uint8_t {
     Menu,
     Grid,
     Result,
@@ -85,6 +86,9 @@ class MinesweeperActivity final : public Activity {
   ViewMode viewMode_ = ViewMode::Menu;
   int selectedIndex_ = 0;
   int gridSizeIndex_ = 0;
+  uint8_t savedGridSizeIndex_ = 0;
+  uint32_t savedAtPacked_ = 0;
+  std::array<char, 48> continueLabel_{};
   int visibleRows_ = 1;
   int topIndex_ = 0;
   bool initialViewportPending_ = true;
@@ -93,6 +97,12 @@ class MinesweeperActivity final : public Activity {
   CellBits mines_{};
   CellBits revealed_{};
   CellBits flagged_{};
+  std::array<uint8_t, kMaxSaveStateBytes> savedStateSnapshot_{};
+  uint16_t savedStateSize_ = 0;
+  bool savedStateValid_ = false;
+  int cachedFlagCount_ = 0;
+  int cachedCorrectFlagCount_ = 0;
+  bool countersDirty_ = true;
   bool minesPlaced_ = false;
   bool gameOver_ = false;
   bool won_ = false;
@@ -129,6 +139,7 @@ class MinesweeperActivity final : public Activity {
   void checkWin();
   void finishGame(bool won);
 
+  uint16_t buildSaveStateSnapshot(std::array<uint8_t, kMaxSaveStateBytes>& snapshot) const;
   bool loadSavedGame();
   bool saveGame();
   void clearSavedGame();

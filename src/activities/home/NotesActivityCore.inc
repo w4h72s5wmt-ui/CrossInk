@@ -6,6 +6,7 @@
 #include <esp_random.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/sha256.h>
+#include <nvs.h>
 
 #include <algorithm>
 #include <array>
@@ -36,15 +37,19 @@ constexpr int kRenameButtonWidth = 44;
 constexpr int kLockButtonWidth = 48;
 constexpr int kRowHeight = 58;
 constexpr size_t kPatternLength = 6;
-constexpr size_t kLegacyPatternLength = 4;
 constexpr size_t kMaxEncryptedPlaintextBytes = 32 * 1024;
 constexpr const char* kVaultFingerprintPath = "/Notes/.vault";
+constexpr const char* kVaultKeyBackupPath = "/Notes/.vaultkey";
+constexpr const char* kVaultNvsNamespace = "crossinknotes";
+constexpr const char* kVaultNvsKey = "vaultkey";
 constexpr const char* kResetVaultToken = "__RESET_VAULT__";
 constexpr size_t kCryptoMagicBytes = 8;
 constexpr size_t kCryptoNonceBytes = 12;
 constexpr size_t kCryptoTagBytes = 16;
 constexpr size_t kCryptoKeyBytes = 32;
-constexpr uint8_t kCryptoMagic[kCryptoMagicBytes] = {'C', 'R', 'O', 'S', 'S', 'N', 'T', '1'};
+constexpr size_t kCryptoChunkBytes = 512;
+constexpr uint8_t kCryptoMagic[kCryptoMagicBytes] = {'C', 'R', 'O', 'S', 'S', 'N', 'T', '2'};
+constexpr uint8_t kVaultKeyBackupMagic[kCryptoMagicBytes] = {'C', 'R', 'O', 'S', 'S', 'V', 'K', '1'};
 constexpr int kRowSidePadding = 16;
 constexpr int kCornerRadius = 6;
 
@@ -58,6 +63,35 @@ std::string lowerAscii(std::string value) {
     if (uc < 0x80) c = static_cast<char>(std::tolower(uc));
   }
   return value;
+}
+
+std::array<uint8_t, 32> noteTextDigest(const std::string& text) {
+  std::array<uint8_t, 32> digest{};
+  if (mbedtls_sha256(reinterpret_cast<const unsigned char*>(text.data()), text.size(), digest.data(), 0) != 0) {
+    digest.fill(0xFF);
+  }
+  return digest;
+}
+
+bool asciiTitleContains(const std::string& filename, const std::string& needle) {
+  size_t titleBytes = filename.size();
+  if (titleBytes >= 4 && filename.compare(titleBytes - 4, 4, ".txt") == 0) titleBytes -= 4;
+  if (needle.empty()) return true;
+  if (needle.size() > titleBytes) return false;
+  const auto fold = [](const unsigned char c) {
+    return static_cast<unsigned char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+  };
+  for (size_t start = 0; start + needle.size() <= titleBytes; ++start) {
+    bool match = true;
+    for (size_t i = 0; i < needle.size(); ++i) {
+      if (fold(static_cast<unsigned char>(filename[start + i])) != static_cast<unsigned char>(needle[i])) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
 }
 
 void drawCenteredLabel(GfxRenderer& renderer, const Rect& rect, const char* label) {
@@ -144,7 +178,10 @@ bool createLockMarker(const std::string& notePath) {
   return written == 1;
 }
 
-void removeLockMarker(const std::string& notePath) { Storage.remove(lockMarkerPath(notePath).c_str()); }
+bool removeLockMarker(const std::string& notePath) {
+  const std::string marker = lockMarkerPath(notePath);
+  return !Storage.exists(marker.c_str()) || Storage.remove(marker.c_str());
+}
 
 uint64_t patternFingerprint(const std::string& pattern) {
   // Salted fingerprint only: this is a privacy gate, not note-content encryption.
@@ -311,12 +348,6 @@ class VaultPatternActivity final : public Activity {
   void appendCell(const int index) {
     invalidPattern = false;
     pattern.push_back(static_cast<char>('0' + index));
-    if (verify && pattern.size() == kLegacyPatternLength &&
-        patternFingerprint(pattern) == expectedFingerprint) {
-      setResult(ActivityResult{KeyboardResult{pattern}});
-      finish();
-      return;
-    }
     if (pattern.size() < kPatternLength) {
       requestUpdate();
       return;
@@ -354,37 +385,13 @@ class VaultPatternActivity final : public Activity {
 
 
 bool deriveVaultKey(const std::string& pattern, std::array<uint8_t, kCryptoKeyBytes>& key) {
-  if (pattern.size() != kPatternLength && pattern.size() != kLegacyPatternLength) return false;
+  if (pattern.size() != kPatternLength) return false;
   static constexpr char domain[] = "CrossInk Notes AES-256-GCM v1";
   std::array<uint8_t, sizeof(domain) - 1 + kPatternLength> seed{};
   memcpy(seed.data(), domain, sizeof(domain) - 1);
   memcpy(seed.data() + sizeof(domain) - 1, pattern.data(), pattern.size());
   const size_t seedSize = sizeof(domain) - 1 + pattern.size();
   return mbedtls_sha256(seed.data(), seedSize, key.data(), 0) == 0;
-}
-
-bool isEncryptedPayload(const uint8_t* data, const size_t size) {
-  return size >= kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes &&
-         memcmp(data, kCryptoMagic, kCryptoMagicBytes) == 0;
-}
-
-bool readRawNoteFile(const std::string& path, std::vector<uint8_t>& bytes) {
-  bytes.clear();
-  FsFile file;
-  if (!Storage.openFileForRead("NOTES", path, file)) return false;
-  const uint32_t size = file.size();
-  if (size > kMaxEncryptedPlaintextBytes + kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes) {
-    file.close();
-    return false;
-  }
-  bytes.resize(size);
-  if (size > 0 && file.read(bytes.data(), size) != static_cast<int>(size)) {
-    file.close();
-    bytes.clear();
-    return false;
-  }
-  file.close();
-  return true;
 }
 
 bool writeRawNoteFile(const std::string& path, const uint8_t* data, const size_t size) {
@@ -395,67 +402,300 @@ bool writeRawNoteFile(const std::string& path, const uint8_t* data, const size_t
   return written == size;
 }
 
+bool loadNvsVaultKey(std::array<uint8_t, kCryptoKeyBytes>& key) {
+  nvs_handle_t handle = 0;
+  if (nvs_open(kVaultNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
+  size_t length = key.size();
+  const esp_err_t rc = nvs_get_blob(handle, kVaultNvsKey, key.data(), &length);
+  nvs_close(handle);
+  if (rc != ESP_OK || length != key.size()) {
+    std::fill(key.begin(), key.end(), 0);
+    return false;
+  }
+  return true;
+}
+
+bool storeNvsVaultKey(const std::array<uint8_t, kCryptoKeyBytes>& key) {
+  nvs_handle_t handle = 0;
+  if (nvs_open(kVaultNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) return false;
+  esp_err_t rc = nvs_set_blob(handle, kVaultNvsKey, key.data(), key.size());
+  if (rc == ESP_OK) rc = nvs_commit(handle);
+  nvs_close(handle);
+  return rc == ESP_OK;
+}
+
+bool clearNvsVaultKey() {
+  nvs_handle_t handle = 0;
+  const esp_err_t openRc = nvs_open(kVaultNvsNamespace, NVS_READWRITE, &handle);
+  if (openRc == ESP_ERR_NVS_NOT_FOUND) return true;
+  if (openRc != ESP_OK) return false;
+  esp_err_t rc = nvs_erase_key(handle, kVaultNvsKey);
+  if (rc == ESP_ERR_NVS_NOT_FOUND) rc = ESP_OK;
+  if (rc == ESP_OK) rc = nvs_commit(handle);
+  nvs_close(handle);
+  return rc == ESP_OK;
+}
+
+bool writeVaultKeyBackup(const std::string& pattern,
+                         const std::array<uint8_t, kCryptoKeyBytes>& vaultKey) {
+  std::array<uint8_t, kCryptoKeyBytes> wrappingKey{};
+  if (!deriveVaultKey(pattern, wrappingKey)) return false;
+  constexpr size_t backupBytes = kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes + kCryptoKeyBytes;
+  std::array<uint8_t, backupBytes> payload{};
+  memcpy(payload.data(), kVaultKeyBackupMagic, kCryptoMagicBytes);
+  uint8_t* nonce = payload.data() + kCryptoMagicBytes;
+  esp_fill_random(nonce, kCryptoNonceBytes);
+  uint8_t* tag = nonce + kCryptoNonceBytes;
+  uint8_t* cipher = tag + kCryptoTagBytes;
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, wrappingKey.data(), wrappingKey.size() * 8);
+  if (rc == 0) {
+    rc = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, vaultKey.size(), nonce, kCryptoNonceBytes,
+                                   payload.data(), kCryptoMagicBytes + kCryptoNonceBytes, vaultKey.data(), cipher,
+                                   kCryptoTagBytes, tag);
+  }
+  mbedtls_gcm_free(&gcm);
+  std::fill(wrappingKey.begin(), wrappingKey.end(), 0);
+  if (rc != 0) return false;
+  return writeRawNoteFile(kVaultKeyBackupPath, payload.data(), payload.size());
+}
+
+bool readVaultKeyBackup(const std::string& pattern, std::array<uint8_t, kCryptoKeyBytes>& vaultKey) {
+  constexpr size_t backupBytes = kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes + kCryptoKeyBytes;
+  FsFile file;
+  if (!Storage.openFileForRead("NOTES", kVaultKeyBackupPath, file)) return false;
+  if (file.size() != backupBytes) {
+    file.close();
+    return false;
+  }
+  std::array<uint8_t, backupBytes> payload{};
+  const int count = file.read(payload.data(), payload.size());
+  file.close();
+  if (count != static_cast<int>(payload.size()) || memcmp(payload.data(), kVaultKeyBackupMagic, kCryptoMagicBytes) != 0)
+    return false;
+  std::array<uint8_t, kCryptoKeyBytes> wrappingKey{};
+  if (!deriveVaultKey(pattern, wrappingKey)) return false;
+  const uint8_t* nonce = payload.data() + kCryptoMagicBytes;
+  const uint8_t* tag = nonce + kCryptoNonceBytes;
+  const uint8_t* cipher = tag + kCryptoTagBytes;
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, wrappingKey.data(), wrappingKey.size() * 8);
+  if (rc == 0) {
+    rc = mbedtls_gcm_auth_decrypt(&gcm, vaultKey.size(), nonce, kCryptoNonceBytes, payload.data(),
+                                  kCryptoMagicBytes + kCryptoNonceBytes, tag, kCryptoTagBytes, cipher, vaultKey.data());
+  }
+  mbedtls_gcm_free(&gcm);
+  std::fill(wrappingKey.begin(), wrappingKey.end(), 0);
+  if (rc != 0) {
+    std::fill(vaultKey.begin(), vaultKey.end(), 0);
+    return false;
+  }
+  return true;
+}
+
+bool ensureDeviceVaultKey(const std::string& pattern, const bool allowCreate,
+                          std::array<uint8_t, kCryptoKeyBytes>& vaultKey) {
+  const bool validPattern = pattern.size() == kPatternLength;
+  if (loadNvsVaultKey(vaultKey)) {
+    if (validPattern && !Storage.exists(kVaultKeyBackupPath) && !writeVaultKeyBackup(pattern, vaultKey)) {
+      std::fill(vaultKey.begin(), vaultKey.end(), 0);
+      return false;
+    }
+    return true;
+  }
+  if (Storage.exists(kVaultKeyBackupPath)) {
+    if (!validPattern || !readVaultKeyBackup(pattern, vaultKey)) return false;
+    if (!storeNvsVaultKey(vaultKey)) {
+      std::fill(vaultKey.begin(), vaultKey.end(), 0);
+      return false;
+    }
+    return true;
+  }
+  if (!allowCreate) return false;
+  esp_fill_random(vaultKey.data(), vaultKey.size());
+  if (!storeNvsVaultKey(vaultKey)) {
+    std::fill(vaultKey.begin(), vaultKey.end(), 0);
+    return false;
+  }
+  if (validPattern && !writeVaultKeyBackup(pattern, vaultKey)) {
+    clearNvsVaultKey();
+    std::fill(vaultKey.begin(), vaultKey.end(), 0);
+    return false;
+  }
+  return true;
+}
+
 bool saveEncryptedNoteFile(const std::string& path, const std::string& text, const std::string& pattern) {
   if (text.size() > kMaxEncryptedPlaintextBytes) return false;
   std::array<uint8_t, kCryptoKeyBytes> key{};
-  if (!deriveVaultKey(pattern, key)) return false;
+  if (!ensureDeviceVaultKey(pattern, true, key)) return false;
 
-  std::array<uint8_t, kCryptoNonceBytes> nonce{};
-  esp_fill_random(nonce.data(), nonce.size());
+  constexpr size_t aadBytes = kCryptoMagicBytes + kCryptoNonceBytes;
+  constexpr size_t headerBytes = aadBytes + kCryptoTagBytes;
+  std::array<uint8_t, headerBytes> header{};
+  memcpy(header.data(), kCryptoMagic, kCryptoMagicBytes);
+  esp_fill_random(header.data() + kCryptoMagicBytes, kCryptoNonceBytes);
 
-  const size_t headerBytes = kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes;
-  std::vector<uint8_t> payload(headerBytes + text.size());
-  memcpy(payload.data(), kCryptoMagic, kCryptoMagicBytes);
-  memcpy(payload.data() + kCryptoMagicBytes, nonce.data(), nonce.size());
-  uint8_t* tag = payload.data() + kCryptoMagicBytes + kCryptoNonceBytes;
-  uint8_t* cipher = payload.data() + headerBytes;
+  const std::string tempPath = path + ".crypt.tmp";
+  const std::string backupPath = path + ".crypt.bak";
+  if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+  if (Storage.exists(backupPath.c_str())) {
+    if (!Storage.exists(path.c_str())) {
+      Storage.rename(backupPath.c_str(), path.c_str());
+    } else {
+      Storage.remove(backupPath.c_str());
+    }
+  }
 
+  FsFile file = Storage.open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+  if (!file) {
+    std::fill(key.begin(), key.end(), 0);
+    return false;
+  }
+
+  int rc = file.write(header.data(), header.size()) == header.size() ? 0 : -1;
   mbedtls_gcm_context gcm;
   mbedtls_gcm_init(&gcm);
-  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key.data(), key.size() * 8);
+  if (rc == 0) rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key.data(), key.size() * 8);
   if (rc == 0) {
-    rc = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, text.size(), nonce.data(), nonce.size(),
-                                   payload.data(), kCryptoMagicBytes + kCryptoNonceBytes,
-                                   reinterpret_cast<const uint8_t*>(text.data()), cipher, kCryptoTagBytes, tag);
+    rc = mbedtls_gcm_starts(&gcm, MBEDTLS_GCM_ENCRYPT, header.data() + kCryptoMagicBytes, kCryptoNonceBytes);
+  }
+  if (rc == 0) rc = mbedtls_gcm_update_ad(&gcm, header.data(), aadBytes);
+
+  std::array<uint8_t, kCryptoChunkBytes + 15> output{};
+  size_t offset = 0;
+  while (rc == 0 && offset < text.size()) {
+    const size_t chunk = std::min(kCryptoChunkBytes, text.size() - offset);
+    size_t outputLength = 0;
+    rc = mbedtls_gcm_update(&gcm, reinterpret_cast<const uint8_t*>(text.data() + offset), chunk,
+                            output.data(), output.size(), &outputLength);
+    if (rc == 0 && outputLength > 0 && file.write(output.data(), outputLength) != outputLength) rc = -1;
+    offset += chunk;
+  }
+
+  std::array<uint8_t, 15> finalOutput{};
+  std::array<uint8_t, kCryptoTagBytes> tag{};
+  size_t finalLength = 0;
+  if (rc == 0) {
+    rc = mbedtls_gcm_finish(&gcm, finalOutput.data(), finalOutput.size(), &finalLength, tag.data(), tag.size());
   }
   mbedtls_gcm_free(&gcm);
   std::fill(key.begin(), key.end(), 0);
-  if (rc != 0) return false;
-  return writeRawNoteFile(path, payload.data(), payload.size());
+
+  if (rc == 0 && finalLength > 0 && file.write(finalOutput.data(), finalLength) != finalLength) rc = -1;
+  if (rc == 0 && (!file.seekSet(aadBytes) || file.write(tag.data(), tag.size()) != tag.size())) rc = -1;
+  if (rc == 0 && !file.sync()) rc = -1;
+  file.close();
+
+  if (rc != 0) {
+    if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+    return false;
+  }
+
+  bool movedOriginal = false;
+  if (Storage.exists(path.c_str())) {
+    if (!Storage.rename(path.c_str(), backupPath.c_str())) {
+      Storage.remove(tempPath.c_str());
+      return false;
+    }
+    movedOriginal = true;
+  }
+  if (!Storage.rename(tempPath.c_str(), path.c_str())) {
+    if (movedOriginal) Storage.rename(backupPath.c_str(), path.c_str());
+    if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+    return false;
+  }
+  if (movedOriginal && Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
+  return true;
 }
 
 bool loadProtectedNoteFile(const std::string& path, const std::string& pattern, std::string& text) {
   text.clear();
-  std::vector<uint8_t> payload;
-  if (!readRawNoteFile(path, payload)) return false;
-
-  if (!isEncryptedPayload(payload.data(), payload.size())) {
-    text.assign(reinterpret_cast<const char*>(payload.data()), payload.size());
-    return text.size() <= kMaxEncryptedPlaintextBytes;
+  FsFile file;
+  if (!Storage.openFileForRead("NOTES", path, file)) return false;
+  const uint32_t size = file.size();
+  constexpr size_t aadBytes = kCryptoMagicBytes + kCryptoNonceBytes;
+  constexpr size_t headerBytes = aadBytes + kCryptoTagBytes;
+  if (size < headerBytes || size > kMaxEncryptedPlaintextBytes + headerBytes) {
+    file.close();
+    return false;
   }
 
-  const size_t headerBytes = kCryptoMagicBytes + kCryptoNonceBytes + kCryptoTagBytes;
-  const size_t cipherBytes = payload.size() - headerBytes;
-  if (cipherBytes > kMaxEncryptedPlaintextBytes) return false;
+  std::array<uint8_t, kCryptoMagicBytes> magic{};
+  std::array<uint8_t, kCryptoNonceBytes> nonce{};
+  std::array<uint8_t, kCryptoTagBytes> storedTag{};
+  if (file.read(magic.data(), magic.size()) != static_cast<int>(magic.size()) ||
+      memcmp(magic.data(), kCryptoMagic, kCryptoMagicBytes) != 0 ||
+      file.read(nonce.data(), nonce.size()) != static_cast<int>(nonce.size()) ||
+      file.read(storedTag.data(), storedTag.size()) != static_cast<int>(storedTag.size())) {
+    file.close();
+    return false;
+  }
 
   std::array<uint8_t, kCryptoKeyBytes> key{};
-  if (!deriveVaultKey(pattern, key)) return false;
-  const uint8_t* nonce = payload.data() + kCryptoMagicBytes;
-  const uint8_t* tag = nonce + kCryptoNonceBytes;
-  const uint8_t* cipher = tag + kCryptoTagBytes;
-  text.resize(cipherBytes);
+  if (!ensureDeviceVaultKey(pattern, false, key)) {
+    file.close();
+    return false;
+  }
 
+  std::array<uint8_t, aadBytes> aad{};
+  memcpy(aad.data(), magic.data(), magic.size());
+  memcpy(aad.data() + kCryptoMagicBytes, nonce.data(), nonce.size());
   mbedtls_gcm_context gcm;
   mbedtls_gcm_init(&gcm);
   int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key.data(), key.size() * 8);
+  if (rc == 0) rc = mbedtls_gcm_starts(&gcm, MBEDTLS_GCM_DECRYPT, nonce.data(), nonce.size());
+  if (rc == 0) rc = mbedtls_gcm_update_ad(&gcm, aad.data(), aad.size());
+
+  const size_t cipherBytes = size - headerBytes;
+  text.resize(cipherBytes);
+  std::array<uint8_t, kCryptoChunkBytes> input{};
+  std::array<uint8_t, kCryptoChunkBytes + 15> output{};
+  size_t remaining = cipherBytes;
+  size_t plainOffset = 0;
+  while (rc == 0 && remaining > 0) {
+    const size_t chunk = std::min(remaining, input.size());
+    if (file.read(input.data(), chunk) != static_cast<int>(chunk)) {
+      rc = -1;
+      break;
+    }
+    size_t outputLength = 0;
+    rc = mbedtls_gcm_update(&gcm, input.data(), chunk, output.data(), output.size(), &outputLength);
+    if (rc == 0 && outputLength > 0) {
+      if (plainOffset + outputLength > text.size()) {
+        rc = -1;
+        break;
+      }
+      memcpy(text.data() + plainOffset, output.data(), outputLength);
+      plainOffset += outputLength;
+    }
+    remaining -= chunk;
+  }
+
+  std::array<uint8_t, 15> finalOutput{};
+  size_t finalLength = 0;
+  std::array<uint8_t, kCryptoTagBytes> computedTag{};
   if (rc == 0) {
-    rc = mbedtls_gcm_auth_decrypt(&gcm, cipherBytes, nonce, kCryptoNonceBytes, payload.data(),
-                                  kCryptoMagicBytes + kCryptoNonceBytes, tag, kCryptoTagBytes, cipher,
-                                  reinterpret_cast<uint8_t*>(text.data()));
+    rc = mbedtls_gcm_finish(&gcm, finalOutput.data(), finalOutput.size(), &finalLength, computedTag.data(), computedTag.size());
   }
   mbedtls_gcm_free(&gcm);
+  file.close();
   std::fill(key.begin(), key.end(), 0);
-  if (rc != 0) {
+
+  if (rc == 0 && finalLength > 0) {
+    if (plainOffset + finalLength > text.size()) {
+      rc = -1;
+    } else {
+      memcpy(text.data() + plainOffset, finalOutput.data(), finalLength);
+      plainOffset += finalLength;
+    }
+  }
+  uint8_t tagDiff = 0;
+  for (size_t i = 0; i < storedTag.size(); ++i) tagDiff |= static_cast<uint8_t>(storedTag[i] ^ computedTag[i]);
+  if (rc != 0 || tagDiff != 0 || plainOffset != cipherBytes) {
+    std::fill(text.begin(), text.end(), '\0');
     text.clear();
     return false;
   }
@@ -509,6 +749,14 @@ bool purgeProtectedVaultNotes() {
     LOG_ERR("NOTES", "Failed to remove Notes vault fingerprint");
     return false;
   }
+  if (Storage.exists(kVaultKeyBackupPath) && !Storage.remove(kVaultKeyBackupPath)) {
+    LOG_ERR("NOTES", "Failed to remove Notes vault key backup");
+    return false;
+  }
+  if (!clearNvsVaultKey()) {
+    LOG_ERR("NOTES", "Failed to clear Notes vault key from NVS");
+    return false;
+  }
   return true;
 }
 
@@ -526,12 +774,20 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
                         std::string initialText, const size_t maxLength, std::string path, std::string vaultPattern)
       : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
                               InputType::Multiline),
-        path(std::move(path)), vaultPattern(std::move(vaultPattern)) {}
+        path(std::move(path)), vaultPattern(std::move(vaultPattern)) {
+    capturePersistedState();
+  }
 
   void onExit() override {
-    const bool saved = noteLockedByPath(path) ? saveEncryptedNoteFile(path, currentText(), vaultPattern)
-                                               : saveNoteFile(path, currentText());
-    if (!saved) LOG_ERR("NOTES", "Failed to autosave note before editor exit: %s", path.c_str());
+    if (contentChanged()) {
+      const bool saved = noteLockedByPath(path) ? saveEncryptedNoteFile(path, currentText(), vaultPattern)
+                                                 : saveNoteFile(path, currentText());
+      if (!saved) {
+        LOG_ERR("NOTES", "Failed to autosave note before editor exit: %s", path.c_str());
+      } else {
+        capturePersistedState();
+      }
+    }
     std::fill(vaultPattern.begin(), vaultPattern.end(), '\0');
     vaultPattern.clear();
     KeyboardEntryActivity::onExit();
@@ -540,29 +796,121 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
  protected:
   bool handleHeaderActionTap(const int x, const int y) override {
     if (!pointInRect(lockButtonRect(), x, y)) return false;
-    if (!noteLockedByPath(path)) beginLock();
+    if (noteLockedByPath(path)) {
+      beginUnlock();
+    } else {
+      beginLock();
+    }
     return true;
   }
 
   int headerActionReserveWidth() const override { return kLockButtonWidth; }
 
-  void drawHeaderAction() override { drawLockIcon(renderer, lockButtonRect(), true); }
+  bool headerActionLocked() const override { return noteLockedByPath(path); }
+
+  void drawHeaderAction() override {
+    drawLockIcon(renderer, lockArtworkRectOnTitleBaseline(lockButtonRect()), true);
+  }
 
  private:
   std::string path;
   std::string vaultPattern;
+  std::array<uint8_t, 32> persistedDigest{};
+  bool persistedDigestValid = false;
+
+  void capturePersistedState() {
+    persistedDigest = noteTextDigest(currentText());
+    persistedDigestValid = true;
+  }
+
+  bool contentChanged() const {
+    return !persistedDigestValid || noteTextDigest(currentText()) != persistedDigest;
+  }
 
   Rect lockButtonRect() const {
     const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
-    return Rect{renderer.getScreenWidth() - kLockButtonWidth, header.y, kLockButtonWidth, header.height};
+    const auto backLayout = TouchHeaderBackButton::layout(header);
+    const int controlOffset = std::min(
+        TouchHeaderBackButton::TITLE_VERTICAL_OFFSET,
+        std::max(0, header.y + header.height -
+                        (backLayout.iconRect.y +
+                         (backLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2)));
+    return Rect{renderer.getScreenWidth() - kLockButtonWidth, header.y + controlOffset, kLockButtonWidth,
+                header.height};
+  }
+
+  bool lockWithPattern(const std::string& pattern) {
+    if (!saveEncryptedNoteFile(path, currentText(), pattern)) {
+      LOG_ERR("NOTES", "Failed to encrypt note: %s", path.c_str());
+      requestUpdate();
+      return false;
+    }
+    if (!createLockMarker(path)) {
+      saveNoteFile(path, currentText());
+      LOG_ERR("NOTES", "Failed to lock note: %s", path.c_str());
+      requestUpdate();
+      return false;
+    }
+    if (!pattern.empty()) vaultPattern = pattern;
+    capturePersistedState();
+    requestUpdate(true);
+    return true;
+  }
+
+  void beginUnlock() {
+    const std::string tempPath = path + ".unlock.tmp";
+    const std::string backupPath = path + ".unlock.bak";
+    if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+    if (Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
+
+    const std::string& plain = currentText();
+    if (!writeRawNoteFile(tempPath, reinterpret_cast<const uint8_t*>(plain.data()), plain.size())) {
+      LOG_ERR("NOTES", "Failed to stage unlocked note: %s", path.c_str());
+      requestUpdate();
+      return;
+    }
+    if (!Storage.rename(path.c_str(), backupPath.c_str())) {
+      Storage.remove(tempPath.c_str());
+      LOG_ERR("NOTES", "Failed to preserve encrypted note before unlock: %s", path.c_str());
+      requestUpdate();
+      return;
+    }
+    if (!Storage.rename(tempPath.c_str(), path.c_str())) {
+      Storage.rename(backupPath.c_str(), path.c_str());
+      if (Storage.exists(tempPath.c_str())) Storage.remove(tempPath.c_str());
+      LOG_ERR("NOTES", "Failed to install plaintext note during unlock: %s", path.c_str());
+      requestUpdate();
+      return;
+    }
+
+    if (!removeLockMarker(path)) {
+      // The note is still logically locked. Restore encrypted content before
+      // returning so a later open can never interpret plaintext as ciphertext.
+      if (!saveEncryptedNoteFile(path, plain, vaultPattern)) {
+        Storage.remove(path.c_str());
+        Storage.rename(backupPath.c_str(), path.c_str());
+      }
+      if (Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
+      LOG_ERR("NOTES", "Failed to remove lock marker while unlocking: %s", path.c_str());
+      requestUpdate();
+      return;
+    }
+
+    if (Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
+    capturePersistedState();
+    requestUpdate(true);
   }
 
   void beginLock() {
     uint64_t expectedFingerprint = 0;
     const bool hasVault = readVaultFingerprint(expectedFingerprint);
+    if (hasVault) {
+      lockWithPattern(vaultPattern);
+      return;
+    }
     startActivityForResult(
-        std::make_unique<VaultPatternActivity>(renderer, mappedInput, hasVault, expectedFingerprint),
-        [this, hasVault](const ActivityResult& result) {
+        std::make_unique<VaultPatternActivity>(renderer, mappedInput, false, 0),
+        [this](const ActivityResult& result) {
           if (result.isCancelled) {
             requestUpdate();
             return;
@@ -572,24 +920,12 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
             requestUpdate();
             return;
           }
-          if (!hasVault && !writeVaultFingerprint(patternFingerprint(pattern->text))) {
+          if (!writeVaultFingerprint(patternFingerprint(pattern->text))) {
             LOG_ERR("NOTES", "Failed to save Notes vault fingerprint");
             requestUpdate();
             return;
           }
-          if (!saveEncryptedNoteFile(path, currentText(), pattern->text)) {
-            LOG_ERR("NOTES", "Failed to encrypt note: %s", path.c_str());
-            requestUpdate();
-            return;
-          }
-          if (!createLockMarker(path)) {
-            saveNoteFile(path, currentText());
-            LOG_ERR("NOTES", "Failed to lock note: %s", path.c_str());
-            requestUpdate();
-            return;
-          }
-          vaultPattern = pattern->text;
-          finish();
+          lockWithPattern(pattern->text);
         });
   }
 };
@@ -610,6 +946,7 @@ void NotesActivity::onEnter() {
 
 void NotesActivity::onExit() {
   filteredNotes.clear();
+  noteLockedStates.clear();
   notes.clear();
   std::fill(vaultPattern.begin(), vaultPattern.end(), '\0');
   vaultPattern.clear();
@@ -619,6 +956,7 @@ void NotesActivity::onExit() {
 
 void NotesActivity::reloadNotes() {
   notes.clear();
+  noteLockedStates.clear();
   auto dir = Storage.open(kNotesDir);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
@@ -638,6 +976,10 @@ void NotesActivity::reloadNotes() {
   }
   dir.close();
   std::sort(notes.begin(), notes.end());
+  noteLockedStates.reserve(notes.size());
+  for (const auto& filename : notes) {
+    noteLockedStates.push_back(noteLockedByFilename(filename) ? 1u : 0u);
+  }
 }
 
 void NotesActivity::applyFilter() {
@@ -646,9 +988,10 @@ void NotesActivity::applyFilter() {
   const std::string needle = lowerAscii(searchQuery);
   for (size_t i = 0; i < notes.size(); ++i) {
     const auto& filename = notes[i];
-    if (!vaultMode && noteLockedByFilename(filename)) continue;
-    bool matches = searchQuery.empty() || lowerAscii(displayName(filename)).find(needle) != std::string::npos;
-    if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle);
+    const bool locked = i < noteLockedStates.size() && noteLockedStates[i] != 0;
+    if (!vaultMode && locked) continue;
+    bool matches = asciiTitleContains(filename, needle);
+    if (!matches) matches = noteContains(std::string(kNotesDir) + "/" + filename, needle, locked);
     if (matches) filteredNotes.push_back(i);
   }
 
@@ -719,9 +1062,9 @@ bool NotesActivity::loadNote(const std::string& path, std::string& text) const {
   return true;
 }
 
-bool NotesActivity::noteContains(const std::string& path, const std::string& needle) const {
+bool NotesActivity::noteContains(const std::string& path, const std::string& needle, const bool locked) const {
   if (needle.empty()) return true;
-  if (noteLockedByPath(path)) {
+  if (locked) {
     std::string plain;
     if (!loadNote(path, plain)) return false;
     return lowerAscii(std::move(plain)).find(needle) != std::string::npos;
@@ -780,10 +1123,28 @@ void NotesActivity::editNote(const std::string& path, const std::string& title) 
 
   startActivityForResult(
       std::make_unique<NotesKeyboardActivity>(renderer, mappedInput, title, std::move(initialText), kMaxNoteBytes, path,
-                                              noteLockedByPath(path) ? vaultPattern : std::string{}),
-      [this](const ActivityResult&) {
-        reloadNotes();
-        applyFilter();
+                                              vaultMode ? vaultPattern : std::string{}),
+      [this, path](const ActivityResult&) {
+        const size_t slash = path.find_last_of('/');
+        const std::string filename = slash == std::string::npos ? path : path.substr(slash + 1);
+        const auto it = std::lower_bound(notes.begin(), notes.end(), filename);
+        if (it == notes.end() || *it != filename) {
+          reloadNotes();
+          applyFilter();
+          requestUpdate();
+          return;
+        }
+        const size_t noteIndex = static_cast<size_t>(it - notes.begin());
+        if (noteIndex >= noteLockedStates.size()) {
+          reloadNotes();
+          applyFilter();
+          requestUpdate();
+          return;
+        }
+        const bool wasLocked = noteLockedStates[noteIndex] != 0;
+        const bool isLocked = noteLockedByPath(path);
+        noteLockedStates[noteIndex] = isLocked ? 1u : 0u;
+        if (!searchQuery.empty() || wasLocked != isLocked) applyFilter();
         requestUpdate();
       });
 }
@@ -958,97 +1319,41 @@ void NotesActivity::promptVaultAccess() {
                 }
                 if (!writeVaultFingerprint(patternFingerprint(newCode->text))) {
                   LOG_ERR("NOTES", "Failed to save reset Notes vault fingerprint");
+                  requestUpdate();
+                  return;
                 }
+                std::array<uint8_t, kCryptoKeyBytes> vaultKey{};
+                if (!ensureDeviceVaultKey(newCode->text, true, vaultKey)) {
+                  LOG_ERR("NOTES", "Failed to initialize reset Notes vault key");
+                }
+                std::fill(vaultKey.begin(), vaultKey.end(), 0);
                 requestUpdate();
               });
           return;
         }
-        if (pattern->text.size() != kPatternLength && pattern->text.size() != kLegacyPatternLength) {
-          requestUpdate();
-          return;
-        }
-        reloadNotes();
-        if (pattern->text.size() == kLegacyPatternLength) {
-          bool hasLegacyEncryptedPayload = false;
-          for (const auto& filename : notes) {
-            const std::string path = std::string(kNotesDir) + "/" + filename;
-            if (noteLockedByPath(path) && noteFileIsEncrypted(path)) {
-              hasLegacyEncryptedPayload = true;
-              break;
-            }
-          }
-          if (hasLegacyEncryptedPayload) {
-            vaultPattern = pattern->text;
-            vaultMode = true;
-            searchQuery.clear();
-            selectorIndex = 0;
-            topIndex = 0;
-            applyFilter();
-            requestUpdate();
-            return;
-          }
-
-          startActivityForResult(
-              std::make_unique<VaultPatternActivity>(renderer, mappedInput, false, 0),
-              [this](const ActivityResult& upgradeResult) {
-                if (upgradeResult.isCancelled) {
-                  requestUpdate();
-                  return;
-                }
-                const auto* newPattern = std::get_if<KeyboardResult>(&upgradeResult.data);
-                if (!newPattern || newPattern->text.size() != kPatternLength) {
-                  requestUpdate();
-                  return;
-                }
-                if (!writeVaultFingerprint(patternFingerprint(newPattern->text))) {
-                  LOG_ERR("NOTES", "Failed to upgrade Notes vault fingerprint");
-                  requestUpdate();
-                  return;
-                }
-                vaultPattern = newPattern->text;
-                vaultMode = true;
-                searchQuery.clear();
-                selectorIndex = 0;
-                topIndex = 0;
-                reloadNotes();
-                migrateLockedNotes();
-                applyFilter();
-                requestUpdate();
-              });
-          return;
-        }
-
         if (pattern->text.size() != kPatternLength) {
           requestUpdate();
           return;
         }
+
+        reloadNotes();
+        std::array<uint8_t, kCryptoKeyBytes> vaultKey{};
+        if (!ensureDeviceVaultKey(pattern->text, true, vaultKey)) {
+          LOG_ERR("NOTES", "Failed to initialize/restore Notes vault key");
+          requestUpdate();
+          return;
+        }
+        std::fill(vaultKey.begin(), vaultKey.end(), 0);
         vaultPattern = pattern->text;
         vaultMode = true;
         searchQuery.clear();
         selectorIndex = 0;
         topIndex = 0;
-        migrateLockedNotes();
         applyFilter();
         requestUpdate();
       });
 }
 
-
-void NotesActivity::migrateLockedNotes() {
-  if (vaultPattern.size() != kPatternLength) return;
-  for (const auto& filename : notes) {
-    const std::string path = std::string(kNotesDir) + "/" + filename;
-    if (!noteLockedByPath(path) || noteFileIsEncrypted(path)) continue;
-    std::string plain;
-    if (!loadProtectedNoteFile(path, vaultPattern, plain)) {
-      LOG_ERR("NOTES", "Failed to read legacy locked note for encryption: %s", path.c_str());
-      continue;
-    }
-    if (!saveEncryptedNoteFile(path, plain, vaultPattern)) {
-      LOG_ERR("NOTES", "Failed to migrate locked note to encrypted storage: %s", path.c_str());
-    }
-  }
-}
 
 void NotesActivity::loop() {
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -1127,8 +1432,10 @@ void NotesActivity::loop() {
               });
           return;
         }
-        const std::string& tappedFilename = notes[filteredNotes[static_cast<size_t>(index)]];
-        if (vaultMode && noteLockedByFilename(tappedFilename) && pointInRect(lockRect, tx, ty)) return;
+        const size_t tappedNoteIndex = filteredNotes[static_cast<size_t>(index)];
+        const std::string& tappedFilename = notes[tappedNoteIndex];
+        const bool tappedLocked = tappedNoteIndex < noteLockedStates.size() && noteLockedStates[tappedNoteIndex] != 0;
+        if (vaultMode && tappedLocked && pointInRect(lockRect, tx, ty)) return;
         if (pointInRect(renameRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           renameNote(filename);
@@ -1249,17 +1556,27 @@ void NotesActivity::render(RenderLock&&) {
                                       static_cast<int16_t>(rowRect.width), static_cast<int16_t>(rowRect.height)},
                     freeink::ui::Paint::dither(freeink::ui::Color::LightGray));
       }
-      const std::string& rowFilename = notes[filteredNotes[static_cast<size_t>(index)]];
-      const bool rowLocked = noteLockedByFilename(rowFilename);
+      const size_t rowNoteIndex = filteredNotes[static_cast<size_t>(index)];
+      const std::string& rowFilename = notes[rowNoteIndex];
+      const bool rowLocked = rowNoteIndex < noteLockedStates.size() && noteLockedStates[rowNoteIndex] != 0;
       const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(rowFilename).c_str(),
                                                        rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -
                                                            kDeleteButtonWidth - (vaultMode ? kLockButtonWidth : 0));
       const int textH = renderer.getLineHeight(UI_12_FONT_ID);
-      renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, rowRect.y + (rowRect.height - textH) / 2,
-                        title.c_str(), true);
-      drawRenameIcon(renderer, renameRect, true);
-      if (vaultMode && rowLocked) drawLockIcon(renderer, lockRect, true);
-      drawTrashIcon(renderer, deleteRect, true);
+      const int textY = rowRect.y + (rowRect.height - textH) / 2;
+      const int rowBaselineY = textY + renderer.getFontAscenderSize(UI_12_FONT_ID);
+      renderer.drawText(UI_12_FONT_ID, rowRect.x + kRowSidePadding, textY, title.c_str(), true);
+
+      auto artworkOnBaseline = [rowBaselineY](Rect rect, const int visualBottomFromCenter) {
+        const int currentVisualBottomY = rect.y + rect.height / 2 + visualBottomFromCenter;
+        rect.y += rowBaselineY - currentVisualBottomY;
+        return rect;
+      };
+      // Real visible bottoms relative to each action rectangle's center:
+      // pencil +11px, lock body +15px, trash can +10px.
+      drawRenameIcon(renderer, artworkOnBaseline(renameRect, 11), true);
+      if (vaultMode && rowLocked) drawLockIcon(renderer, artworkOnBaseline(lockRect, 15), true);
+      drawTrashIcon(renderer, artworkOnBaseline(deleteRect, 10), true);
     }
   }
 

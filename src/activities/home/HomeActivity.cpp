@@ -25,6 +25,7 @@
 #include "../reader/BookStatsActivity.h"
 #include "../reader/EpubReaderUtils.h"
 #include "MinesweeperActivity.h"
+#include "Game2048Activity.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -65,6 +66,7 @@ enum class HomeMenuAction {
   Bookmarks,
   Notes,
   Minesweeper,
+  Game2048,
   RssNews,
   FileTransfer,
   Settings,
@@ -77,7 +79,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 11;
+  static constexpr int kCapacity = 12;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -285,6 +287,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
 
   items.push({tr(STR_NOTES), NoteIcon, HomeMenuAction::Notes});
   items.push({"Demineur", MinesweeperIcon, HomeMenuAction::Minesweeper});
+  items.push({"2048", Chart, HomeMenuAction::Game2048});
   items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
@@ -312,6 +315,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
 
   items.push({tr(STR_NOTES), NoteIcon, HomeMenuAction::Notes});
   items.push({"Demineur", MinesweeperIcon, HomeMenuAction::Minesweeper});
+  items.push({"2048", Chart, HomeMenuAction::Game2048});
   items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   return items;
@@ -339,6 +343,8 @@ HomeMenuAction homeActionForInitialMenuItem(HomeMenuItem item) {
       return HomeMenuAction::FileTransfer;
     case HomeMenuItem::SETTINGS_MENU:
       return HomeMenuAction::Settings;
+    case HomeMenuItem::RSS_NEWS:
+      return HomeMenuAction::RssNews;
     case HomeMenuItem::NONE:
     default:
       return HomeMenuAction::ContinueReading;
@@ -608,7 +614,7 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
 
 int HomeActivity::getMenuItemCount() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
-  int count = 6;  // File Browser, Recents, Notes, Demineur, File transfer, Settings
+  int count = 7;  // File Browser, Recents, Notes, Demineur, 2048, File transfer, Settings
   if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     count += getVisibleRecentBookCount();
   } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -930,6 +936,18 @@ void HomeActivity::onEnter() {
     const int menuIndex = findMenuActionIndex(menuItems, homeActionForInitialMenuItem(initialMenuItem));
     if (menuIndex >= 0) {
       selectorIndex = getHomeMenuSelectionOffset(recentBooks) + menuIndex;
+    }
+
+    // Minimal/Dashboard Home normally hides its application list. A network
+    // reboot cannot preserve the previous Home instance on the activity stack,
+    // so explicitly reopen that list and restore the RSS selection.
+    if (usesMinimalHomeInteraction()) {
+      const auto minimalItems = buildMinimalMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings);
+      const int minimalIndex = findMenuActionIndex(minimalItems, homeActionForInitialMenuItem(initialMenuItem));
+      if (minimalIndex >= 0) {
+        minimalMenuOpen = true;
+        minimalMenuIndex = minimalIndex;
+      }
     }
   }
 
@@ -1563,6 +1581,9 @@ void HomeActivity::loop() {
           case HomeMenuAction::Minesweeper:
             onMinesweeperOpen();
             break;
+          case HomeMenuAction::Game2048:
+            onGame2048Open();
+            break;
           case HomeMenuAction::RssNews:
             onRssNewsOpen();
             break;
@@ -1827,6 +1848,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Minesweeper:
         onMinesweeperOpen();
+        break;
+      case HomeMenuAction::Game2048:
+        onGame2048Open();
         break;
       case HomeMenuAction::RssNews:
         onRssNewsOpen();
@@ -2367,6 +2391,10 @@ void HomeActivity::onNotesOpen() {
 
 void HomeActivity::onMinesweeperOpen() {
   startActivityForResult(std::make_unique<MinesweeperActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+
+void HomeActivity::onGame2048Open() {
+  startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput), [](const ActivityResult&) {});
 }
 
 void HomeActivity::onRssNewsOpen() {

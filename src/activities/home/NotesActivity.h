@@ -23,6 +23,7 @@ class NotesActivity final : public Activity {
 
   ButtonNavigator buttonNavigator;
   std::vector<std::string> notes;
+  std::vector<uint8_t> noteLockedStates;
   std::vector<size_t> filteredNotes;
   std::string searchQuery;
   int selectorIndex = 0;
@@ -41,9 +42,8 @@ class NotesActivity final : public Activity {
   void editNote(const std::string& path, const std::string& title);
   bool handleVaultSequenceStep(bool next);
   void promptVaultAccess();
-  void migrateLockedNotes();
   bool loadNote(const std::string& path, std::string& text) const;
-  bool noteContains(const std::string& path, const std::string& needle) const;
+  bool noteContains(const std::string& path, const std::string& needle, bool locked) const;
   bool saveNote(const std::string& path, const std::string& text) const;
   std::string uniquePathForTitle(const std::string& title) const;
   static std::string displayName(const std::string& filename);
