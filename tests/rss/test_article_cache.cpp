@@ -125,6 +125,32 @@ void htmlTests() {
   text = extract("<article><p>" + longBody + "</p><p>Avant<!-- parasite -->Apres.</p></article>");
   check(text.find("Avant Apres.") != std::string::npos, "removed HTML comment keeps a word boundary");
 
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p>bilan médical.<img src='apple.jpg'>© Apple suite.</p></article>");
+  check(text.find("bilan médical. © Apple suite.") != std::string::npos,
+        "discarded image keeps caption boundary after punctuation");
+
+  const std::string futuraCardTitle =
+      "À quel âge commence-t-on vraiment à vieillir ? Une étude de Stanford nous donne la réponse";
+  text = extract("<article><p>" + longBody +
+                 "</p><p>© Apple<a href='https://example.test/card'>" + futuraCardTitle +
+                 "</a>44 ans, 60 ans : deux moments clés.</p></article>");
+  check(text.find(std::string("© Apple ") + "\xEE\x80\x80" + futuraCardTitle) != std::string::npos &&
+            text.find(futuraCardTitle + std::string("\xEE\x80\x81") + " 44 ans, 60 ans") != std::string::npos,
+        "long Futura-style card link keeps boundaries on both sides");
+
+  text = extract("<article><p>" + longBody + "</p><p>Avant<a href='https://example.test/card'>" +
+                 futuraCardTitle + "</a>.Suite.</p></article>");
+  check(text.find(futuraCardTitle + std::string("\xEE\x80\x81") + ". Suite.") != std::string::npos,
+        "long card link keeps punctuation attached then separates following prose");
+
+  text = extract("<article><p>" + longBody +
+                 "</p><p>l'<a href='https://example.test/apple'>Apple</a> reste un lien inline.</p></article>");
+  check(text.find(std::string("l'") + "\xEE\x80\x80" + "Apple" + "\xEE\x80\x81" +
+                  " reste un lien inline.") != std::string::npos,
+        "short inline anchor keeps apostrophe grammar unchanged");
+
   bool ok = true;
   extract("<article><p>" + std::string(RC::MAX_TEXT_BYTES + 100, 'x') + "</p></article>", &ok);
   check(!ok, "text capacity is not successful extraction");
@@ -236,24 +262,24 @@ void cacheTests() {
   reset();
   const std::string path = RC::bodyPath(item);
   check(fetch(item) == RC::CacheResult::FALLBACK_READY, "network failure -> persisted summary fallback");
-  check(testFiles[path].rfind("XRSSF2\n", 0) == 0, "fallback has distinct SD marker");
+  check(testFiles[path].rfind("XRSSF3\n", 0) == 0, "fallback has current SD marker");
   check(RC::hasReadableBody(item) && !RC::hasCurrentBody(item), "fallback readable but not a full body");
   check(load(item, out) == RC::CacheResult::FALLBACK_READY && out == "Le resume du flux reste disponible.",
         "persisted summary fallback loads without RssItem history summary");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY, "manual retry replaces fallback with full body");
-  check(testFiles[path].rfind("XRSS12\n", 0) == 0, "full body keeps XRSS12 marker");
+  check(testFiles[path].rfind("XRSS13\n", 0) == 0, "full body keeps XRSS12 marker");
   check(load(item, out) == RC::CacheResult::READY && out.find("FIN_UTILE") != std::string::npos, "body loads");
   const auto cachedCalls = H::publicCalls;
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == cachedCalls, "valid full cache reused");
   check(RC::hasCurrentBody(item) && RC::hasReadableBody(item), "full body probes current/readable");
 
   reset();
-  testFiles[RC::bodyPath(item)] = "XRSS11\\nAncien corps de developpement";
-  check(!RC::hasCurrentBody(item) && !RC::hasReadableBody(item), "obsolete marker rejected");
+  testFiles[RC::bodyPath(item)] = "XRSS12\nAncien corps de developpement";
+  check(!RC::hasCurrentBody(item) && !RC::hasReadableBody(item), "previous body generation rejected");
   H::replies.push_back({page});
   check(fetch(item) == RC::CacheResult::READY && H::publicCalls == 1, "obsolete body invalidated and refetched");
-  check(testFiles[RC::bodyPath(item)].rfind("XRSS12\n", 0) == 0, "refetched full body version");
+  check(testFiles[RC::bodyPath(item)].rfind("XRSS13\n", 0) == 0, "refetched current full body version");
 
   reset();
   H::replies.push_back({"<article>trop court</article>"});
