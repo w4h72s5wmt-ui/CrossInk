@@ -47,7 +47,7 @@ jobs:
           git commit -m "fix(rss): match article scrollbar to list"
           git rm tools/x4_rss_scrollbar_width_candidate.py
           git checkout HEAD^ -- .github/workflows/notes-build.yml
-          git add .github/workflows/notes-build.yml tools/x4_rss_scrollbar_width_candidate.py
+          git add -A
           git commit --amend --no-edit
           git push --force-with-lease origin HEAD:x4-pro-rss-scrollbar2
 
