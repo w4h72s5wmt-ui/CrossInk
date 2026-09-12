@@ -309,13 +309,7 @@ CacheResult load(const RssItem& item, const char* sourceName, const char* dropRu
         outText.append(buffer, static_cast<size_t>(count));
       }
       file.close();
-      if (outText.size() == expected) {
-        if (!outText.empty()) {
-          const size_t cleaned = stripFigaroShareControls(&outText[0], outText.size(), item.link);
-          outText.resize(cleaned);
-        }
-        return CacheResult::READY;
-      }
+      if (outText.size() == expected) return CacheResult::READY;
     } else {
       file.close();
     }

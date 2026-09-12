@@ -343,8 +343,6 @@ HomeMenuAction homeActionForInitialMenuItem(HomeMenuItem item) {
       return HomeMenuAction::FileTransfer;
     case HomeMenuItem::SETTINGS_MENU:
       return HomeMenuAction::Settings;
-    case HomeMenuItem::RSS_NEWS:
-      return HomeMenuAction::RssNews;
     case HomeMenuItem::NONE:
     default:
       return HomeMenuAction::ContinueReading;
@@ -936,18 +934,6 @@ void HomeActivity::onEnter() {
     const int menuIndex = findMenuActionIndex(menuItems, homeActionForInitialMenuItem(initialMenuItem));
     if (menuIndex >= 0) {
       selectorIndex = getHomeMenuSelectionOffset(recentBooks) + menuIndex;
-    }
-
-    // Minimal/Dashboard Home normally hides its application list. A network
-    // reboot cannot preserve the previous Home instance on the activity stack,
-    // so explicitly reopen that list and restore the RSS selection.
-    if (usesMinimalHomeInteraction()) {
-      const auto minimalItems = buildMinimalMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings);
-      const int minimalIndex = findMenuActionIndex(minimalItems, homeActionForInitialMenuItem(initialMenuItem));
-      if (minimalIndex >= 0) {
-        minimalMenuOpen = true;
-        minimalMenuIndex = minimalIndex;
-      }
     }
   }
 

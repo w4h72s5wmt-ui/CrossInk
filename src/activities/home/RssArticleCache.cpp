@@ -19,7 +19,7 @@ namespace {
 constexpr char CACHE_DIR[] = "/.crosspoint/rss_articles";
 // Plain-text cache format marker. Bumping this invalidates old extracted text
 // after the cleaner changes, while keeping files human-readable on the SD card.
-constexpr char BODY_MAGIC[] = "XRSS10\n";
+constexpr char BODY_MAGIC[] = "XRSS11\n";
 constexpr size_t BODY_MAGIC_BYTES = sizeof(BODY_MAGIC) - 1;
 constexpr size_t MAX_HTML_BYTES = 1536U * 1024U;
 constexpr size_t MAX_TEXT_BYTES = 64U * 1024U;
@@ -699,6 +699,8 @@ std::string bodyPath(const RssItem& item) {
   std::snprintf(name, sizeof(name), "%s/%016llx.txt", CACHE_DIR, static_cast<unsigned long long>(hash));
   return name;
 }
+
+bool hasCurrentBody(const RssItem& item) { return bodyCacheIsCurrent(bodyPath(item)); }
 
 bool remove(const RssItem& item) {
   const std::string path = bodyPath(item);

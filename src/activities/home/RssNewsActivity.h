@@ -49,9 +49,9 @@ class RssNewsActivity final : public Activity {
     uint16_t historyLimit;
   };
 
-  // Keep the existing eight-feed memory ceiling: each source may preserve up
-  // to 100 offline articles and RssItem includes a large cached body. The SD
-  // configuration can contain fewer sources without increasing PSRAM usage.
+  // Hard safety ceilings stay fixed, but runtime buffers are sized from the
+  // active feeds.txt limits so small configurations do not reserve the full
+  // eight-feed / 100-item PSRAM envelope.
   static constexpr size_t MAX_SOURCES = 8;
   static constexpr size_t DEFAULT_SOURCE_COUNT = 6;
   static constexpr size_t ITEMS_PER_SOURCE = 100;
@@ -96,6 +96,8 @@ class RssNewsActivity final : public Activity {
   char* listMetaText = nullptr;
   uint16_t* displayOrder = nullptr;
   size_t articleCount = 0;
+  size_t articleCapacity = MAX_ARTICLES;
+  size_t feedItemCapacity = FEED_ITEM_CAPACITY;
   size_t articleLineOffset = 0;
   size_t articlePageLines = 8;
   size_t openArticleIndex = MAX_ARTICLES;
