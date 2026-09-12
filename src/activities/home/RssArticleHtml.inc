@@ -433,6 +433,7 @@ bool anchorBoundaryGluesBeforeSource(const char* html, const size_t length, cons
   }
   static constexpr const char* GLUE_ENTITIES[] = {
       "&apos;", "&rsquo;", "&#39;", "&#x27;", "&#8217;", "&#x2019;",
+      "&nbsp;", "&#32;", "&#x20;", "&#160;", "&#xa0;",
   };
   for (const char* entity : GLUE_ENTITIES) {
     if (startsWithInsensitive(html, length, pos, entity)) return true;
@@ -450,6 +451,40 @@ bool semanticInlineBoundaryTag(const char* name) {
          tagEquals(name, "time") || tagEquals(name, "abbr") || tagEquals(name, "cite");
 }
 
+bool inlineBoundaryGlueTag(const char* name) {
+  // These tags commonly decorate a word/value itself. Crossing them must not
+  // manufacture a word boundary (x<sup>2</sup>, H<sub>2</sub>O, ruby, ...).
+  return tagEquals(name, "sup") || tagEquals(name, "sub") || tagEquals(name, "wbr") ||
+         tagEquals(name, "ruby") || tagEquals(name, "rt") || tagEquals(name, "rp");
+}
+
+bool rawStructuralBoundaryTag(const char* name) {
+  // Strong structural fields may touch raw prose in source even though CSS
+  // renders them as separate cells/rows. Plain <span> is intentionally NOT in
+  // this list: <span>mot</span>s must remain "mots".
+  return tagEquals(name, "label") || tagEquals(name, "time") || tagEquals(name, "figcaption") ||
+         tagEquals(name, "figure") || tagEquals(name, "summary") || tagEquals(name, "data") ||
+         tagEquals(name, "output") || std::strchr(name, '-') != nullptr;
+}
+
+bool inlineRangeLooksPhrase(const char* text, const size_t begin, const size_t end) {
+  if (!text || begin >= end) return false;
+  bool hasVisible = false;
+  for (size_t i = begin; i < end; ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    if (text[i] == RSS_REMOVAL_BOUNDARY) continue;
+    if (std::isspace(c)) {
+      if (hasVisible) return true;
+      continue;
+    }
+    hasVisible = true;
+  }
+  size_t pos = end;
+  while (pos > begin && (text[pos - 1] == RSS_REMOVAL_BOUNDARY ||
+                         std::isspace(static_cast<unsigned char>(text[pos - 1])))) --pos;
+  return pos > begin && cleanupPunctuationNeedsFollowingSpace(text[pos - 1]);
+}
+
 bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {
   textLength = 0;
   if (!html || !text || htmlLength == 0) return false;
@@ -459,7 +494,11 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
   size_t anchorTextStart = 0;
   size_t anchorMarkerStart = 0;
   bool inAnchor = false;
-  bool closedSemanticInline = false;
+  bool pendingElementBoundary = false;
+  bool pendingRawBoundary = false;
+  static constexpr size_t INLINE_STACK_CAPACITY = 12;
+  size_t inlineStarts[INLINE_STACK_CAPACITY] = {};
+  size_t inlineDepth = 0;
   while (pos < end && textLength < MAX_TEXT_BYTES) {
     if (html[pos] == '<') {
       if (startsWithInsensitive(html, end, pos, "<!--")) {
@@ -475,18 +514,28 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
       if (tag.end == std::string::npos) break;
       const size_t next = tag.end + 1;
       if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
-        closedSemanticInline = false;
+        pendingElementBoundary = false;
+        pendingRawBoundary = false;
         pos = next;
         continue;
       }
       const bool semanticInline = semanticInlineBoundaryTag(tag.name);
-      if (!tag.closing && semanticInline && closedSemanticInline && !inAnchor && textLength > 0 &&
-          !anchorBoundaryGluesAfterText(text, textLength)) {
-        // Adjacent wrappers are commonly independent CSS cells despite having
-        // no literal whitespace in source: </span><strong>, </span><span>, …
-        appendRemovalBoundary(text, textLength);
+      const bool structuralInline = rawStructuralBoundaryTag(tag.name);
+      const bool glueTag = inlineBoundaryGlueTag(tag.name);
+      if (!tag.closing) {
+        // Keep a semantic seam alive through closing parent wrappers. This is
+        // the real-page case missed by the old immediate </span><span> rule:
+        // </span></data><data><span> must still separate the two cells.
+        if ((pendingElementBoundary || structuralInline) && !glueTag && !inAnchor && textLength > 0 &&
+            !anchorBoundaryGluesAfterText(text, textLength)) {
+          appendRemovalBoundary(text, textLength);
+        }
+        pendingElementBoundary = false;
+        pendingRawBoundary = false;
+        if (semanticInline && !tag.selfClosing && inlineDepth < INLINE_STACK_CAPACITY) {
+          inlineStarts[inlineDepth++] = textLength;
+        }
       }
-      if (!tag.closing) closedSemanticInline = false;
       if (!tag.closing && htmlRawText(tag.name)) {
         const size_t afterRemoved = skipHtmlRaw(html, end, tag);
         if (textLength > 0 && afterRemoved < end) appendRemovalBoundary(text, textLength);
@@ -541,7 +590,21 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
           inAnchor = false;
         }
       }
-      if (tag.closing && semanticInline && !inAnchor) closedSemanticInline = true;
+      if (tag.closing && !inAnchor && !tagEquals(tag.name, "a") && !glueTag &&
+          (semanticInline || structuralInline)) {
+        // Closing parents must not erase the fact that visible text just ended.
+        // For plain semantic wrappers, crossing into raw text is safe only when
+        // the wrapper contained a phrase or ended a sentence. This preserves
+        // <span>mot</span>s while fixing <span>dans une</span>éponge and
+        // <span>stable.</span>Le contraste.
+        bool phraseBoundary = false;
+        if (semanticInline && inlineDepth > 0) {
+          const size_t start = inlineStarts[--inlineDepth];
+          phraseBoundary = inlineRangeLooksPhrase(text, start, textLength);
+        }
+        pendingElementBoundary = true;
+        pendingRawBoundary = pendingRawBoundary || structuralInline || phraseBoundary;
+      }
       if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {
         appendLineBreak(text, textLength);
       } else if (tagEquals(tag.name, "li")) {
@@ -556,11 +619,23 @@ bool extractReadableText(const char* html, const size_t htmlLength, char* text, 
       continue;
     }
     if (html[pos] == '&') {
-      closedSemanticInline = false;
+      if (pendingRawBoundary && !inAnchor && textLength > 0 &&
+          !anchorBoundaryGluesAfterText(text, textLength) &&
+          !anchorBoundaryGluesBeforeSource(html, end, pos)) {
+        appendRemovalBoundary(text, textLength);
+      }
+      pendingElementBoundary = false;
+      pendingRawBoundary = false;
       pos = decodeEntityUtf8(html, end, pos, text, textLength);
       continue;
     }
-    closedSemanticInline = false;
+    if (pendingRawBoundary && !inAnchor && textLength > 0 &&
+        !anchorBoundaryGluesAfterText(text, textLength) &&
+        !anchorBoundaryGluesBeforeSource(html, end, pos)) {
+      appendRemovalBoundary(text, textLength);
+    }
+    pendingElementBoundary = false;
+    pendingRawBoundary = false;
     const unsigned char c = static_cast<unsigned char>(html[pos++]);
     if (htmlSpace(static_cast<char>(c))) appendSpace(text, textLength);
     else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));
