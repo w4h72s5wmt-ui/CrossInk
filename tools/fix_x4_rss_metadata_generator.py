@@ -34,15 +34,21 @@ if count != 1:
     raise SystemExit(f"generator cache-version anchor expected one match, got {count}")
 text = text.replace(old_version_anchor, actual_version_anchor, 1)
 
-# These checks live inside a Python raw string that emits C++ source. The C++
-# literal needs one backslash before n, not two literal backslashes.
+# Only the generated C++ tests are raw Python text. Keep production marker
+# anchors untouched and reduce doubled C++ backslashes inside the test block.
+test_start = text.find('replace_section(\n    "tests/rss/test_article_cache.cpp"')
+if test_start < 0:
+    raise SystemExit("generated cache-test block missing")
+prefix = text[:test_start]
+tests = text[test_start:]
 for marker in ("XRSSF1", "XRSS11"):
     old = f'{marker}\\\\n'
     new = f'{marker}\\n'
-    count = text.count(old)
+    count = tests.count(old)
     if count < 1:
         raise SystemExit(f"generated test marker escape missing: {marker}")
-    text = text.replace(old, new)
+    tests = tests.replace(old, new)
+text = prefix + tests
 
 path.write_text(text)
-print("Fixed candidate generator boundaries, cache-version anchor and marker assertions.")
+print("Fixed candidate generator boundaries, #259 anchor and test-only marker assertions.")
