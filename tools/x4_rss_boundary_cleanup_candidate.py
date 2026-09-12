@@ -2,8 +2,7 @@ from pathlib import Path
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
-    count = text.count(old)
-    if count < 1:
+    if old not in text:
         raise SystemExit(f"{label}: expected a match, found none")
     return text.replace(old, new, 1)
 
@@ -18,7 +17,8 @@ cache_path.write_text(cache)
 
 html_path = root / "src/activities/home/RssArticleHtml.inc"
 html = html_path.read_text()
-needle = '''bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {'''
+extract_signature = 'bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {'
+extract_at = html.index(extract_signature)
 helper = '''bool semanticInlineBoundaryTag(const char* name) {
   // Modern news templates often build flex/grid rows from adjacent inline
   // wrappers. We only separate sibling wrappers; ordinary inline emphasis is
@@ -29,19 +29,23 @@ helper = '''bool semanticInlineBoundaryTag(const char* name) {
          tagEquals(name, "time") || tagEquals(name, "abbr") || tagEquals(name, "cite");
 }
 
-bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {'''
-html = replace_once(html, needle, helper, "semantic inline helper")
-html = replace_once(html, '''  bool inAnchor = false;
+'''
+html = html[:extract_at] + helper + html[extract_at:]
+extract_at = html.index(extract_signature)
+prefix, body = html[:extract_at], html[extract_at:]
+body = replace_once(body, '''  size_t anchorMarkerStart = 0;
+  bool inAnchor = false;
   while (pos < end && textLength < MAX_TEXT_BYTES) {''',
-'''  bool inAnchor = false;
+'''  size_t anchorMarkerStart = 0;
+  bool inAnchor = false;
   bool closedSemanticInline = false;
   while (pos < end && textLength < MAX_TEXT_BYTES) {''', "inline sibling state")
-old_after_parse = '''      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
+body = replace_once(body, '''      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
         pos = next;
         continue;
       }
-'''
-new_after_parse = '''      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
+      if (!tag.closing && htmlRawText(tag.name)) {''',
+'''      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
         closedSemanticInline = false;
         pos = next;
         continue;
@@ -54,23 +58,20 @@ new_after_parse = '''      if (parseTagName(html, pos, tag.end, tag.name, sizeof
         appendRemovalBoundary(text, textLength);
       }
       if (!tag.closing) closedSemanticInline = false;
-'''
-html = replace_once(html, old_after_parse, new_after_parse, "detect adjacent inline siblings")
-old_anchor_end = '''          inAnchor = false;
+      if (!tag.closing && htmlRawText(tag.name)) {''', "detect adjacent inline siblings")
+body = replace_once(body, '''          inAnchor = false;
         }
       }
-      if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {'''
-new_anchor_end = '''          inAnchor = false;
+      if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {''',
+'''          inAnchor = false;
         }
       }
       if (tag.closing && semanticInline && !inAnchor) closedSemanticInline = true;
-      if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {'''
-html = replace_once(html, old_anchor_end, new_anchor_end, "remember closed inline sibling")
-html = replace_once(html, '''    if (html[pos] == '&') { pos = decodeEntityUtf8(html, end, pos, text, textLength); continue; }
+      if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {''', "remember closed inline sibling")
+body = replace_once(body, '''    if (html[pos] == '&') { pos = decodeEntityUtf8(html, end, pos, text, textLength); continue; }
     const unsigned char c = static_cast<unsigned char>(html[pos++]);
     if (htmlSpace(static_cast<char>(c))) appendSpace(text, textLength);
-    else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));
-''',
+    else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));''',
 '''    if (html[pos] == '&') {
       closedSemanticInline = false;
       pos = decodeEntityUtf8(html, end, pos, text, textLength);
@@ -79,9 +80,8 @@ html = replace_once(html, '''    if (html[pos] == '&') { pos = decodeEntityUtf8(
     closedSemanticInline = false;
     const unsigned char c = static_cast<unsigned char>(html[pos++]);
     if (htmlSpace(static_cast<char>(c))) appendSpace(text, textLength);
-    else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));
-''', "clear sibling state on source text")
-html_path.write_text(html)
+    else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));''', "clear sibling state on source text")
+html_path.write_text(prefix + body)
 
 test_path = root / "tests/rss/test_article_cache.cpp"
 test = test_path.read_text()
