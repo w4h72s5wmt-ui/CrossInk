@@ -1,0 +1,75 @@
+name: Missile Command SD Benchmark X4 Pro
+
+on:
+  push:
+    branches: [x4-pro-missile-304]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-x4-pro-missile-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CrossInk sources
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Apply Missile Command SD benchmark
+        run: python tools/missile_benchmark_sd.py
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-crossink-missile-benchmark-pio-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO Core
+        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
+      - name: Test RSS cache
+        run: sh tests/rss/run.sh
+
+      - name: Build X4 Pro Missile benchmark firmware
+        run: |
+          set -euo pipefail
+          pio run -e x4-pro-missile | tee pio-x4-pro-missile-benchmark.log
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-x4-pro-missile-benchmark-${{ github.run_number }}
+          path: .pio/build/x4-pro-missile/firmware-x4-pro.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: x4-pro-missile-benchmark-${{ github.run_number }}-log
+          path: pio-x4-pro-missile-benchmark.log
+          if-no-files-found: ignore
+
+      - name: Commit validated direct app sources
+        if: success()
+        run: |
+          rm tools/missile_benchmark_sd.py
+          git config user.name "CrossInk Builder"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/activities/home/MissileCommandActivity.cpp src/activities/home/MissileCommandActivity.h tools/missile_benchmark_sd.py
+          git commit -m "feat(missile): log synchronized frame benchmark to SD"
+          git push
