@@ -20,5 +20,18 @@ for label, signature in targets:
         raise SystemExit(f"generator duplicate signature missing before {label}: {signature}")
     text = text[:signature_pos] + text[signature_pos + len(signature):]
 
+old_version_anchor = '''  // V4 binds the binary article cache to the full feeds.txt configuration,
+  // including sync/history limits, so capacity changes invalidate metadata cleanly.
+  static constexpr uint16_t CACHE_VERSION = 4;
+'''
+actual_version_anchor = '''  // V4 binds the binary article cache to the current feeds.txt content so
+  // reordering/replacing sources can never relabel old articles incorrectly.
+  static constexpr uint16_t CACHE_VERSION = 4;
+'''
+count = text.count(old_version_anchor)
+if count != 1:
+    raise SystemExit(f"generator cache-version anchor expected one match, got {count}")
+text = text.replace(old_version_anchor, actual_version_anchor, 1)
+
 path.write_text(text)
-print("Fixed candidate generator section boundaries.")
+print("Fixed candidate generator boundaries and #259 cache-version anchor.")
