@@ -65,3 +65,5 @@ jobs:
           name: missile-game-a2-wave-scrub-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
+
+# trigger build after workflow creation
