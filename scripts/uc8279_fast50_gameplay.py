@@ -10,10 +10,14 @@ def replace_once(path: str, old: str, new: str) -> None:
 
 
 DRIVER = "freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.cpp"
+CPP = "src/activities/home/MissileCommandActivity.cpp"
 
 # Real-gameplay Stage F: use exactly the 50% stock pre-B/W waveform profile that
-# Stage E benchmarked successfully. No benchmark, no counter, no automatic
-# fallback: every post-baseline displayWindow() refresh uses this profile.
+# Stage E benchmarked successfully. No artificial display benchmark, no counter,
+# no automatic fallback: every post-baseline displayWindow() refresh uses this
+# profile. A lightweight cadence meter is injected in drawPlayingFrame(): it only
+# accumulates timestamps in RAM for 200 real gameplay frames, then writes one CSV.
+# It does not draw anything and therefore cannot enlarge the dirty window.
 #
 # Safety boundary is unchanged:
 #   - no PWR/VDCS/BTST writes
@@ -106,4 +110,72 @@ replace_once(
     '  // Keep DTM1 synchronized only inside the region that actually changed. Pixels\n',
 )
 
-print("UC8279 real-gameplay Fast50 waveform applied")
+# Measure real gameplay cadence between consecutive drawPlayingFrame() starts.
+# Because each render remains blocking/synchronous, this interval includes the
+# previous physical Fast50 refresh plus normal game-loop/render work: exactly the
+# effective frame cadence the player experiences. Only arithmetic occurs during
+# the first 200 samples. The file write happens after sample 200 is already
+# captured, and no later interval is included in the benchmark.
+bench = r'''void MissileCommandActivity::drawPlayingFrame() {
+  {
+    static int64_t benchLastFrameStartUs = 0;
+    static uint32_t benchSamples = 0;
+    static uint64_t benchSumCycleUs = 0;
+    static uint32_t benchMinCycleUs = 0xFFFFFFFFu;
+    static uint32_t benchMaxCycleUs = 0;
+    static bool benchSaved = false;
+
+    const int64_t benchNowUs = esp_timer_get_time();
+    if (!benchSaved && benchLastFrameStartUs != 0) {
+      const int64_t rawCycleUs = benchNowUs - benchLastFrameStartUs;
+      if (rawCycleUs > 0 && rawCycleUs < 2000000) {
+        const uint32_t cycleUs = static_cast<uint32_t>(rawCycleUs);
+        benchSumCycleUs += cycleUs;
+        if (cycleUs < benchMinCycleUs) benchMinCycleUs = cycleUs;
+        if (cycleUs > benchMaxCycleUs) benchMaxCycleUs = cycleUs;
+        ++benchSamples;
+
+        if (benchSamples >= 200) {
+          benchSaved = true;
+          const uint32_t avgCycleUs = static_cast<uint32_t>(benchSumCycleUs / benchSamples);
+          const uint32_t fpsX1000 = avgCycleUs != 0
+              ? static_cast<uint32_t>(1000000000ULL / avgCycleUs)
+              : 0;
+          FsFile file;
+          if (Storage.openFileForWrite("MISSILE-FAST50-BENCH",
+                                       "/missile-command-fast50-gameplay-bench.csv", file)) {
+            const char header[] = "profile,samples,avg_cycle_us,min_cycle_us,max_cycle_us,fps_x1000\n";
+            file.write(reinterpret_cast<const uint8_t*>(header), sizeof(header) - 1);
+            char line[128];
+            const int n = std::snprintf(line, sizeof(line),
+                                        "fast50,%lu,%lu,%lu,%lu,%lu\n",
+                                        static_cast<unsigned long>(benchSamples),
+                                        static_cast<unsigned long>(avgCycleUs),
+                                        static_cast<unsigned long>(benchMinCycleUs),
+                                        static_cast<unsigned long>(benchMaxCycleUs),
+                                        static_cast<unsigned long>(fpsX1000));
+            if (n > 0) file.write(reinterpret_cast<const uint8_t*>(line), static_cast<size_t>(n));
+            file.close();
+          }
+        }
+      } else if (rawCycleUs >= 2000000) {
+        // A long menu/game-over pause is not gameplay. Restart the sample window
+        // instead of contaminating the average when a new round begins.
+        benchSamples = 0;
+        benchSumCycleUs = 0;
+        benchMinCycleUs = 0xFFFFFFFFu;
+        benchMaxCycleUs = 0;
+      }
+    }
+    benchLastFrameStartUs = benchNowUs;
+  }
+
+  const GameGeometry geometry = gameGeometry(renderer, mappedInput);
+'''
+replace_once(
+    CPP,
+    "void MissileCommandActivity::drawPlayingFrame() {\n  const GameGeometry geometry = gameGeometry(renderer, mappedInput);\n",
+    bench,
+)
+
+print("UC8279 real-gameplay Fast50 waveform + 200-frame cadence benchmark applied")
