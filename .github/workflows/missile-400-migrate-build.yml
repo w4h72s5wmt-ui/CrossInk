@@ -1,4 +1,4 @@
-name: Missile 400x240 UC8279 X4 Pro
+name: Missile 600x320 UC8279 X4 Pro
 
 on:
   push:
@@ -33,12 +33,12 @@ jobs:
           path: |
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: ${{ runner.os }}-crossink-missile-400-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
+          key: ${{ runner.os }}-crossink-missile-600-pio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
 
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
-      - name: Migrate Missile app to physical 400x240 viewport
+      - name: Migrate Missile app to physical 600x320 viewport
         run: python scripts/migrate_missile_400.py
 
       - name: Apply UC8279 Stage B driver patch
@@ -50,12 +50,12 @@ jobs:
       - name: Build X4 Pro firmware
         run: |
           set -euo pipefail
-          pio run -e x4-pro | tee pio-x4-pro-missile-400.log
+          pio run -e x4-pro | tee pio-x4-pro-missile-600.log
 
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v7
         with:
-          name: missile-400x240-${{ github.run_number }}
+          name: missile-600x320-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware-x4-pro.bin
           if-no-files-found: error
 
@@ -63,6 +63,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: missile-400x240-${{ github.run_number }}-log
-          path: pio-x4-pro-missile-400.log
+          name: missile-600x320-${{ github.run_number }}-log
+          path: pio-x4-pro-missile-600.log
           if-no-files-found: ignore
