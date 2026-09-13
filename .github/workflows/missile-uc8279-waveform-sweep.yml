@@ -1,0 +1,67 @@
+name: Missile UC8279 Waveform Sweep X4 Pro
+
+on:
+  push:
+    branches:
+      - x4-pro-missile-uc8279-lut-sweep
+  workflow_dispatch:
+
+jobs:
+  build-x4-pro:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CrossInk sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Run actions/setup-python@v6
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'uv.lock', 'pyproject.toml') }}
+
+      - name: Install PlatformIO Core
+        run: uv tool install platformio
+
+      - name: Apply Stage B window transfer patch
+        run: python scripts/uc8279_window_benchmark_patch.py
+
+      - name: Preserve stable Missile gameplay timing
+        run: python scripts/missile_stageb_gameplay_fix.py
+
+      - name: Apply Stage E waveform sweep
+        run: python scripts/uc8279_waveform_sweep.py
+
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
+      - name: Build X4 Pro firmware
+        run: pio run -e x4-pro 2>&1 | tee build-x4-pro.log
+
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: missile-uc8279-waveform-sweep-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: missile-uc8279-waveform-sweep-${{ github.run_number }}-log
+          path: build-x4-pro.log
+          if-no-files-found: ignore
