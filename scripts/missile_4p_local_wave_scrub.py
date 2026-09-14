@@ -53,7 +53,6 @@ replace_once(
 
 facade_impl = r'''void FreeInkDisplay::displayScrubWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                                         bool turnOffScreen) {
-  cancelGrayscalePass();
   if (_inverted || _inversionDirty) {
     displayBuffer(HALF_REFRESH, turnOffScreen);
     return;
