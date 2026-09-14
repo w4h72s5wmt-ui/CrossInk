@@ -1,0 +1,76 @@
+name: Missile GAME-A2 Lite PLL0F Trail64 Fade Menu Scrub X4 Pro
+
+on:
+  push:
+    branches:
+      - x4-pro-missile-a2-lite-pll0f-trail64-fade-menu-scrub
+
+jobs:
+  build-x4-pro:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CrossInk sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Run actions/setup-python@v6
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO Core
+        run: uv tool install platformio
+
+      - name: Apply Stage B window transfer patch
+        run: python scripts/uc8279_window_benchmark_patch.py
+
+      - name: Preserve stable Missile gameplay timing
+        run: python scripts/missile_stageb_gameplay_fix.py
+
+      - name: Apply Fast40 Hybrid-A waveform and benchmark
+        run: python scripts/uc8279_fast40_hybrid_a.py
+
+      - name: Apply GAME-A2 Lite transition-only waveform and wave scrub
+        run: python scripts/uc8279_game_a2_lite_wave_scrub.py
+
+      - name: Apply temporary dirty-window PLL 0x0F
+        run: python scripts/uc8279_game_a2_lite_pll0f.py
+
+      - name: Apply Trail64 clipping and cleanup base
+        run: python scripts/missile_trail64_clip_exit_scrub.py
+
+      - name: Apply Trail64 fade menu scrub lifecycle fix
+        run: python scripts/missile_trail64_fade_menu_scrub_fix.py
+
+      - name: Clean X4 Pro build output
+        run: pio run -e x4-pro -t clean
+
+      - name: Build X4 Pro firmware
+        run: pio run -e x4-pro | tee build-x4-pro.log
+
+      - name: Upload X4 Pro firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: missile-game-a2-lite-pll0f-trail64-fade-menu-scrub-${{ github.run_number }}
+          path: .pio/build/x4-pro/firmware.bin
+          if-no-files-found: error
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        with:
+          name: missile-game-a2-lite-pll0f-trail64-fade-menu-scrub-${{ github.run_number }}-log
+          path: build-x4-pro.log
+          if-no-files-found: error
