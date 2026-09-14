@@ -1,9 +1,9 @@
-name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD Baseline X4 Pro
+name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 X4 Pro
 
 on:
   push:
     branches:
-      - x4-pro-missile-a2-lite-pll0f-sparse-trail64-fade-header-hud-baseline
+      - x4-pro-missile-a2-lite-pll0f-sparse-trail64-fade-header-hud-opt12
 
 jobs:
   build-x4-pro:
@@ -16,6 +16,9 @@ jobs:
           fetch-depth: 1
 
       - name: Run actions/setup-python@v6
+        uses: actions/checkout@v4
+        if: false
+      - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -79,6 +82,9 @@ jobs:
       - name: Align Vague/Villes to title baseline
         run: python scripts/missile_header_baseline_align.py
 
+      - name: Apply OPT12 sparse DTM1 and spatial Bayer
+        run: python scripts/missile_opt12_sparse_dtm1_bayer.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
@@ -88,13 +94,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-header-hud-baseline-${{ github.run_number }}
+          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-header-hud-opt12-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-header-hud-baseline-${{ github.run_number }}-log
+          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-header-hud-opt12-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
