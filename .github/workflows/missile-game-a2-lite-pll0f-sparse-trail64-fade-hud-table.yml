@@ -70,6 +70,9 @@ jobs:
       - name: Clean header alignment and update cities per wave only
         run: python scripts/missile_header_hud_clean_wave_city.py
 
+      - name: Reserve visible header counter lane
+        run: python scripts/missile_header_hud_reserved_meta_fix.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
