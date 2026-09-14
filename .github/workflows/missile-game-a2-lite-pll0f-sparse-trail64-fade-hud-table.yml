@@ -1,9 +1,9 @@
-name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade HUD Table X4 Pro
+name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD X4 Pro
 
 on:
   push:
     branches:
-      - x4-pro-missile-a2-lite-pll0f-sparse-trail64-fade-hud-table
+      - x4-pro-missile-a2-lite-pll0f-sparse-trail64-fade-header-hud
 
 jobs:
   build-x4-pro:
@@ -64,6 +64,9 @@ jobs:
       - name: Apply fixed-cell HUD table
         run: python scripts/missile_sparse_trail64_hud_table.py
 
+      - name: Move wave/cities to header and keep Score/Record below
+        run: python scripts/missile_header_score_record_hud.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
@@ -73,13 +76,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-hud-table-${{ github.run_number }}
+          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-header-hud-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-hud-table-${{ github.run_number }}-log
+          name: missile-game-a2-lite-pll0f-sparse-trail64-fade-header-hud-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
