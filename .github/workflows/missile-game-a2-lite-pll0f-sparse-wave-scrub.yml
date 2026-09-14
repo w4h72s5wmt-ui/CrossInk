@@ -52,6 +52,9 @@ jobs:
       - name: Apply sparse-DTM tiled upload and menu scrub
         run: python scripts/uc8279_game_a2_lite_sparse_dtm.py
 
+      - name: Apply pinned-SDK sparse compile fix
+        run: python scripts/uc8279_sparse_compile_fix.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
