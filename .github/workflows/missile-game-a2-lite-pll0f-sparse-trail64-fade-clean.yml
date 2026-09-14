@@ -55,8 +55,11 @@ jobs:
       - name: Apply pinned-SDK sparse compile fix
         run: python scripts/uc8279_sparse_compile_fix.py
 
-      - name: Apply Trail64 fade clipping and exit scrub
+      - name: Apply Trail64 fade clipping
         run: python scripts/missile_sparse_trail64_fade_clean.py
+
+      - name: Restore normal app exit and scrub only on game-menu return
+        run: python scripts/missile_menu_scrub_exit_normal_fix.py
 
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
