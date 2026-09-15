@@ -1,4 +1,4 @@
-name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode X4 Pro
+name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode2 X4 Pro
 
 on:
   push:
@@ -103,6 +103,9 @@ jobs:
       - name: Apply three-base gameplay mode
         run: python scripts/missile_base_mode.py
 
+      - name: Apply BaseMode2 menu/save/explosion cleanup
+        run: python scripts/missile_basemode_cleanup.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
@@ -112,13 +115,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode-${{ github.run_number }}
+          name: missile-profile1-entryhalf-explosion2-basemode2-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode-${{ github.run_number }}-log
+          name: missile-profile1-entryhalf-explosion2-basemode2-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
