@@ -40,7 +40,7 @@ c = replace_once(
     c,
     "constexpr uint32_t EXP_ROT_STEP_US = 120000;\n",
     "constexpr uint32_t EXP_ROT_STEP_US = 120000;\n"
-    "constexpr uint32_t EXP_REAL_SHAPE_STEP_US = 220000;\n"
+    "constexpr uint32_t EXP_REAL_SHAPE_STEP_US = 190000;\n"
     "constexpr uint8_t EXP_REAL_OFFSET_COUNT = 8;\n",
     "realistic explosion timing",
 )
@@ -60,10 +60,10 @@ c = replace_once(
     "}\n\n"
     "uint8_t explosionRotationIndex(uint32_t ageUs, uint8_t seed) {\n",
     "  // Precalculate subtle visual centre motion as a function of radius. At\n"
-    "  // max radius the displacement is only ~1-3 px, and naturally tends to\n"
+    "  // max radius the displacement reaches ~6-8 px and naturally tends to\n"
     "  // zero for the smallest explosion frames.\n"
-    "  constexpr int16_t offsetXQ10[EXP_REAL_OFFSET_COUNT] = {0, 57, -57, 85, -85, 28, -28, 57};\n"
-    "  constexpr int16_t offsetYQ10[EXP_REAL_OFFSET_COUNT] = {0, -57, 57, 28, -28, 85, -85, 57};\n"
+    "  constexpr int16_t offsetXQ10[EXP_REAL_OFFSET_COUNT] = {0, 171, -171, 228, -228, 114, -114, 200};\n"
+    "  constexpr int16_t offsetYQ10[EXP_REAL_OFFSET_COUNT] = {0, -143, 143, 114, -114, 228, -228, 171};\n"
     "  for (uint8_t stage = 0; stage < EXP_REAL_OFFSET_COUNT; ++stage) {\n"
     "    for (int radius = EXPLOSION_MIN_RADIUS; radius <= EXPLOSION_MAX_RADIUS; ++radius) {\n"
     "      expOffsetCache[stage][radius] = {\n"
@@ -78,7 +78,7 @@ c = replace_once(
 )
 
 old_shape_fn = '''uint8_t explosionShapeIndex(uint8_t seed) {\n  return static_cast<uint8_t>((seed >> 4) % EXP_SHAPE_COUNT);\n}\n'''
-new_shape_fn = '''uint8_t explosionBaseShape(uint8_t seed) {\n  const uint8_t shape = static_cast<uint8_t>((seed >> 4) & 0x03u);\n  return static_cast<uint8_t>(shape % EXP_SHAPE_COUNT);\n}\n\nuint8_t explosionShapeIndex(uint32_t ageUs, uint8_t seed, bool realistic) {\n  const uint8_t base = explosionBaseShape(seed);\n  if (!realistic) return base;\n  const uint8_t step = static_cast<uint8_t>((ageUs / EXP_REAL_SHAPE_STEP_US) % EXP_SHAPE_COUNT);\n  if ((seed & 0x80u) != 0)\n    return static_cast<uint8_t>((base + EXP_SHAPE_COUNT - step) % EXP_SHAPE_COUNT);\n  return static_cast<uint8_t>((base + step) % EXP_SHAPE_COUNT);\n}\n\nExpPt explosionVisualOffset(uint32_t ageUs, uint8_t seed, int radius, bool realistic) {\n  if (!realistic) return ExpPt{};\n  const int cr = std::clamp(radius, EXPLOSION_MIN_RADIUS, EXPLOSION_MAX_RADIUS);\n  const uint8_t start = static_cast<uint8_t>(((seed & 0x07u) + (((seed >> 6) & 0x01u) * 3u)) & 0x07u);\n  const uint8_t step = static_cast<uint8_t>((ageUs / EXP_REAL_SHAPE_STEP_US) & 0x07u);\n  const uint8_t stage = (seed & 0x08u) != 0\n                            ? static_cast<uint8_t>((start + EXP_REAL_OFFSET_COUNT - step) & 0x07u)\n                            : static_cast<uint8_t>((start + step) & 0x07u);\n  return expOffsetCache[stage][cr];\n}\n'''
+new_shape_fn = '''uint8_t explosionBaseShape(uint8_t seed) {\n  const uint8_t shape = static_cast<uint8_t>((seed >> 4) & 0x03u);\n  return static_cast<uint8_t>(shape % EXP_SHAPE_COUNT);\n}\n\nuint8_t explosionShapeIndex(uint32_t ageUs, uint8_t seed, bool realistic) {\n  const uint8_t base = explosionBaseShape(seed);\n  if (!realistic) return base;\n\n  // Eight random-looking morph profiles. Adjacent states never repeat, so the\n  // pentagon / hexagon / octagon change is visible inside each explosion.\n  constexpr uint8_t shapeProfiles[8][8] = {\n      {0, 1, 2, 1, 0, 2, 0, 1}, {1, 0, 2, 0, 1, 2, 1, 0},\n      {2, 0, 1, 0, 2, 1, 2, 0}, {0, 2, 1, 2, 0, 1, 0, 2},\n      {1, 2, 0, 2, 1, 0, 1, 2}, {2, 1, 0, 1, 2, 0, 2, 1},\n      {0, 1, 0, 2, 1, 2, 0, 2}, {2, 0, 2, 1, 0, 1, 2, 1},\n  };\n  const uint8_t stage = static_cast<uint8_t>((ageUs / EXP_REAL_SHAPE_STEP_US) & 0x07u);\n  const uint8_t profile = static_cast<uint8_t>((seed >> 5) & 0x07u);\n  return static_cast<uint8_t>((base + shapeProfiles[profile][stage]) % EXP_SHAPE_COUNT);\n}\n\nExpPt explosionVisualOffset(uint32_t ageUs, uint8_t seed, int radius, bool realistic) {\n  if (!realistic) return ExpPt{};\n  const int cr = std::clamp(radius, EXPLOSION_MIN_RADIUS, EXPLOSION_MAX_RADIUS);\n  const uint8_t start = static_cast<uint8_t>(seed & 0x07u);\n  const uint8_t step = static_cast<uint8_t>((ageUs / EXP_REAL_SHAPE_STEP_US) & 0x07u);\n  const uint8_t stride = (seed & 0x40u) != 0 ? 5u : 3u;\n  const uint8_t travel = static_cast<uint8_t>((step * stride) & 0x07u);\n  const uint8_t stage = (seed & 0x08u) != 0\n                            ? static_cast<uint8_t>((start + EXP_REAL_OFFSET_COUNT - travel) & 0x07u)\n                            : static_cast<uint8_t>((start + travel) & 0x07u);\n  return expOffsetCache[stage][cr];\n}\n'''
 c = replace_once(c, old_shape_fn, new_shape_fn, "dynamic shape/offset helpers")
 
 old_spawn = '''    const uint32_t explosionRnd = esp_random();\n    const uint8_t shape = static_cast<uint8_t>((explosionRnd >> 4) % EXP_SHAPE_COUNT);\n    explosion.phase = static_cast<uint8_t>((explosionRnd & 0x07u) | (((explosionRnd >> 3) & 0x01u) << 3) |\n                                           (shape << 4));\n    explosion.phaseElapsedUs = 0;\n'''
@@ -98,7 +98,7 @@ new_activate = '''  if (row == 3) {\n    baseMode_ = !baseMode_;\n    syncCurren
 c = replace_once(c, old_activate, new_activate, "realistic menu activation")
 
 old_items = '''  items[3].label = "Mode bases";\n  items[3].value = nullptr;\n  items[3].actionValue = 3;\n\n  items[4].label = "Continuer";\n  if (hasSavedGame_) {\n    std::snprintf(continueValue_.data(), continueValue_.size(), "Vague %u - %lu pts",\n                  static_cast<unsigned>(wave_), static_cast<unsigned long>(score_));\n    items[4].value = continueValue_.data();\n  } else {\n    items[4].value = "Aucune partie";\n  }\n  items[4].actionValue = 4;\n\n  items[5].label = "Nouvelle partie";\n  items[5].value = DIFFICULTY_LABELS[difficulty_];\n  items[5].actionValue = 5;\n'''
-new_items = '''  items[3].label = "Mode bases";\n  items[3].value = nullptr;\n  items[3].actionValue = 3;\n\n  items[4].label = "Explosions réalistes";\n  items[4].value = nullptr;\n  items[4].actionValue = 4;\n\n  items[5].label = "Continuer";\n  if (hasSavedGame_) {\n    std::snprintf(continueValue_.data(), continueValue_.size(), "Vague %u - %lu pts",\n                  static_cast<unsigned>(wave_), static_cast<unsigned long>(score_));\n    items[5].value = continueValue_.data();\n  } else {\n    items[5].value = "Aucune partie";\n  }\n  items[5].actionValue = 5;\n\n  items[6].label = "Nouvelle partie";\n  items[6].value = DIFFICULTY_LABELS[difficulty_];\n  items[6].actionValue = 6;\n'''
+new_items = '''  items[3].label = "Mode bases";\n  items[3].value = nullptr;\n  items[3].actionValue = 3;\n\n  items[4].label = "Explosions réalistes";\n  items[4].value = nullptr;\n  items[4].actionValue = 4;\n\n  items[5].label = "";\n  if (hasSavedGame_) {\n    std::snprintf(continueValue_.data(), continueValue_.size(), "Vague %u - %lu pts",\n                  static_cast<unsigned>(wave_), static_cast<unsigned long>(score_));\n    items[5].value = nullptr;\n  } else {\n    items[5].value = nullptr;\n  }\n  items[5].actionValue = 5;\n\n  items[6].label = "";\n  items[6].value = nullptr;\n  items[6].actionValue = 6;\n'''
 c = replace_once(c, old_items, new_items, "realistic menu row")
 
 c = replace_once(
@@ -120,6 +120,10 @@ c = replace_once(c, "    if (itemIndex != 4 && itemIndex != 5) continue;\n",
                  "    if (itemIndex != 5 && itemIndex != 6) continue;\n", "action rows")
 c = replace_once(c, "    if (itemIndex == 4 && !hasSavedGame_) {\n",
                  "    if (itemIndex == 5 && !hasSavedGame_) {\n", "disabled Continue")
+
+old_action_loop = '''  for (int visible = 0; visible < drawnRows; ++visible) {\n    const int itemIndex = topIndex_ + visible;\n    if (itemIndex != 5 && itemIndex != 6) continue;\n    const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;\n    const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;\n    const int actionY = rowTop + actionInsetY;\n    const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);\n    renderer.drawRoundedRect(actionX, actionY, actionWidth, actionHeight, 1, 6, true);\n    if (itemIndex == 5 && !hasSavedGame_) {\n      for (int y = actionY; y < actionY + actionHeight; y += 2) {\n        renderer.fillRect(actionX, y, actionWidth, 1, false);\n      }\n    }\n  }\n'''
+new_action_loop = '''  for (int visible = 0; visible < drawnRows; ++visible) {\n    const int itemIndex = topIndex_ + visible;\n    if (itemIndex != 5 && itemIndex != 6) continue;\n    const int rowTop = listBounds.y + listBounds.height * visible / drawnRows;\n    const int rowBottom = listBounds.y + listBounds.height * (visible + 1) / drawnRows;\n    const int actionY = rowTop + actionInsetY;\n    const int actionHeight = std::max(1, rowBottom - rowTop - 2 * actionInsetY);\n    renderer.drawRoundedRect(actionX, actionY, actionWidth, actionHeight, 1, 6, true);\n    if (itemIndex == 5 && !hasSavedGame_) {\n      for (int y = actionY; y < actionY + actionHeight; y += 2)\n        renderer.fillRect(actionX, y, actionWidth, 1, false);\n    }\n\n    const char* actionLabel = itemIndex == 5 ? "Continuer" : "Nouvelle partie";\n    const char* actionValue = itemIndex == 5\n                                  ? (hasSavedGame_ ? continueValue_.data() : "Aucune partie")\n                                  : DIFFICULTY_LABELS[difficulty_];\n    const int textH = renderer.getLineHeight(UI_10_FONT_ID);\n    const int textY = actionY + std::max(0, (actionHeight - textH) / 2);\n    renderer.drawText(UI_10_FONT_ID, actionX + 10, textY, actionLabel);\n    if (actionValue && actionValue[0] != '\\0') {\n      const int valueW = renderer.getTextWidth(UI_10_FONT_ID, actionValue);\n      renderer.drawText(UI_10_FONT_ID, actionX + actionWidth - 10 - valueW, textY, actionValue);\n    }\n  }\n'''
+c = replace_once(c, old_action_loop, new_action_loop, "vertically centered action text")
 
 # ---------------------------------------------------------------------------
 # Strict v3 save: add the Realistic Explosions flag. No legacy compatibility.
