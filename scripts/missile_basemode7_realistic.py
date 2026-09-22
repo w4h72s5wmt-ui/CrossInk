@@ -86,7 +86,7 @@ new_spawn = '''    const uint32_t explosionRnd = esp_random();\n    const uint8_
 c = replace_once(c, old_spawn, new_spawn, "realistic explosion seed")
 
 old_draw = '''      drawExplosionClipped(renderer, explosionClip, explosion.x, explosion.y, explosionRadius(explosion.phaseElapsedUs),\n                           explosionRotationIndex(explosion.phaseElapsedUs, explosion.phase),\n                           explosionShapeIndex(explosion.phase));\n'''
-new_draw = '''      const int explosionR = explosionRadius(explosion.phaseElapsedUs);\n      const ExpPt visualOffset =\n          explosionVisualOffset(explosion.phaseElapsedUs, explosion.phase, explosionR, realisticExplosions_);\n      drawExplosionClipped(renderer, explosionClip, explosion.x + visualOffset.x, explosion.y + visualOffset.y, explosionR,\n                           explosionRotationIndex(explosion.phaseElapsedUs, explosion.phase),\n                           explosionShapeIndex(explosion.phaseElapsedUs, explosion.phase, realisticExplosions_));\n'''
+new_draw = '''      {\n        const int explosionR = explosionRadius(explosion.phaseElapsedUs);\n        const ExpPt visualOffset =\n            explosionVisualOffset(explosion.phaseElapsedUs, explosion.phase, explosionR, realisticExplosions_);\n        drawExplosionClipped(renderer, explosionClip, explosion.x + visualOffset.x, explosion.y + visualOffset.y, explosionR,\n                             explosionRotationIndex(explosion.phaseElapsedUs, explosion.phase),\n                             explosionShapeIndex(explosion.phaseElapsedUs, explosion.phase, realisticExplosions_));\n      }\n'''
 c = replace_once(c, old_draw, new_draw, "realistic explosion draw")
 
 # ---------------------------------------------------------------------------
