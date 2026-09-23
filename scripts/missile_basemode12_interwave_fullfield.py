@@ -322,8 +322,10 @@ begin_wave = r'''void MissileCommandActivity::beginPreparedWave() {
 }
 
 '''
-tick_sig = "void MissileCommandActivity::tickGame(int64_t nowUs) {"
-idx = cpp.find(tick_sig)
+# Insert before tickGame regardless of the exact timing signature produced by
+# earlier gameplay-timing patches.
+tick_marker = "void MissileCommandActivity::tickGame("
+idx = cpp.find(tick_marker)
 if idx < 0:
     raise SystemExit("tickGame insertion point not found")
 cpp = cpp[:idx] + begin_wave + cpp[idx:]
