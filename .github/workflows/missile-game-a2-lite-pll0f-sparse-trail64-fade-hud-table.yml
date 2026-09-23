@@ -1,9 +1,9 @@
-name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode14 PopupLocalRefresh X4 Pro
+name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode15 InterWaveStatsPrep X4 Pro
 
 on:
   push:
     branches:
-      - x4-pro-missile-profile1-entryhalf-explosion2-basemode14-popup-local-refresh
+      - x4-pro-missile-profile1-entryhalf-explosion2-basemode15-interwave-stats-prep
 
 jobs:
   build-x4-pro:
@@ -139,6 +139,9 @@ jobs:
       - name: Apply BaseMode14 popup local refresh
         run: python scripts/missile_basemode14_popup_local_refresh.py
 
+      - name: Apply BaseMode15 inter-wave stats and preparation
+        run: python scripts/missile_basemode15_interwave_stats_prep.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
@@ -148,13 +151,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode14-popup-local-refresh-${{ github.run_number }}
+          name: missile-profile1-entryhalf-explosion2-basemode15-interwave-stats-prep-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode14-popup-local-refresh-${{ github.run_number }}-log
+          name: missile-profile1-entryhalf-explosion2-basemode15-interwave-stats-prep-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
