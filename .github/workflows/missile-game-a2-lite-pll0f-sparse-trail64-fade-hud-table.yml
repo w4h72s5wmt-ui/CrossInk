@@ -1,9 +1,9 @@
-name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode11 AmmoGauge X4 Pro
+name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode12 InterWave FullField X4 Pro
 
 on:
   push:
     branches:
-      - x4-pro-missile-profile1-entryhalf-explosion2-basemode11-ammo-gauge
+      - x4-pro-missile-profile1-entryhalf-explosion2-basemode12-interwave-fullfield
 
 jobs:
   build-x4-pro:
@@ -130,6 +130,9 @@ jobs:
       - name: Apply BaseMode11 turret ammo gauge
         run: python scripts/missile_basemode11_ammo_gauge.py
 
+      - name: Apply BaseMode12 inter-wave summary and full-height field
+        run: python scripts/missile_basemode12_interwave_fullfield.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
@@ -139,13 +142,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode11-ammo-gauge-${{ github.run_number }}
+          name: missile-profile1-entryhalf-explosion2-basemode12-interwave-fullfield-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode11-ammo-gauge-${{ github.run_number }}-log
+          name: missile-profile1-entryhalf-explosion2-basemode12-interwave-fullfield-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
