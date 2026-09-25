@@ -46,6 +46,10 @@ class KeyboardEntryActivity : public Activity {
   virtual int headerActionReserveWidth() const { return 0; }
   virtual void drawHeaderAction() {}
 
+  // App-local editors may disable prediction without changing the default
+  // keyboard behavior for the rest of CrossInk.
+  virtual bool predictiveEnabled() const;
+
  private:
   std::string title;
   std::string text;
@@ -137,7 +141,6 @@ class KeyboardEntryActivity : public Activity {
   bool backspaceUtf8();
   static size_t utf8Prev(const std::string& s, size_t pos);
   static size_t utf8Next(const std::string& s, size_t pos);
-  bool predictiveEnabled() const;
   freeink::ui::Rect predictiveBarRect() const;
 
   freeink::ui::Rect keyboardRect() const;
