@@ -2,6 +2,7 @@
 
 #include <BidiUtils.h>
 #include <HalGPIO.h>
+#include <HalDisplay.h>
 #include <I18n.h>
 
 #include <algorithm>
@@ -166,6 +167,49 @@ void KeyboardEntryActivity::onExit() {
 }
 
 bool KeyboardEntryActivity::predictiveEnabled() const { return inputType == InputType::Multiline; }
+
+bool KeyboardEntryActivity::canUseFastTypingWindow(const int16_t value, const bool longPress) const {
+  if (cursorMode || longPress || shifted) return false;
+  if (value == fui::QWERTY_KEY_SHIFT || value == fui::QWERTY_KEY_MODE || value == fui::QWERTY_KEY_LANG ||
+      value == URL_PANEL_KEY || value == fui::QWERTY_KEY_ENTER) {
+    return false;
+  }
+  // Backspace remains eligible; its double-press hint lives inside the same
+  // dynamic strip refreshed by the fast path.
+  return value == fui::QWERTY_KEY_BACKSPACE || fui::keyboardOutputFor(currentLayout(), value) != nullptr;
+}
+
+void KeyboardEntryActivity::requestFullUpdate(const bool immediate) {
+  fastTypingWindowPending.store(false, std::memory_order_release);
+  requestUpdate(immediate);
+}
+
+void KeyboardEntryActivity::requestFastTypingUpdate() {
+  fastTypingWindowPending.store(true, std::memory_order_release);
+  requestUpdate();
+}
+
+void KeyboardEntryActivity::displayTypingWindow(const int logicalTop, const int logicalBottom) const {
+  if (renderer.getOrientation() != GfxRenderer::Portrait) {
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    return;
+  }
+
+  // Portrait logical coordinates rotate 90 degrees onto the physical 800x480
+  // X4 panel. A full-width logical strip therefore becomes a full-height
+  // physical window whose X span is the strip's logical Y span.
+  const int top = std::max(0, logicalTop);
+  const int bottom = std::min(renderer.getScreenHeight(), logicalBottom);
+  if (bottom <= top) return;
+
+  const int physicalX0 = top & ~0x7;
+  const int physicalX1 = std::min<int>(HalDisplay::DISPLAY_WIDTH, (bottom + 7) & ~0x7);
+  if (physicalX1 <= physicalX0) return;
+
+  display.displayWindow(static_cast<uint16_t>(physicalX0), 0,
+                        static_cast<uint16_t>(physicalX1 - physicalX0),
+                        HalDisplay::DISPLAY_HEIGHT, false);
+}
 
 const fui::KeyboardLayout& KeyboardEntryActivity::currentLayout() const {
   if (symbols) return fui::builtinKeyboardLayout(layoutId, shifted, true);
@@ -637,9 +681,14 @@ void KeyboardEntryActivity::loop() {
         touchRouter.update(interactions, tapCandidate, static_cast<int16_t>(tx), static_cast<int16_t>(ty), tapped,
                            static_cast<int16_t>(tapX), static_cast<int16_t>(tapY), inContact, millis());
     if (result.event) {
+      const int oldSelRow = selRow;
+      const int oldSelCol = selCol;
       syncSelectionToValue(result.event.value);
+      const bool selectionChanged = oldSelRow != selRow || oldSelCol != selCol;
+      const bool fast = !selectionChanged && canUseFastTypingWindow(result.event.value, result.event.longPress);
       if (activateValue(result.event.value, result.event.longPress)) {
-        requestUpdate();
+        if (fast) requestFastTypingUpdate();
+        else requestFullUpdate();
       }
       return;
     }
@@ -779,8 +828,12 @@ void KeyboardEntryActivity::loop() {
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (confirmHeld && !confirmLongHandled && !cursorMode) {
-      if (selKey && activateValue(selKey->value, false)) {
-        requestUpdate();
+      if (selKey) {
+        const bool fast = canUseFastTypingWindow(selKey->value, false);
+        if (activateValue(selKey->value, false)) {
+          if (fast) requestFastTypingUpdate();
+          else requestFullUpdate();
+        }
       }
     } else if (confirmHeld && !confirmLongHandled && cursorMode && inputType == InputType::Password && togglePos) {
       passwordVisible = !passwordVisible;
@@ -1127,7 +1180,17 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 
   GUI.drawSideButtonHints(renderer, ">", "<");
 
-  renderer.displayBuffer();
+  const bool fastWindow = fastTypingWindowPending.exchange(false, std::memory_order_acq_rel);
+  if (fastWindow) {
+    // Everything above the keyboard that can change because of ordinary typing:
+    // text field, cursor, predictive suggestions and contextual tips. The
+    // keyboard itself remains physically untouched.
+    const int dynamicTop = std::max(0, inputStartY - metrics.verticalSpacing - 2);
+    const int dynamicBottom = static_cast<int>(kbRect.y);
+    displayTypingWindow(dynamicTop, dynamicBottom);
+  } else {
+    renderer.displayBuffer();
+  }
 }
 
 void KeyboardEntryActivity::onComplete(std::string text) {
