@@ -4,6 +4,7 @@
 #include <I18n.h>
 
 #include "NotesViewerKeyboardBase.h"
+#include "NotesFastKeyboardActivity.h"
 
 // The i18n generator scans .cpp sources. The Notes implementation lives in an
 // included .inc file so keep these IDs visible here, otherwise code generation
