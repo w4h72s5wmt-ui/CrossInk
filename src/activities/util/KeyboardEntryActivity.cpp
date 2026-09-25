@@ -126,6 +126,10 @@ const fui::KeyboardLayout URL_SNIPPET_LAYOUT{URL_SNIP_ROWS, 4};
 
 void KeyboardEntryActivity::onEnter() {
   Activity::onEnter();
+  // Keep the edit buffer stable while typing. Most keyboard users provide a
+  // maxLength; reserving it once avoids heap growth/copies on the hot key path.
+  // This changes capacity only, never the accepted text or length semantics.
+  if (maxLength != 0 && text.capacity() < maxLength) text.reserve(maxLength);
   cursorPos = text.length();
   layoutId = inputType == InputType::Url ? fui::KeyboardLayoutId::QwertyEn : keyboard_layouts::startingLayout();
   const uint16_t enabledLayouts = keyboard_layouts::enabled();
@@ -864,8 +868,9 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   while (true) {
     const int lineEndIdx = lineBreakEnd(displayText, lineStartIdx, maxLineWidth);
     const bool forcedBreak = lineEndIdx < static_cast<int>(displayText.length()) && displayText[lineEndIdx] == '\n';
-    const std::string lineText = displayText.substr(lineStartIdx, lineEndIdx - lineStartIdx);
-    textWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, lineText.c_str(), EpdFontFamily::REGULAR);
+    // Measure directly in displayText: avoid allocating a temporary string for
+    // every visible line on every keystroke.
+    textWidth = measureRange(displayText, lineStartIdx, lineEndIdx);
     {
       const bool isRtl = rangeIsRtl(displayText, lineStartIdx, lineEndIdx);
       const int lineStartX = centerText ? effectiveMargin + (maxLineWidth - textWidth) / 2 : effectiveMargin;
@@ -873,18 +878,30 @@ void KeyboardEntryActivity::render(RenderLock&&) {
       bool isCursorLine = false;
       if (!cursorDrawn && cursorPos >= lineStartIdx &&
           (isLastLine ? cursorPos <= lineEndIdx : cursorPos < lineEndIdx)) {
-        std::string beforeCursor;
+        // Normal typing keeps cursorMode off, so measure the existing buffer in
+        // place instead of constructing beforeCursor on every key activation.
+        // Password cursor mode retains its masked temporary because its visual
+        // representation intentionally differs from displayText.
+        std::string maskedBeforeCursor;
+        int beforeWidth = 0;
         if (isPassword && !passwordVisible && cursorMode) {
-          beforeCursor = std::string(cursorPos - lineStartIdx, '*');
+          maskedBeforeCursor.assign(cursorPos - lineStartIdx, '*');
+          beforeWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, maskedBeforeCursor.c_str(), EpdFontFamily::REGULAR);
         } else {
-          beforeCursor = displayText.substr(lineStartIdx, cursorPos - lineStartIdx);
+          beforeWidth = measureRange(displayText, lineStartIdx, static_cast<int>(cursorPos));
         }
-        int beforeWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, beforeCursor.c_str(), EpdFontFamily::REGULAR);
         int throughCursorWidth = beforeWidth;
         int kernOffset = 0;
         if (cursorCharBytes > 0) {
-          std::string beforeAndCursor = beforeCursor + displayCursorChar;
-          throughCursorWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, beforeAndCursor.c_str(), EpdFontFamily::REGULAR);
+          std::string beforeAndCursor;
+          if (isPassword && !passwordVisible && cursorMode) {
+            beforeAndCursor = maskedBeforeCursor;
+            beforeAndCursor += displayCursorChar;
+            throughCursorWidth = renderer.getTextAdvanceX(UI_12_FONT_ID, beforeAndCursor.c_str(), EpdFontFamily::REGULAR);
+          } else {
+            throughCursorWidth = measureRange(displayText, lineStartIdx,
+                                               static_cast<int>(cursorPos + cursorCharBytes));
+          }
           int charAdvance = renderer.getTextAdvanceX(UI_12_FONT_ID, displayCursorChar, EpdFontFamily::REGULAR);
           kernOffset = throughCursorWidth - beforeWidth - charAdvance;
         }
@@ -914,7 +931,12 @@ void KeyboardEntryActivity::render(RenderLock&&) {
           renderer.drawText(UI_12_FONT_ID, cursorPixelX + cursorCharWidth, inputStartY + inputHeight, part3.c_str());
         }
       } else {
-        renderer.drawText(UI_12_FONT_ID, lineStartX, inputStartY + inputHeight, lineText.c_str());
+        // Draw the [lineStartIdx, lineEndIdx) slice without a substr allocation.
+        const char saved = displayText[lineEndIdx];
+        displayText[lineEndIdx] = '\0';
+        renderer.drawText(UI_12_FONT_ID, lineStartX, inputStartY + inputHeight,
+                          displayText.c_str() + lineStartIdx);
+        displayText[lineEndIdx] = saved;
       }
       if (lineEndIdx == static_cast<int>(displayText.length())) {
         break;
