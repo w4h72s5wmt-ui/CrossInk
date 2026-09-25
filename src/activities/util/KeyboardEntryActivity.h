@@ -140,6 +140,15 @@ class KeyboardEntryActivity : public Activity {
   bool predictiveEnabled() const;
   freeink::ui::Rect predictiveBarRect() const;
 
+  // Normal character entry can keep the keyboard chrome physically untouched:
+  // render() still composes the complete framebuffer for identical semantics,
+  // then refreshes only the dynamic text/prediction strip on the panel.
+  std::atomic<bool> fastTypingWindowPending{false};
+  bool canUseFastTypingWindow(int16_t value, bool longPress) const;
+  void requestFullUpdate(bool immediate = false);
+  void requestFastTypingUpdate();
+  void displayTypingWindow(int logicalTop, int logicalBottom) const;
+
   freeink::ui::Rect keyboardRect() const;
 
   static constexpr uint16_t LONG_PRESS_MS = 500;
