@@ -229,6 +229,7 @@ class VaultRecoveryChoiceActivity final : public Activity {
                  finish();
                });
     popup.setPrimaryOptionIndex(0);
+    invalidateNotesPanelBaseline();
     requestUpdate(true);
   }
 
@@ -768,12 +769,12 @@ bool saveNoteFile(const std::string& path, const std::string& text) {
   return written == text.size();
 }
 
-class NotesKeyboardActivity final : public KeyboardEntryActivity {
+class NotesKeyboardActivity final : public NotesFastKeyboardActivity {
  public:
   NotesKeyboardActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string title,
                         std::string initialText, const size_t maxLength, std::string path, std::string vaultPattern)
-      : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
-                              InputType::Multiline),
+      : NotesFastKeyboardActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
+                                  InputType::Multiline),
         path(std::move(path)), vaultPattern(std::move(vaultPattern)) {
     capturePersistedState();
   }
@@ -790,7 +791,7 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
     }
     std::fill(vaultPattern.begin(), vaultPattern.end(), '\0');
     vaultPattern.clear();
-    KeyboardEntryActivity::onExit();
+    NotesFastKeyboardActivity::onExit();
   }
 
  protected:
@@ -853,6 +854,7 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
     }
     if (!pattern.empty()) vaultPattern = pattern;
     capturePersistedState();
+    invalidateNotesPanelBaseline();
     requestUpdate(true);
     return true;
   }
@@ -898,6 +900,7 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
 
     if (Storage.exists(backupPath.c_str())) Storage.remove(backupPath.c_str());
     capturePersistedState();
+    invalidateNotesPanelBaseline();
     requestUpdate(true);
   }
 
@@ -908,6 +911,7 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
       lockWithPattern(vaultPattern);
       return;
     }
+    invalidateNotesPanelBaseline();
     startActivityForResult(
         std::make_unique<VaultPatternActivity>(renderer, mappedInput, false, 0),
         [this](const ActivityResult& result) {
