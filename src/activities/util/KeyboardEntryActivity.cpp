@@ -2,9 +2,12 @@
 
 #include <BidiUtils.h>
 #include <HalGPIO.h>
+#include <HalDisplay.h>
+#include <esp_heap_caps.h>
 #include <I18n.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 #include "DeviceCapabilities.h"
@@ -157,15 +160,130 @@ void KeyboardEntryActivity::onEnter() {
     predictiveText.load();
     predictiveText.seedFromText(text);
   }
+  keyboardDifferentialPending.store(false, std::memory_order_release);
+  windowShadowValid = false;
   requestUpdate();
 }
 
 void KeyboardEntryActivity::onExit() {
   if (predictiveEnabled()) predictiveText.save();
+  releaseKeyboardWindowShadow();
   Activity::onExit();
 }
 
 bool KeyboardEntryActivity::predictiveEnabled() const { return inputType == InputType::Multiline; }
+
+void KeyboardEntryActivity::requestKeyboardUpdate(const bool immediate) {
+  keyboardDifferentialPending.store(true, std::memory_order_release);
+  requestUpdate(immediate);
+}
+
+void KeyboardEntryActivity::releaseKeyboardWindowShadow() {
+  if (windowShadow != nullptr) {
+    heap_caps_free(windowShadow);
+    windowShadow = nullptr;
+  }
+  windowShadowValid = false;
+}
+
+void KeyboardEntryActivity::refreshKeyboardDifferential(const bool allowDifferential) {
+  uint8_t* const fb = display.getFrameBuffer();
+  const uint32_t bufferSize = display.getBufferSize();
+  const uint16_t panelW = display.getDisplayWidth();
+  const uint16_t panelH = display.getDisplayHeight();
+  const uint16_t wb = display.getDisplayWidthBytes();
+
+  if (fb == nullptr || bufferSize == 0 || wb == 0 || panelW == 0 || panelH == 0) {
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    windowShadowValid = false;
+    return;
+  }
+
+  if (windowShadow == nullptr) {
+    windowShadow = static_cast<uint8_t*>(
+        heap_caps_malloc(bufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    windowShadowValid = false;
+  }
+
+  // First paint, external/manual repaint, or low-memory fallback: preserve the
+  // stock whole-screen behavior and establish a trustworthy panel baseline.
+  if (!allowDifferential || windowShadow == nullptr || !windowShadowValid) {
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    if (windowShadow != nullptr) {
+      memcpy(windowShadow, fb, bufferSize);
+      windowShadowValid = true;
+    }
+    return;
+  }
+
+  constexpr uint16_t TILE_W = 32;
+  constexpr uint16_t TILE_H = 16;
+  constexpr uint16_t TILE_COLS = (HalDisplay::DISPLAY_WIDTH + TILE_W - 1) / TILE_W;
+  constexpr uint16_t TILE_ROWS = (HalDisplay::DISPLAY_HEIGHT + TILE_H - 1) / TILE_H;
+  constexpr uint16_t TILE_COUNT = TILE_COLS * TILE_ROWS;
+  constexpr uint16_t TILE_MASK_BYTES = (TILE_COUNT + 7) / 8;
+  std::array<uint8_t, TILE_MASK_BYTES> tileMask{};
+
+  uint16_t minByte = wb;
+  uint16_t maxByte = 0;
+  uint16_t minY = panelH;
+  uint16_t maxY = 0;
+  uint16_t dirtyTiles = 0;
+  bool changed = false;
+
+  for (uint16_t y = 0; y < panelH; ++y) {
+    const uint32_t rowOffset = static_cast<uint32_t>(y) * wb;
+    for (uint16_t bx = 0; bx < wb; ++bx) {
+      const uint32_t offset = rowOffset + bx;
+      if (fb[offset] == windowShadow[offset]) continue;
+
+      changed = true;
+      if (bx < minByte) minByte = bx;
+      if (bx > maxByte) maxByte = bx;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+
+      const uint16_t tx = static_cast<uint16_t>((bx * 8) / TILE_W);
+      const uint16_t ty = static_cast<uint16_t>(y / TILE_H);
+      const uint16_t bit = static_cast<uint16_t>(ty * TILE_COLS + tx);
+      const uint8_t mask = static_cast<uint8_t>(1u << (bit & 7));
+      if ((tileMask[bit >> 3] & mask) == 0) {
+        tileMask[bit >> 3] |= mask;
+        ++dirtyTiles;
+      }
+    }
+  }
+
+  if (!changed) return;
+
+  const uint16_t x = static_cast<uint16_t>(minByte * 8);
+  const uint16_t y = minY;
+  const uint16_t w = static_cast<uint16_t>((maxByte - minByte + 1) * 8);
+  const uint16_t h = static_cast<uint16_t>(maxY - minY + 1);
+
+  // Disjoint changes are common on a keyboard (old/new selection, text,
+  // prediction bar). Reuse the proven Missile sparse-DTM path when it cuts
+  // payload materially; dense layout changes stay on one window update.
+  const uint32_t bboxPayload = static_cast<uint32_t>(w / 8) * h;
+  const uint32_t sparsePayload =
+      static_cast<uint32_t>(dirtyTiles) * (TILE_W / 8) * TILE_H;
+  const bool useSparse =
+      dirtyTiles > 0 && dirtyTiles <= 128 && sparsePayload * 10u <= bboxPayload * 7u;
+
+  if (useSparse) {
+    display.displaySparseWindow(tileMask.data(), TILE_COLS, TILE_ROWS, TILE_W, TILE_H,
+                                x, y, w, h, false);
+  } else {
+    display.displayWindow(x, y, w, h, false);
+  }
+
+  const uint16_t copyBytes = static_cast<uint16_t>(w / 8);
+  for (uint16_t row = 0; row < h; ++row) {
+    const uint32_t offset = static_cast<uint32_t>(y + row) * wb + minByte;
+    memcpy(windowShadow + offset, fb + offset, copyBytes);
+  }
+  windowShadowValid = true;
+}
 
 const fui::KeyboardLayout& KeyboardEntryActivity::currentLayout() const {
   if (symbols) return fui::builtinKeyboardLayout(layoutId, shifted, true);
@@ -592,7 +710,7 @@ void KeyboardEntryActivity::loop() {
           hintVisible = false;
           shifted = false;
           touchRouter.reset();
-          requestUpdate();
+          requestKeyboardUpdate();
         }
         return;
       }
@@ -604,7 +722,7 @@ void KeyboardEntryActivity::loop() {
       passwordVisible = !passwordVisible;
       togglePos = false;
       hintVisible = false;
-      requestUpdate();
+      requestKeyboardUpdate();
       return;
     }
     if (inputTarget == InputFieldTouchTarget::Cursor) {
@@ -618,7 +736,7 @@ void KeyboardEntryActivity::loop() {
         cursorPos--;
       }
       touchRouter.reset();
-      requestUpdate();
+      requestKeyboardUpdate();
       return;
     }
   }
@@ -639,7 +757,7 @@ void KeyboardEntryActivity::loop() {
     if (result.event) {
       syncSelectionToValue(result.event.value);
       if (activateValue(result.event.value, result.event.longPress)) {
-        requestUpdate();
+        requestKeyboardUpdate();
       }
       return;
     }
@@ -662,13 +780,13 @@ void KeyboardEntryActivity::loop() {
     upLongHandled = true;
     hintVisible = true;
     hintShowTime = millis();
-    requestUpdate();
+    requestKeyboardUpdate();
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     if (upHeld && !upLongHandled && !cursorMode) {
       moveSelectionRow(-1);
-      requestUpdate();
+      requestKeyboardUpdate();
     }
     upHeld = false;
     upLongHandled = false;
@@ -682,7 +800,7 @@ void KeyboardEntryActivity::loop() {
       cursorMode = false;
       hintVisible = false;
       downLongHandled = true;
-      requestUpdate();
+      requestKeyboardUpdate();
     } else {
       downLongHandled = false;
     }
@@ -691,7 +809,7 @@ void KeyboardEntryActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     if (downHeld && !downLongHandled && !cursorMode) {
       moveSelectionRow(1);
-      requestUpdate();
+      requestKeyboardUpdate();
     }
     downHeld = false;
     downLongHandled = false;
@@ -700,7 +818,7 @@ void KeyboardEntryActivity::loop() {
   buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left}, [this] {
     if (cursorMode) return;
     moveSelectionCol(-1);
-    requestUpdate();
+    requestKeyboardUpdate();
   });
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
@@ -708,10 +826,10 @@ void KeyboardEntryActivity::loop() {
       if (togglePos) {
         cursorPos = savedCursorPos;
         togglePos = false;
-        requestUpdate();
+        requestKeyboardUpdate();
       } else if (cursorPos > 0) {
         cursorPos = utf8Prev(text, cursorPos);
-        requestUpdate();
+        requestKeyboardUpdate();
       }
     }
   }
@@ -727,7 +845,7 @@ void KeyboardEntryActivity::loop() {
   buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right}, [this] {
     if (cursorMode) return;
     moveSelectionCol(1);
-    requestUpdate();
+    requestKeyboardUpdate();
   });
 
   if (rightHeld && !rightLongHandled && mappedInput.isPressed(MappedInputManager::Button::Right) &&
@@ -736,7 +854,7 @@ void KeyboardEntryActivity::loop() {
       savedCursorPos = rightStartCursorPos;
       togglePos = true;
       rightLongHandled = true;
-      requestUpdate();
+      requestKeyboardUpdate();
     }
   }
 
@@ -747,7 +865,7 @@ void KeyboardEntryActivity::loop() {
     }
     if (cursorMode && !togglePos && cursorPos < text.length()) {
       cursorPos = utf8Next(text, cursorPos);
-      requestUpdate();
+      requestKeyboardUpdate();
     }
     if (cursorMode) return;
     rightHeld = false;
@@ -766,13 +884,13 @@ void KeyboardEntryActivity::loop() {
       mappedInput.getHeldTime() > DEL_LONG_PRESS_MS && selectedDel) {
     clearAllOrAltOnSelected();
     confirmLongHandled = true;
-    requestUpdate();
+    requestKeyboardUpdate();
   }
 
   if (confirmHeld && !confirmLongHandled && mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
       mappedInput.getHeldTime() > LONG_PRESS_MS) {
     if (!selectedDel && clearAllOrAltOnSelected()) {
-      requestUpdate();
+      requestKeyboardUpdate();
       confirmLongHandled = true;
     }
   }
@@ -780,11 +898,11 @@ void KeyboardEntryActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (confirmHeld && !confirmLongHandled && !cursorMode) {
       if (selKey && activateValue(selKey->value, false)) {
-        requestUpdate();
+        requestKeyboardUpdate();
       }
     } else if (confirmHeld && !confirmLongHandled && cursorMode && inputType == InputType::Password && togglePos) {
       passwordVisible = !passwordVisible;
-      requestUpdate();
+      requestKeyboardUpdate();
     }
     confirmHeld = false;
     confirmLongHandled = false;
@@ -801,7 +919,7 @@ void KeyboardEntryActivity::loop() {
 
   if (hintVisible && !cursorMode && millis() - hintShowTime > 4000) {
     hintVisible = false;
-    requestUpdate();
+    requestKeyboardUpdate();
   }
 }
 
@@ -1127,7 +1245,9 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 
   GUI.drawSideButtonHints(renderer, ">", "<");
 
-  renderer.displayBuffer();
+  const bool allowDifferential =
+      keyboardDifferentialPending.exchange(false, std::memory_order_acq_rel);
+  refreshKeyboardDifferential(allowDifferential);
 }
 
 void KeyboardEntryActivity::onComplete(std::string text) {
