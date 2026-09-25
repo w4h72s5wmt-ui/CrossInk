@@ -39,7 +39,7 @@ prep_replacement = (
     "  waveEnemySpeed_ = static_cast<uint16_t>(12 + difficulty_ * 3 + std::min<int>(wave_ / 2, 4) * 3);\n"
     "  // Seven symmetric hard-mode speed bands. Their percentages sum to 700,\n"
     "  // so the average enemy speed remains exactly the accepted baseline.\n"
-    "  constexpr uint8_t hardSpeedPct[7] = {80, 87, 93, 100, 107, 113, 120};\n"
+    "  constexpr uint8_t hardSpeedPct[7] = {75, 83, 92, 100, 108, 117, 125};\n"
     "  for (size_t i = 0; i < waveHardEnemySpeeds_.size(); ++i) {\n"
     "    waveHardEnemySpeeds_[i] = static_cast<uint16_t>(\n"
     "        std::max<uint32_t>(1u, (static_cast<uint32_t>(waveEnemySpeed_) * hardSpeedPct[i] + 50u) / 100u));\n"
