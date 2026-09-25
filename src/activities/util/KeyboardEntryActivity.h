@@ -140,6 +140,16 @@ class KeyboardEntryActivity : public Activity {
   bool predictiveEnabled() const;
   freeink::ui::Rect predictiveBarRect() const;
 
+  // Keyboard-local differential refresh state. The complete UI is still
+  // composed into the normal framebuffer on every render; only the physical
+  // panel transfer is reduced to the pixels that changed.
+  uint8_t* windowShadow = nullptr;
+  bool windowShadowValid = false;
+  std::atomic<bool> keyboardDifferentialPending{false};
+  void requestKeyboardUpdate(bool immediate = false);
+  void refreshKeyboardDifferential(bool allowDifferential);
+  void releaseKeyboardWindowShadow();
+
   freeink::ui::Rect keyboardRect() const;
 
   static constexpr uint16_t LONG_PRESS_MS = 500;
