@@ -1,10 +1,10 @@
-name: Keyboard FastPath V1 BaseMode17 X4 Pro
+name: Keyboard FastPath V3 Differential BaseMode17 X4 Pro
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - x4-pro-keyboard-fastpath-v1
+      - x4-pro-keyboard-fastpath-v3-dirty
 
 jobs:
   build-x4-pro:
@@ -158,13 +158,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: CrossInk-Keyboard-FastPath-V1-BaseMode17-${{ github.run_number }}
+          name: CrossInk-Keyboard-FastPath-V3-Differential-BaseMode17-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: CrossInk-Keyboard-FastPath-V1-BaseMode17-${{ github.run_number }}-log
+          name: CrossInk-Keyboard-FastPath-V3-Differential-BaseMode17-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
