@@ -1,9 +1,9 @@
-name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode16 HardSpeedVariance X4 Pro
+name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode17 PreselectedHardSpeeds X4 Pro
 
 on:
   push:
     branches:
-      - x4-pro-missile-profile1-entryhalf-explosion2-basemode16-hard-speed-variance
+      - x4-pro-missile-profile1-entryhalf-explosion2-basemode17-preselected-hard-speeds
 
 jobs:
   build-x4-pro:
@@ -145,6 +145,9 @@ jobs:
       - name: Apply BaseMode16 hard-mode speed variance
         run: python scripts/missile_basemode16_hard_speed_variance.py
 
+      - name: Apply BaseMode17 preselected hard-mode speeds
+        run: python scripts/missile_basemode17_preselected_hard_speeds.py
+
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
 
@@ -154,13 +157,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode16-hard-speed-variance-${{ github.run_number }}
+          name: missile-profile1-entryhalf-explosion2-basemode17-preselected-hard-speeds-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode16-hard-speed-variance-${{ github.run_number }}-log
+          name: missile-profile1-entryhalf-explosion2-basemode17-preselected-hard-speeds-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
