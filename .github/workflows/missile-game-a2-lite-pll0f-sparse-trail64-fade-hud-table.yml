@@ -1,6 +1,7 @@
 name: Keyboard FastPath V1 BaseMode17 X4 Pro
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - x4-pro-keyboard-fastpath-v1
