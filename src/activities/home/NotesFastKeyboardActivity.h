@@ -8,7 +8,7 @@
 #include <utility>
 
 #include "activities/Activity.h"
-#include "activities/util/NotesFastKeyboardActivity.h"
+#include "activities/util/KeyboardEntryActivity.h"
 #include "util/ButtonNavigator.h"
 #include "PredictiveText.h"
 
