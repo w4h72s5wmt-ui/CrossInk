@@ -138,6 +138,8 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
   }
 
  protected:
+  bool predictiveEnabled() const override { return false; }
+
   bool viewerEnabled() const { return viewerInputType == InputType::Multiline && headerActionReserveWidth() > 0; }
 
   virtual bool headerActionLocked() const { return currentNoteLooksLocked(); }
