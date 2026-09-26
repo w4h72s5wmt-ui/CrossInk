@@ -13,24 +13,24 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "SdCardFontSystem.h"
-#include "activities/util/KeyboardEntryActivity.h"
+#include "NotesFastKeyboardActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UIScale.h"
 #include "fontIds.h"
 
 // Read-only-first decorator used by Notes. Non-multiline entry fields keep the
-// normal KeyboardEntryActivity behavior, so title/search dialogs are unchanged.
-class NotesViewerKeyboardBase : public KeyboardEntryActivity {
+// normal NotesFastKeyboardActivity behavior, so title/search dialogs are unchanged.
+class NotesViewerKeyboardBase : public NotesFastKeyboardActivity {
  public:
   explicit NotesViewerKeyboardBase(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                    std::string title = "Enter Text", std::string initialText = "",
                                    const size_t maxLength = 0, InputType inputType = InputType::Text,
                                    const size_t minLength = 0)
-      : KeyboardEntryActivity(renderer, mappedInput, title, std::move(initialText), maxLength, inputType, minLength),
+      : NotesFastKeyboardActivity(renderer, mappedInput, title, std::move(initialText), maxLength, inputType, minLength),
         viewerTitle(std::move(title)), viewerInputType(inputType) {}
 
   void onEnter() override {
-    KeyboardEntryActivity::onEnter();
+    NotesFastKeyboardActivity::onEnter();
     editing = false;
     viewerPage = 0;
     viewerLayoutDirty = true;
@@ -41,11 +41,11 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
     }
   }
 
-  void onExit() override { KeyboardEntryActivity::onExit(); }
+  void onExit() override { NotesFastKeyboardActivity::onExit(); }
 
   void loop() override {
     if (!viewerEnabled() || editing) {
-      KeyboardEntryActivity::loop();
+      NotesFastKeyboardActivity::loop();
       return;
     }
 
@@ -90,7 +90,7 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
 
   void render(RenderLock&& lock) override {
     if (!viewerEnabled() || editing) {
-      KeyboardEntryActivity::render(std::move(lock));
+      NotesFastKeyboardActivity::render(std::move(lock));
       return;
     }
 
