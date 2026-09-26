@@ -5,9 +5,11 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <utility>
 
 #include "activities/Activity.h"
+#include "SdCardFontSystem.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "util/ButtonNavigator.h"
 #include "activities/util/PredictiveText.h"
@@ -23,11 +25,13 @@ class NotesFastKeyboardActivity : public Activity {
                                  const size_t maxLength = 0, InputType inputType = InputType::Text,
                                  const size_t minLength = 0)
       : Activity("NotesFastKeyboard", renderer, mappedInput),
-        title(std::move(title)),
+        title(title),
         text(std::move(initialText)),
         maxLength(maxLength),
         inputType(inputType),
-        minLength(minLength) {}
+        minLength(minLength),
+        viewerTitle(std::move(title)),
+        viewerInputType(inputType) {}
 
   void onEnter() override;
   void onExit() override;
@@ -43,7 +47,10 @@ class NotesFastKeyboardActivity : public Activity {
   // implementation is inert so existing keyboard users are unchanged.
   virtual bool handleHeaderActionTap(int, int) { return false; }
   virtual int headerActionReserveWidth() const { return 0; }
-  virtual void drawHeaderAction() {}
+  virtual bool headerActionLocked() const { return false; }
+  void drawHeaderAction();
+  Rect lockArtworkRectOnTitleBaseline(Rect rect) const;
+  virtual void drawNotesHeaderAction() {}
 
  private:
   std::string title;
@@ -142,6 +149,8 @@ class NotesFastKeyboardActivity : public Activity {
   freeink::ui::Rect keyboardRect() const;
 
  protected:
+  bool viewerEnabled() const { return viewerInputType == InputType::Multiline && headerActionReserveWidth() > 0; }
+
   // NotesViewerKeyboardBase switches between viewer/editor and Notes can open
   // child dialogs while the editor remains alive. In both cases the physical
   // panel no longer matches this editor's shadow, so the next render must be
@@ -149,6 +158,33 @@ class NotesFastKeyboardActivity : public Activity {
   void invalidateNotesPanelBaseline() { notesWindowShadowValid = false; }
 
  private:
+  std::string viewerTitle;
+  InputType viewerInputType = InputType::Text;
+  bool editing = false;
+  bool viewerLayoutDirty = true;
+  int viewerFontId = UI_12_FONT_ID;
+  int viewerLineHeight = 1;
+  int viewerLinesPerPage = 1;
+  int viewerPage = 0;
+  int viewerPageCount = 1;
+  int viewerMarginX = 12;
+  int viewerBodyTop = 0;
+  int viewerContentWidth = 1;
+  std::vector<std::string> viewerLines;
+
+  static bool viewerPointIn(const Rect& rect, int x, int y);
+  Rect viewerHeaderActionRect() const;
+  Rect pencilRect() const;
+  static size_t previousUtf8Boundary(const std::string& text, size_t pos);
+  static size_t nextUtf8Boundary(const std::string& text, size_t pos);
+  void appendWrappedLine(std::string remaining);
+  void rebuildViewerLayout();
+  void changeViewerPage(int delta);
+  void drawOpenLockLight(const Rect& rect);
+  void drawPencil(const Rect& rect);
+  void loopViewer();
+  void renderViewer();
+
   uint8_t* notesWindowShadow = nullptr;
   bool notesWindowShadowValid = false;
   uint8_t notesFastRefreshCount = 0;
