@@ -162,6 +162,12 @@ void NotesFastKeyboardActivity::onEnter() {
   viewerPage = 0;
   viewerLayoutDirty = true;
   notesWindowShadowValid = false;
+  notesCleanPending = false;
+  notesForceHalfRefresh = false;
+  notesCleanDeadlineMs = 0;
+  // Touch typing should not paint the tapped key black. Hardware navigation
+  // can make the selection visible again when it is actually useful.
+  touchSelectionHidden = mappedInput.hasTouchHardware();
   if (viewerEnabled()) {
     sdFontSystem.ensureLoaded(renderer);
     rebuildViewerLayout();
@@ -435,7 +441,20 @@ void NotesFastKeyboardActivity::releaseNotesWindowShadow() {
     notesWindowShadow = nullptr;
   }
   notesWindowShadowValid = false;
-  notesFastRefreshCount = 0;
+  notesCleanPending = false;
+  notesForceHalfRefresh = false;
+  notesCleanDeadlineMs = 0;
+}
+
+void NotesFastKeyboardActivity::scheduleNotesIdleClean() {
+  notesCleanPending = true;
+  notesCleanDeadlineMs = millis() + NOTES_IDLE_CLEAN_MS;
+}
+
+void NotesFastKeyboardActivity::forceNotesClean() {
+  notesCleanPending = false;
+  notesForceHalfRefresh = true;
+  requestUpdate();
 }
 
 void NotesFastKeyboardActivity::refreshNotesPanel() {
@@ -447,9 +466,10 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
 
   if (fb == nullptr || bufferSize == 0 || wb == 0 || panelW == 0 || panelH == 0 ||
       renderer.getOrientation() != GfxRenderer::Portrait) {
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    renderer.displayBuffer(notesForceHalfRefresh ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
     notesWindowShadowValid = false;
-    notesFastRefreshCount = 0;
+    notesCleanPending = false;
+    notesForceHalfRefresh = false;
     return;
   }
 
@@ -460,13 +480,21 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
   }
 
   auto cleanRefresh = [&]() {
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    // Notes readability wins here: HALF actually scrubs accumulated ghosting,
+    // unlike another FAST pass over an already contaminated physical image.
+    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     if (notesWindowShadow != nullptr) {
       memcpy(notesWindowShadow, fb, bufferSize);
       notesWindowShadowValid = true;
     }
-    notesFastRefreshCount = 0;
+    notesCleanPending = false;
+    notesForceHalfRefresh = false;
   };
+
+  if (notesForceHalfRefresh) {
+    cleanRefresh();
+    return;
+  }
 
   if (notesWindowShadow == nullptr || !notesWindowShadowValid) {
     cleanRefresh();
@@ -479,11 +507,9 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
   }
   if (changedBytes == 0) return;
 
-  // A layout/layer change dirties a large part of the keyboard. Those events
-  // are infrequent and deserve the stock clean waveform instead of stretching
-  // the Missile-oriented window waveform over a large UI surface.
-  if (changedBytes > 3500 ||
-      notesFastRefreshCount >= NOTES_FAST_REFRESHES_BEFORE_CLEAN) {
+  // A layout/layer change dirties a large part of the keyboard. Clean it
+  // immediately rather than trying to preserve a dirty fast-waveform result.
+  if (changedBytes > 3500) {
     cleanRefresh();
     return;
   }
@@ -540,7 +566,9 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
   displayDirty(upper);
   displayDirty(keyboard);
 
-  ++notesFastRefreshCount;
+  // Every local fast update postpones the scrub. Continuous typing remains
+  // responsive; the first 250 ms pause cleans the whole current UI once.
+  scheduleNotesIdleClean();
 }
 
 const fui::KeyboardLayout& NotesFastKeyboardActivity::currentLayout() const {
@@ -584,6 +612,7 @@ void NotesFastKeyboardActivity::clampSelection() {
 }
 
 void NotesFastKeyboardActivity::moveSelectionRow(const int delta) {
+  touchSelectionHidden = false;
   const fui::KeyboardLayout& layout = currentLayout();
   if (layout.rowCount == 0) return;
   const int oldCols = selRow < layout.rowCount ? layout.rows[selRow].count : 1;
@@ -598,6 +627,7 @@ void NotesFastKeyboardActivity::moveSelectionRow(const int delta) {
 }
 
 void NotesFastKeyboardActivity::moveSelectionCol(const int delta) {
+  touchSelectionHidden = false;
   const fui::KeyboardLayout& layout = currentLayout();
   if (selRow < 0 || selRow >= layout.rowCount) return;
   const int cols = layout.rows[selRow].count;
@@ -947,6 +977,15 @@ void NotesFastKeyboardActivity::loop() {
     loopViewer();
     return;
   }
+
+  // Debounced physical cleanup: only after at least one local fast refresh,
+  // and only once after the user has stopped interacting for 250 ms.
+  if (notesCleanPending &&
+      static_cast<int32_t>(millis() - notesCleanDeadlineMs) >= 0) {
+    forceNotesClean();
+    return;
+  }
+
 #if CROSSINK_APP_CAP_TOUCH
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
     if (inputType == InputType::Multiline) {
@@ -961,6 +1000,7 @@ void NotesFastKeyboardActivity::loop() {
   int ty = 0;
 
   if (mappedInput.wasScreenTapped(tx, ty)) {
+    touchSelectionHidden = true;
     if (handleHeaderActionTap(tx, ty)) return;
 
     if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
@@ -974,7 +1014,9 @@ void NotesFastKeyboardActivity::loop() {
           hintVisible = false;
           shifted = false;
           touchRouter.reset();
-          requestUpdate();
+          // A suggestion changes both the text line and the whole prediction
+          // bar. Scrub immediately so neither leaves a layered residue.
+          forceNotesClean();
         }
         return;
       }
@@ -1019,7 +1061,10 @@ void NotesFastKeyboardActivity::loop() {
         touchRouter.update(interactions, tapCandidate, static_cast<int16_t>(tx), static_cast<int16_t>(ty), tapped,
                            static_cast<int16_t>(tapX), static_cast<int16_t>(tapY), inContact, millis());
     if (result.event) {
-      syncSelectionToValue(result.event.value);
+      // Touch already gives immediate positional feedback. Do not mirror it
+      // into the persistent hardware selection: that black->white key cycle
+      // was a major source of keyboard ghosting.
+      touchSelectionHidden = true;
       if (activateValue(result.event.value, result.event.longPress)) {
         requestUpdate();
       }
@@ -1137,6 +1182,7 @@ void NotesFastKeyboardActivity::loop() {
   }
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
+    touchSelectionHidden = false;
     confirmHeld = true;
     confirmLongHandled = false;
   }
@@ -1494,7 +1540,8 @@ void NotesFastKeyboardActivity::render(RenderLock&&) {
   props.modeLabel =
       (symbols || (inputType == InputType::Url && urlPanel)) ? tr(STR_KEY_MODE_ABC) : tr(STR_KEY_MODE_SYMBOLS);
   props.inputMask = static_cast<uint16_t>(fui::InputTouch | fui::InputLongPress);
-  props.selectedIndex = cursorMode ? -1 : static_cast<int16_t>(selectedLogicalIndex());
+  props.selectedIndex =
+      (cursorMode || touchSelectionHidden) ? -1 : static_cast<int16_t>(selectedLogicalIndex());
   props.labelText.font = fui::GfxRendererTarget::FONT_BODY;
   props.altText.font = fui::GfxRendererTarget::FONT_SMALL;
   props.gap = static_cast<int16_t>(metrics.keyboardKeySpacing);
