@@ -3,7 +3,10 @@ name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster
 on:
   push:
     branches:
-      - x4-pro-missile-profile1-entryhalf-explosion2-basemode17-preselected-hard-speeds
+      - x4-pro-missile-basemode17-consolidated
+
+permissions:
+  contents: write
 
 jobs:
   build-x4-pro:
@@ -147,6 +150,27 @@ jobs:
 
       - name: Apply BaseMode17 preselected hard-mode speeds
         run: python scripts/missile_basemode17_preselected_hard_speeds.py
+
+      - name: Consolidate BaseMode17 sources into repository
+        run: |
+          set -e
+          mkdir -p consolidated/freeink-sdk/libs/display/FreeInkDisplay/include
+          mkdir -p consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver
+          mkdir -p consolidated/freeink-sdk/libs/display/FreeInkDisplay/src
+          cp freeink-sdk/libs/display/FreeInkDisplay/include/FreeInkDisplay.h consolidated/freeink-sdk/libs/display/FreeInkDisplay/include/FreeInkDisplay.h
+          cp freeink-sdk/libs/display/FreeInkDisplay/src/FreeInkDisplay.cpp consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/FreeInkDisplay.cpp
+          cp freeink-sdk/libs/display/FreeInkDisplay/src/driver/PanelDriver.h consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver/PanelDriver.h
+          cp freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.cpp consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.cpp
+          cp freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.h consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.h
+          git add src/activities/home/MissileCommandActivity.cpp src/activities/home/MissileCommandActivity.h
+          git add lib/hal/HalDisplay.cpp lib/hal/HalDisplay.h
+          git add consolidated/freeink-sdk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --cached --quiet; then
+            git commit -m "refactor: consolidate BaseMode17 source state [skip ci]"
+            git push origin HEAD:x4-pro-missile-basemode17-consolidated
+          fi
 
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
