@@ -229,7 +229,6 @@ class VaultRecoveryChoiceActivity final : public Activity {
                  finish();
                });
     popup.setPrimaryOptionIndex(0);
-    invalidateNotesPanelBaseline();
     requestUpdate(true);
   }
 
