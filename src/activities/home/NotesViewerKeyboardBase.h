@@ -43,6 +43,12 @@ class NotesViewerKeyboardBase : public NotesFastKeyboardActivity {
 
   void onExit() override { NotesFastKeyboardActivity::onExit(); }
 
+  // During editable Notes fields, sample touch as fast as the main loop can
+  // run. The global 10 ms idle delay is useful elsewhere for power saving but
+  // makes rapid touchscreen typing easier to undersample. Read-only note view
+  // keeps the normal delay.
+  bool skipLoopDelay() override { return !viewerEnabled() || editing; }
+
   void loop() override {
     if (!viewerEnabled() || editing) {
       NotesFastKeyboardActivity::loop();
