@@ -10,10 +10,13 @@
 #include <cstring>
 
 #include "DeviceCapabilities.h"
-#include "KeyboardLayoutSet.h"
+#include "CrossPointSettings.h"
+#include "SdCardFontSystem.h"
+#include "activities/util/KeyboardLayoutSet.h"
 #include "MappedInputManager.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
+#include "components/UIScale.h"
 #include "fontIds.h"
 
 namespace fui = freeink::ui;
@@ -155,7 +158,17 @@ void NotesFastKeyboardActivity::onEnter() {
     predictiveText.load();
     predictiveText.seedFromText(text);
   }
-  requestUpdate();
+  editing = false;
+  viewerPage = 0;
+  viewerLayoutDirty = true;
+  notesWindowShadowValid = false;
+  if (viewerEnabled()) {
+    sdFontSystem.ensureLoaded(renderer);
+    rebuildViewerLayout();
+    requestUpdate(true);
+  } else {
+    requestUpdate();
+  }
 }
 
 void NotesFastKeyboardActivity::onExit() {
@@ -165,6 +178,256 @@ void NotesFastKeyboardActivity::onExit() {
 }
 
 bool NotesFastKeyboardActivity::predictiveEnabled() const { return inputType == InputType::Multiline; }
+
+bool NotesFastKeyboardActivity::viewerPointIn(const Rect& rect, const int x, const int y) {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+}
+
+Rect NotesFastKeyboardActivity::viewerHeaderActionRect() const {
+  const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+  const auto backLayout = TouchHeaderBackButton::layout(header);
+  const int controlOffset = std::min(
+      TouchHeaderBackButton::TITLE_VERTICAL_OFFSET,
+      std::max(0, header.y + header.height -
+                      (backLayout.iconRect.y +
+                       (backLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2)));
+  const int width = std::max(0, headerActionReserveWidth());
+  return Rect{renderer.getScreenWidth() - width, header.y + controlOffset, width, header.height};
+}
+
+Rect NotesFastKeyboardActivity::pencilRect() const {
+  constexpr int width = 58;
+  constexpr int height = 44;
+  return Rect{(renderer.getScreenWidth() - width) / 2, renderer.getScreenHeight() - height - 10, width, height};
+}
+
+void NotesFastKeyboardActivity::drawHeaderAction() {
+  if (headerActionReserveWidth() <= 0) return;
+  if (headerActionLocked()) {
+    drawNotesHeaderAction();
+  } else {
+    drawOpenLockLight(lockArtworkRectOnTitleBaseline(viewerHeaderActionRect()));
+  }
+}
+
+Rect NotesFastKeyboardActivity::lockArtworkRectOnTitleBaseline(Rect rect) const {
+  const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+  const auto headerLayout = TouchHeaderBackButton::layout(header);
+  const int iconBottom =
+      headerLayout.iconRect.y + (headerLayout.iconRect.height + TouchHeaderBackButton::ICON_SIZE) / 2;
+  const int availableOffset = std::max(0, header.y + header.height - iconBottom);
+  const int titleOffset =
+      std::clamp(TouchHeaderBackButton::TITLE_VERTICAL_OFFSET, 0, availableOffset);
+  const auto scale = uiScaleSpec();
+  const int titleBaselineY =
+      headerLayout.iconRect.y + titleOffset +
+      std::max(0, (headerLayout.iconRect.height - renderer.getLineHeight(scale.titleFontId)) / 2) +
+      renderer.getFontAscenderSize(scale.titleFontId);
+
+  constexpr int lockBodyHeight = 16;
+  const int currentBodyBottomY = rect.y + rect.height / 2 + lockBodyHeight - 1;
+  rect.y += titleBaselineY - currentBodyBottomY;
+  return rect;
+}
+
+size_t NotesFastKeyboardActivity::previousUtf8Boundary(const std::string& value, size_t pos) {
+  if (pos == 0) return 0;
+  --pos;
+  while (pos > 0 && (static_cast<unsigned char>(value[pos]) & 0xC0) == 0x80) --pos;
+  return pos;
+}
+
+size_t NotesFastKeyboardActivity::nextUtf8Boundary(const std::string& value, const size_t pos) {
+  if (pos >= value.size()) return value.size();
+  size_t next = pos + 1;
+  while (next < value.size() && (static_cast<unsigned char>(value[next]) & 0xC0) == 0x80) ++next;
+  return next;
+}
+
+void NotesFastKeyboardActivity::appendWrappedLine(std::string remaining) {
+  if (remaining.empty()) {
+    viewerLines.emplace_back();
+    return;
+  }
+
+  while (!remaining.empty()) {
+    if (renderer.getTextWidth(viewerFontId, remaining.c_str()) <= viewerContentWidth) {
+      viewerLines.push_back(std::move(remaining));
+      return;
+    }
+
+    size_t breakPos = remaining.size();
+    while (breakPos > 0) {
+      const std::string candidate = remaining.substr(0, breakPos);
+      if (renderer.getTextWidth(viewerFontId, candidate.c_str()) <= viewerContentWidth) break;
+      const size_t space = remaining.rfind(' ', breakPos - 1);
+      if (space != std::string::npos && space > 0) breakPos = space;
+      else breakPos = previousUtf8Boundary(remaining, breakPos);
+    }
+    if (breakPos == 0) breakPos = nextUtf8Boundary(remaining, 0);
+
+    viewerLines.push_back(remaining.substr(0, breakPos));
+    size_t skip = breakPos;
+    while (skip < remaining.size() && remaining[skip] == ' ') ++skip;
+    remaining.erase(0, skip);
+  }
+}
+
+void NotesFastKeyboardActivity::rebuildViewerLayout() {
+  viewerLayoutDirty = false;
+  sdFontSystem.ensureLoaded(renderer);
+  viewerFontId = SETTINGS.getReaderFontId();
+  if (renderer.isSdCardFont(viewerFontId) && !text.empty()) {
+    renderer.ensureSdCardFontReady(viewerFontId, text.c_str(), 0x01);
+  }
+
+  viewerLineHeight = std::max(
+      1, static_cast<int>(renderer.getLineHeight(viewerFontId) * SETTINGS.getReaderLineCompression() + 0.5f));
+  viewerMarginX = std::max(12, static_cast<int>(SETTINGS.screenMarginHorizontal));
+  viewerContentWidth = std::max(1, renderer.getScreenWidth() - viewerMarginX * 2);
+
+  const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+  viewerBodyTop = header.y + header.height + std::max(8, static_cast<int>(SETTINGS.screenMarginVertical));
+  const int bodyBottom = pencilRect().y - std::max(8, static_cast<int>(SETTINGS.screenMarginVertical));
+  viewerLinesPerPage = std::max(1, (bodyBottom - viewerBodyTop) / viewerLineHeight);
+
+  viewerLines.clear();
+  size_t start = 0;
+  while (start <= text.size()) {
+    const size_t newline = text.find('\n', start);
+    const size_t end = newline == std::string::npos ? text.size() : newline;
+    std::string logical = text.substr(start, end - start);
+    if (!logical.empty() && logical.back() == '\r') logical.pop_back();
+    appendWrappedLine(std::move(logical));
+    if (newline == std::string::npos) break;
+    start = newline + 1;
+  }
+  if (viewerLines.empty()) viewerLines.emplace_back();
+
+  viewerPageCount =
+      std::max(1, (static_cast<int>(viewerLines.size()) + viewerLinesPerPage - 1) / viewerLinesPerPage);
+  viewerPage = std::clamp(viewerPage, 0, viewerPageCount - 1);
+}
+
+void NotesFastKeyboardActivity::changeViewerPage(const int delta) {
+  const int next = std::clamp(viewerPage + delta, 0, viewerPageCount - 1);
+  if (next == viewerPage) return;
+  viewerPage = next;
+  notesWindowShadowValid = false;
+  requestUpdate();
+}
+
+void NotesFastKeyboardActivity::drawOpenLockLight(const Rect& rect) {
+  const int bodyW = 20;
+  const int bodyH = 16;
+  const int bodyX = rect.x + (rect.width - bodyW) / 2;
+  const int bodyY = rect.y + rect.height / 2;
+  auto ditherH = [this](const int x1, const int x2, const int y) {
+    for (int x = x1; x <= x2; x += 2) renderer.fillRect(x, y, 1, 1, true);
+  };
+  auto ditherV = [this](const int x, const int y1, const int y2) {
+    for (int y = y1; y <= y2; y += 2) renderer.fillRect(x, y, 1, 1, true);
+  };
+  ditherH(bodyX, bodyX + bodyW - 1, bodyY);
+  ditherH(bodyX, bodyX + bodyW - 1, bodyY + bodyH - 1);
+  ditherV(bodyX, bodyY, bodyY + bodyH - 1);
+  ditherV(bodyX + bodyW - 1, bodyY, bodyY + bodyH - 1);
+  const int shackleLeft = bodyX + 4;
+  const int shackleTop = bodyY - 10;
+  const int shackleRight = bodyX + 15;
+  ditherV(shackleLeft, shackleTop + 4, bodyY);
+  ditherH(shackleLeft + 2, shackleRight, shackleTop);
+  ditherV(shackleRight, shackleTop, shackleTop + 5);
+  renderer.fillRect(bodyX + bodyW / 2, bodyY + 6, 1, 5, true);
+}
+
+void NotesFastKeyboardActivity::drawPencil(const Rect& rect) {
+  const int cx = rect.x + rect.width / 2;
+  const int cy = rect.y + rect.height / 2;
+  renderer.drawLine(cx - 9, cy + 8, cx + 8, cy - 9, 3, true);
+  renderer.drawLine(cx - 12, cy + 11, cx - 7, cy + 9, 2, true);
+  renderer.drawLine(cx + 6, cy - 11, cx + 11, cy - 6, 2, true);
+}
+
+void NotesFastKeyboardActivity::loopViewer() {
+  int tx = 0;
+  int ty = 0;
+  if (mappedInput.wasScreenTapped(tx, ty)) {
+    const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+    const Rect backRect = TouchHeaderBackButton::layout(header).touchRect;
+    if (viewerPointIn(backRect, tx, ty)) {
+      finish();
+      return;
+    }
+    if (viewerPointIn(pencilRect(), tx, ty)) {
+      editing = true;
+      notesWindowShadowValid = false;
+      requestUpdate(true);
+      return;
+    }
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    finish();
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Up) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    changeViewerPage(-1);
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Down) ||
+      mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    changeViewerPage(1);
+    return;
+  }
+
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up) changeViewerPage(1);
+  else if (swipe == MappedInputManager::SwipeDir::Down) changeViewerPage(-1);
+}
+
+void NotesFastKeyboardActivity::renderViewer() {
+  if (viewerLayoutDirty) rebuildViewerLayout();
+
+  renderer.clearScreen();
+  const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
+  TouchHeaderBackButton::draw(renderer, header, viewerTitle.c_str(), false, 0);
+
+  const size_t firstLine = static_cast<size_t>(viewerPage * viewerLinesPerPage);
+  const size_t endLine =
+      std::min(viewerLines.size(), firstLine + static_cast<size_t>(viewerLinesPerPage));
+  int y = viewerBodyTop;
+  for (size_t i = firstLine; i < endLine; ++i) {
+    const std::string& line = viewerLines[i];
+    if (!line.empty()) {
+      int x = viewerMarginX;
+      uint8_t alignment = SETTINGS.paragraphAlignment;
+      const bool rtl = BidiUtils::startsWithRtl(line.c_str(), BidiUtils::RTL_PARAGRAPH_PROBE_DEPTH);
+      if (rtl && (alignment == CrossPointSettings::LEFT_ALIGN ||
+                  alignment == CrossPointSettings::JUSTIFIED)) {
+        alignment = CrossPointSettings::RIGHT_ALIGN;
+      }
+      const int textWidth = renderer.getTextWidth(viewerFontId, line.c_str());
+      if (alignment == CrossPointSettings::CENTER_ALIGN) x = viewerMarginX + (viewerContentWidth - textWidth) / 2;
+      else if (alignment == CrossPointSettings::RIGHT_ALIGN) x = viewerMarginX + viewerContentWidth - textWidth;
+      renderer.drawText(viewerFontId, x, y, line.c_str(), true);
+    }
+    y += viewerLineHeight;
+  }
+
+  drawPencil(pencilRect());
+  if (viewerPageCount > 1) {
+    const std::string counter = std::to_string(viewerPage + 1) + "/" + std::to_string(viewerPageCount);
+    const int counterWidth = renderer.getTextWidth(UI_10_FONT_ID, counter.c_str());
+    const Rect pencil = pencilRect();
+    renderer.drawText(UI_10_FONT_ID, renderer.getScreenWidth() - viewerMarginX - counterWidth,
+                      pencil.y + (pencil.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2,
+                      counter.c_str(), true);
+  }
+  renderer.displayBuffer();
+  notesWindowShadowValid = false;
+}
 
 void NotesFastKeyboardActivity::releaseNotesWindowShadow() {
   if (notesWindowShadow != nullptr) {
@@ -680,6 +943,10 @@ fui::Rect NotesFastKeyboardActivity::predictiveBarRect() const {
 }
 
 void NotesFastKeyboardActivity::loop() {
+  if (viewerEnabled() && !editing) {
+    loopViewer();
+    return;
+  }
 #if CROSSINK_APP_CAP_TOUCH
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
     if (inputType == InputType::Multiline) {
@@ -921,6 +1188,10 @@ void NotesFastKeyboardActivity::loop() {
 }
 
 void NotesFastKeyboardActivity::render(RenderLock&&) {
+  if (viewerEnabled() && !editing) {
+    renderViewer();
+    return;
+  }
   renderer.clearScreen();
 
   const auto pageWidth = renderer.getScreenWidth();
