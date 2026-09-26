@@ -149,6 +149,11 @@ void NotesFastKeyboardActivity::onEnter() {
   keyboardCacheValid = false;
   touchSelectionHidden = mappedInput.hasTouchHardware();
   touchFeedbackValid = false;
+  touchImmediateCommitted = false;
+  touchImmediateLongHandled = false;
+  touchImmediateValue = 0;
+  touchImmediatePrimary = nullptr;
+  touchImmediateAlt = nullptr;
   cursorPos = text.length();
   layoutId = inputType == InputType::Url ? fui::KeyboardLayoutId::QwertyEn : keyboard_layouts::startingLayout();
   const uint16_t enabledLayouts = keyboard_layouts::enabled();
@@ -248,6 +253,86 @@ void NotesFastKeyboardActivity::drawTouchFeedback() {
                            1, 4, true);
 }
 
+bool NotesFastKeyboardActivity::commitTouchKeyOnContact(const int16_t value) {
+  if (touchImmediateCommitted) return false;
+
+  touchImmediateValue = value;
+  touchImmediateLongHandled = false;
+  touchImmediatePrimary = nullptr;
+  touchImmediateAlt = nullptr;
+
+  // Capture the original layer before activateValue() can auto-release Shift
+  // or switch keyboard modes. Static layout strings remain valid afterwards.
+  const fui::KeyboardLayout& layer = currentLayout();
+  touchImmediatePrimary = fui::keyboardOutputFor(layer, value);
+  touchImmediateAlt = fui::keyboardAltOutputFor(layer, value);
+
+  xSemaphoreTake(textStateMutex, portMAX_DELAY);
+  touchImmediateInsertStart = cursorPos;
+  xSemaphoreGive(textStateMutex);
+
+  touchImmediateCommitted = true;
+  rememberTouchFeedback(value);
+
+  if (!activateValue(value, false)) {
+    // Completion/cancel paths may finish the activity and do not need a later
+    // release swallow.
+    resetCommittedTouchContact();
+    return false;
+  }
+
+  requestImmediateEditorUpdate();
+  return true;
+}
+
+void NotesFastKeyboardActivity::handleCommittedTouchLongPress(const int16_t value) {
+  if (!touchImmediateCommitted || touchImmediateLongHandled || value != touchImmediateValue) return;
+  touchImmediateLongHandled = true;
+
+  if (value == fui::QWERTY_KEY_BACKSPACE) {
+    // Short-delete was already committed on contact; the held action keeps the
+    // original clear-all semantics.
+    xSemaphoreTake(textStateMutex, portMAX_DELAY);
+    text.clear();
+    cursorPos = 0;
+    xSemaphoreGive(textStateMutex);
+    requestImmediateEditorUpdate();
+    return;
+  }
+
+  if (!touchImmediatePrimary || !*touchImmediatePrimary || !touchImmediateAlt || !*touchImmediateAlt) {
+    // Shift/mode/lang/enter have no distinct long-press output. They were
+    // already handled exactly once on touch-down.
+    return;
+  }
+
+  const size_t primaryLen = strlen(touchImmediatePrimary);
+  const size_t altLen = strlen(touchImmediateAlt);
+  bool replaced = false;
+  xSemaphoreTake(textStateMutex, portMAX_DELAY);
+  const size_t primaryEnd = touchImmediateInsertStart + primaryLen;
+  const bool intact =
+      primaryEnd <= text.size() && cursorPos == primaryEnd &&
+      text.compare(touchImmediateInsertStart, primaryLen, touchImmediatePrimary) == 0;
+  const size_t newSize = intact ? text.size() - primaryLen + altLen : text.size();
+  if (intact && (maxLength == 0 || newSize <= maxLength)) {
+    text.replace(touchImmediateInsertStart, primaryLen, touchImmediateAlt);
+    cursorPos = touchImmediateInsertStart + altLen;
+    replaced = true;
+  }
+  xSemaphoreGive(textStateMutex);
+
+  if (replaced) requestImmediateEditorUpdate();
+}
+
+void NotesFastKeyboardActivity::resetCommittedTouchContact() {
+  touchImmediateCommitted = false;
+  touchImmediateLongHandled = false;
+  touchImmediateValue = 0;
+  touchImmediatePrimary = nullptr;
+  touchImmediateAlt = nullptr;
+}
+
 uint32_t NotesFastKeyboardActivity::keyboardVisualKey() const {
   uint32_t key = static_cast<uint32_t>(inputType);
   key = key * 17u + static_cast<uint32_t>(layoutId);
@@ -305,6 +390,7 @@ void NotesFastKeyboardActivity::clampSelection() {
 
 void NotesFastKeyboardActivity::moveSelectionRow(const int delta) {
   touchSelectionHidden = false;
+  resetCommittedTouchContact();
   clearTouchFeedback();
   const fui::KeyboardLayout& layout = currentLayout();
   if (layout.rowCount == 0) return;
@@ -321,6 +407,7 @@ void NotesFastKeyboardActivity::moveSelectionRow(const int delta) {
 
 void NotesFastKeyboardActivity::moveSelectionCol(const int delta) {
   touchSelectionHidden = false;
+  resetCommittedTouchContact();
   clearTouchFeedback();
   const fui::KeyboardLayout& layout = currentLayout();
   if (selRow < 0 || selRow >= layout.rowCount) return;
@@ -687,6 +774,7 @@ fui::Rect NotesFastKeyboardActivity::predictiveBarRect() const {
 void NotesFastKeyboardActivity::loop() {
 #if CROSSINK_APP_CAP_TOUCH
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
+    resetCommittedTouchContact();
     clearTouchFeedback();
     if (inputType == InputType::Multiline) {
       onComplete(text);
@@ -706,6 +794,7 @@ void NotesFastKeyboardActivity::loop() {
     if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
       const fui::Rect bar = predictiveBarRect();
       if (tx >= bar.x && tx < bar.x + bar.width && ty >= bar.y && ty < bar.y + bar.height) {
+        resetCommittedTouchContact();
         clearTouchFeedback();
         std::array<std::string, 3> options{};
         xSemaphoreTake(textStateMutex, portMAX_DELAY);
@@ -737,6 +826,7 @@ void NotesFastKeyboardActivity::loop() {
     size_t touchedCursorPos = 0;
     const InputFieldTouchTarget inputTarget = inputFieldTouchTargetFromPoint(tx, ty, touchedCursorPos);
     if (inputTarget == InputFieldTouchTarget::PasswordToggle) {
+      resetCommittedTouchContact();
       clearTouchFeedback();
       passwordVisible = !passwordVisible;
       togglePos = false;
@@ -745,6 +835,7 @@ void NotesFastKeyboardActivity::loop() {
       return;
     }
     if (inputTarget == InputFieldTouchTarget::Cursor) {
+      resetCommittedTouchContact();
       clearTouchFeedback();
       xSemaphoreTake(textStateMutex, portMAX_DELAY);
       cursorPos = std::min(touchedCursorPos, text.length());
@@ -778,23 +869,41 @@ void NotesFastKeyboardActivity::loop() {
     const fui::TouchHoldRouter::Result result =
         touchRouter.update(interactions, tapCandidate, static_cast<int16_t>(tx), static_cast<int16_t>(ty), tapped,
                            static_cast<int16_t>(tapX), static_cast<int16_t>(tapY), inContact, millis());
+
+    // The interaction buffer has now latched the key under this contact.
+    // Commit it immediately while the finger is still down. tapCandidate is a
+    // level signal, so a contact can still be caught on a later loop pass even
+    // if its very first sample was missed.
+    if (tapCandidate && !touchImmediateCommitted) {
+      const int16_t active = interactions.activeIndex();
+      if (active >= 0 && active < static_cast<int16_t>(interactions.publishedCount())) {
+        const fui::Interaction& hit = interactions.publishedData()[active];
+        if (hit.action == ACTION_KEY) {
+          touchSelectionHidden = true;
+          commitTouchKeyOnContact(hit.value);
+          return;
+        }
+      }
+    }
+
     if (result.event) {
       touchSelectionHidden = true;
-      rememberTouchFeedback(result.event.value);
-      if (activateValue(result.event.value, result.event.longPress)) {
-        // No app-level batching: the ActivityManager render task already
-        // coalesces requests that arrive while the e-ink refresh is busy.
-        // This keeps the first character responsive without generating a
-        // second artificial 220 ms wait in Notes.
-        requestImmediateEditorUpdate();
+      if (result.event.longPress) {
+        handleCommittedTouchLongPress(result.event.value);
       }
+      // Normal release is intentionally swallowed: its action was already
+      // committed on contact. This prevents duplicate letters.
+      if (!inContact || tapped) resetCommittedTouchContact();
       return;
     }
-    // Do not refresh e-ink only for transient touch highlighting.
-    // The key event below performs the single useful redraw after text changes.
-    if (tapCandidate || tapped) {
-      return;
+
+    if (!inContact && !tapCandidate && touchImmediateCommitted) {
+      // Cancelled/swiped contact: the early key remains committed, but reopen
+      // the latch so the next tap cannot be lost.
+      resetCommittedTouchContact();
     }
+
+    if (tapCandidate || tapped || inContact) return;
   }
 #endif
 
@@ -909,6 +1018,7 @@ void NotesFastKeyboardActivity::loop() {
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
     touchSelectionHidden = false;
+    resetCommittedTouchContact();
     clearTouchFeedback();
     confirmHeld = true;
     confirmLongHandled = false;

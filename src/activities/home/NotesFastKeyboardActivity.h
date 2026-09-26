@@ -94,9 +94,16 @@ class NotesFastKeyboardActivity : public Activity {
   size_t savedCursorPos = 0;
   size_t rightStartCursorPos = 0;
 
-  // Tap/hold routing (threshold long-press, release swallow, slide re-arm)
-  // lives in the SDK; loop() feeds it the level-triggered touch state.
+  // The SDK router still owns hold timing and release/cancel tracking, but
+  // Notes commits the normal key as soon as a tap-candidate contact is seen.
+  // This avoids depending on a later release frame for rapid typing.
   freeink::ui::TouchHoldRouter touchRouter;
+  bool touchImmediateCommitted = false;
+  bool touchImmediateLongHandled = false;
+  int16_t touchImmediateValue = 0;
+  size_t touchImmediateInsertStart = 0;
+  const char* touchImmediatePrimary = nullptr;
+  const char* touchImmediateAlt = nullptr;
 
   // loop() runs on the main task while render() rebuilds the interaction
   // table on the render task. This is only the first-published-table gate;
@@ -167,6 +174,9 @@ class NotesFastKeyboardActivity : public Activity {
   void rememberTouchFeedback(int16_t value);
   void clearTouchFeedback();
   void drawTouchFeedback();
+  bool commitTouchKeyOnContact(int16_t value);
+  void handleCommittedTouchLongPress(int16_t value);
+  void resetCommittedTouchContact();
   uint32_t keyboardVisualKey() const;
 
   static constexpr size_t TEXT_RESERVE_HEADROOM = 512;
