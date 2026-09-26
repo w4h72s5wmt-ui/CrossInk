@@ -3,6 +3,8 @@
 #include <GfxRenderer.h>
 
 #include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -28,6 +30,8 @@ class NotesFastKeyboardActivity : public Activity {
         maxLength(maxLength),
         inputType(inputType),
         minLength(minLength) {}
+
+  ~NotesFastKeyboardActivity() override;
 
   void onEnter() override;
   void onExit() override;
@@ -149,6 +153,12 @@ class NotesFastKeyboardActivity : public Activity {
   uint32_t keyboardCacheKey = 0;
   bool keyboardCacheValid = false;
   bool touchSelectionHidden = false;
+
+  // The render task and the main input loop run concurrently. Keep the mutable
+  // text/cursor pair coherent for prediction snapshots without ever holding a
+  // lock across an e-ink refresh.
+  SemaphoreHandle_t textStateMutex = nullptr;
+  SemaphoreHandle_t predictiveMutex = nullptr;
 
   void releaseKeyboardCache();
   void requestImmediateEditorUpdate();

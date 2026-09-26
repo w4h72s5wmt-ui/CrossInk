@@ -125,8 +125,23 @@ const fui::KeyboardLayout URL_SNIPPET_LAYOUT{URL_SNIP_ROWS, 4};
 
 }  // namespace
 
+NotesFastKeyboardActivity::~NotesFastKeyboardActivity() {
+  releaseKeyboardCache();
+  if (textStateMutex != nullptr) {
+    vSemaphoreDelete(textStateMutex);
+    textStateMutex = nullptr;
+  }
+  if (predictiveMutex != nullptr) {
+    vSemaphoreDelete(predictiveMutex);
+    predictiveMutex = nullptr;
+  }
+}
+
 void NotesFastKeyboardActivity::onEnter() {
   Activity::onEnter();
+  if (textStateMutex == nullptr) textStateMutex = xSemaphoreCreateMutex();
+  if (predictiveMutex == nullptr) predictiveMutex = xSemaphoreCreateMutex();
+  assert(textStateMutex != nullptr && predictiveMutex != nullptr);
   if (maxLength != 0) {
     const size_t target = std::min(maxLength, text.size() + TEXT_RESERVE_HEADROOM);
     if (text.capacity() < target) text.reserve(target);
@@ -157,14 +172,20 @@ void NotesFastKeyboardActivity::onEnter() {
   touchRouter.overrideHoldMs = TOUCH_DEL_LONG_PRESS_MS;
   interactionsReady = false;
   if (predictiveEnabled()) {
+    xSemaphoreTake(predictiveMutex, portMAX_DELAY);
     predictiveText.load();
     predictiveText.seedFromText(text);
+    xSemaphoreGive(predictiveMutex);
   }
   requestImmediateEditorUpdate();
 }
 
 void NotesFastKeyboardActivity::onExit() {
-  if (predictiveEnabled()) predictiveText.save();
+  if (predictiveEnabled() && predictiveMutex != nullptr) {
+    xSemaphoreTake(predictiveMutex, portMAX_DELAY);
+    predictiveText.save();
+    xSemaphoreGive(predictiveMutex);
+  }
   releaseKeyboardCache();
   Activity::onExit();
 }
@@ -295,17 +316,27 @@ size_t NotesFastKeyboardActivity::utf8Next(const std::string& s, size_t pos) {
 void NotesFastKeyboardActivity::insertUtf8(const char* out) {
   if (!out || !*out) return;
   const size_t n = strlen(out);
-  if (maxLength != 0 && text.length() + n > maxLength) return;
+  xSemaphoreTake(textStateMutex, portMAX_DELAY);
+  if (maxLength != 0 && text.length() + n > maxLength) {
+    xSemaphoreGive(textStateMutex);
+    return;
+  }
   if (cursorPos > text.length()) cursorPos = text.length();
   text.insert(cursorPos, out, n);
   cursorPos += n;
+  xSemaphoreGive(textStateMutex);
 }
 
 bool NotesFastKeyboardActivity::backspaceUtf8() {
-  if (text.empty() || cursorPos == 0) return false;
+  xSemaphoreTake(textStateMutex, portMAX_DELAY);
+  if (text.empty() || cursorPos == 0) {
+    xSemaphoreGive(textStateMutex);
+    return false;
+  }
   const size_t prev = utf8Prev(text, cursorPos);
   text.erase(prev, cursorPos - prev);
   cursorPos = prev;
+  xSemaphoreGive(textStateMutex);
   return true;
 }
 
@@ -349,7 +380,9 @@ bool NotesFastKeyboardActivity::activateValue(const int16_t value, const bool lo
       return true;
     case fui::QWERTY_KEY_ENTER:
       if (inputType == InputType::Multiline) {
+        xSemaphoreTake(predictiveMutex, portMAX_DELAY);
         predictiveText.learnWordBefore(text, cursorPos);
+        xSemaphoreGive(predictiveMutex);
         insertUtf8("\n");
         return true;
       }
@@ -358,8 +391,10 @@ bool NotesFastKeyboardActivity::activateValue(const int16_t value, const bool lo
       return false;
     case fui::QWERTY_KEY_BACKSPACE:
       if (longPress) {
+        xSemaphoreTake(textStateMutex, portMAX_DELAY);
         text.clear();
         cursorPos = 0;
+        xSemaphoreGive(textStateMutex);
         return true;
       }
       delPressCount++;
@@ -377,7 +412,11 @@ bool NotesFastKeyboardActivity::activateValue(const int16_t value, const bool lo
       const char* out = longPress ? fui::keyboardAltOutputFor(layer, value) : nullptr;
       if (!out) out = fui::keyboardOutputFor(layer, value);
       if (!out) return false;
-      if (predictiveEnabled() && outputEndsWord(out)) predictiveText.learnWordBefore(text, cursorPos);
+      if (predictiveEnabled() && outputEndsWord(out)) {
+        xSemaphoreTake(predictiveMutex, portMAX_DELAY);
+        predictiveText.learnWordBefore(text, cursorPos);
+        xSemaphoreGive(predictiveMutex);
+      }
       insertUtf8(out);
       if (shifted && !symbols) {
         shifted = false;  // shift auto-releases after one character
@@ -392,8 +431,10 @@ bool NotesFastKeyboardActivity::clearAllOrAltOnSelected() {
   const fui::KeyboardKey* key = selectedKey();
   if (!key) return false;
   if (key->value == fui::QWERTY_KEY_BACKSPACE) {
+    xSemaphoreTake(textStateMutex, portMAX_DELAY);
     text.clear();
     cursorPos = 0;
+    xSemaphoreGive(textStateMutex);
     return true;
   }
   // Explicit alts and the letter case-flip, same as touch long-press.
@@ -594,7 +635,7 @@ fui::Rect NotesFastKeyboardActivity::keyboardRect() const {
 fui::Rect NotesFastKeyboardActivity::predictiveBarRect() const {
   const fui::Rect kb = keyboardRect();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int height = std::max(38, renderer.getLineHeight(UI_10_FONT_ID) + 16);
+  const int height = std::max(52, renderer.getLineHeight(UI_10_FONT_ID) + 24);
   const int y = std::max(0, static_cast<int>(kb.y) - metrics.verticalSpacing - height);
   return fui::Rect{kb.x, static_cast<int16_t>(y), kb.width, static_cast<int16_t>(height)};
 }
@@ -620,10 +661,23 @@ void NotesFastKeyboardActivity::loop() {
     if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
       const fui::Rect bar = predictiveBarRect();
       if (tx >= bar.x && tx < bar.x + bar.width && ty >= bar.y && ty < bar.y + bar.height) {
-        const auto options = predictiveText.suggestions(text, cursorPos);
+        std::array<std::string, 3> options{};
+        xSemaphoreTake(textStateMutex, portMAX_DELAY);
+        const std::string predictionText = text;
+        const size_t predictionCursor = cursorPos;
+        xSemaphoreGive(textStateMutex);
+        xSemaphoreTake(predictiveMutex, portMAX_DELAY);
+        options = predictiveText.suggestions(predictionText, predictionCursor);
         int index = bar.width > 0 ? (tx - bar.x) * 3 / bar.width : 0;
         index = std::clamp(index, 0, 2);
-        if (!options[index].empty() && predictiveText.applySuggestion(text, cursorPos, maxLength, options[index])) {
+        bool applied = false;
+        if (!options[index].empty()) {
+          xSemaphoreTake(textStateMutex, portMAX_DELAY);
+          applied = predictiveText.applySuggestion(text, cursorPos, maxLength, options[index]);
+          xSemaphoreGive(textStateMutex);
+        }
+        xSemaphoreGive(predictiveMutex);
+        if (applied) {
           delPressCount = 0;
           hintVisible = false;
           shifted = false;
@@ -644,15 +698,19 @@ void NotesFastKeyboardActivity::loop() {
       return;
     }
     if (inputTarget == InputFieldTouchTarget::Cursor) {
+      xSemaphoreTake(textStateMutex, portMAX_DELAY);
       cursorPos = std::min(touchedCursorPos, text.length());
+      xSemaphoreGive(textStateMutex);
       cursorMode = false;
       togglePos = false;
       hintVisible = false;
       // The masked text field maps taps per byte; snap back to a boundary so
       // the cursor never lands inside a multi-byte character.
+      xSemaphoreTake(textStateMutex, portMAX_DELAY);
       while (cursorPos > 0 && cursorPos < text.length() && (static_cast<uint8_t>(text[cursorPos]) & 0xC0) == 0x80) {
         cursorPos--;
       }
+      xSemaphoreGive(textStateMutex);
       touchRouter.reset();
       requestImmediateEditorUpdate();
       return;
@@ -746,11 +804,15 @@ void NotesFastKeyboardActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
     if (cursorMode) {
       if (togglePos) {
+        xSemaphoreTake(textStateMutex, portMAX_DELAY);
         cursorPos = savedCursorPos;
+        xSemaphoreGive(textStateMutex);
         togglePos = false;
         requestImmediateEditorUpdate();
-      } else if (cursorPos > 0) {
-        cursorPos = utf8Prev(text, cursorPos);
+      } else {
+        xSemaphoreTake(textStateMutex, portMAX_DELAY);
+        if (cursorPos > 0) cursorPos = utf8Prev(text, cursorPos);
+        xSemaphoreGive(textStateMutex);
         requestImmediateEditorUpdate();
       }
     }
@@ -785,8 +847,10 @@ void NotesFastKeyboardActivity::loop() {
       rightHeld = false;
       rightLongHandled = false;
     }
-    if (cursorMode && !togglePos && cursorPos < text.length()) {
-      cursorPos = utf8Next(text, cursorPos);
+    if (cursorMode && !togglePos) {
+      xSemaphoreTake(textStateMutex, portMAX_DELAY);
+      if (cursorPos < text.length()) cursorPos = utf8Next(text, cursorPos);
+      xSemaphoreGive(textStateMutex);
       requestImmediateEditorUpdate();
     }
     if (cursorMode) return;
@@ -1048,7 +1112,16 @@ void NotesFastKeyboardActivity::render(RenderLock&&) {
   const fui::Rect kbRect = keyboardRect();
 
   if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
-    const auto options = predictiveText.suggestions(text, cursorPos);
+    std::string predictionText;
+    size_t predictionCursor = 0;
+    xSemaphoreTake(textStateMutex, portMAX_DELAY);
+    predictionText = text;
+    predictionCursor = cursorPos;
+    xSemaphoreGive(textStateMutex);
+
+    xSemaphoreTake(predictiveMutex, portMAX_DELAY);
+    const auto options = predictiveText.suggestions(predictionText, predictionCursor);
+    xSemaphoreGive(predictiveMutex);
     if (!options[0].empty() || !options[1].empty() || !options[2].empty()) {
       const fui::Rect bar = predictiveBarRect();
       renderer.fillRect(bar.x, bar.y, bar.width, bar.height, false);
@@ -1192,8 +1265,10 @@ void NotesFastKeyboardActivity::render(RenderLock&&) {
 
 void NotesFastKeyboardActivity::onComplete(std::string text) {
   if (predictiveEnabled()) {
+    xSemaphoreTake(predictiveMutex, portMAX_DELAY);
     predictiveText.learnCurrentWord(text, cursorPos);
     predictiveText.save();
+    xSemaphoreGive(predictiveMutex);
   }
   setResult(KeyboardResult{std::move(text)});
   finish();
