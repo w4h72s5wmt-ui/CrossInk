@@ -155,13 +155,14 @@ class NotesFastKeyboardActivity : public Activity {
   bool viewerEnabled() const { return viewerInputType == InputType::Multiline && headerActionReserveWidth() > 0; }
 
   // NotesViewerKeyboardBase switches between viewer/editor and Notes can open
-  // child dialogs while the editor remains alive. In both cases the physical
-  // panel no longer matches this editor's shadow, so the next render must be
-  // a clean whole-screen refresh.
+  // child dialogs while the editor remains alive. The next editor render must
+  // re-establish its physical baseline before local differential refreshes.
   void invalidateNotesPanelBaseline() {
     notesWindowShadowValid = false;
-    notesCleanPending = false;
-    notesForceHalfRefresh = false;
+    notesScrubPending = false;
+    notesScrubRequested = false;
+    notesScrubUpper.changed = false;
+    notesScrubKeyboard.changed = false;
   }
 
  private:
@@ -192,19 +193,28 @@ class NotesFastKeyboardActivity : public Activity {
   void loopViewer();
   void renderViewer();
 
+  struct NotesDirtyBox {
+    uint16_t minByte = 0;
+    uint16_t maxByte = 0;
+    uint16_t minY = 0;
+    uint16_t maxY = 0;
+    bool changed = false;
+  };
+
   uint8_t* notesWindowShadow = nullptr;
   bool notesWindowShadowValid = false;
-  bool notesCleanPending = false;
-  bool notesForceHalfRefresh = false;
+  bool notesScrubPending = false;
+  bool notesScrubRequested = false;
   bool touchSelectionHidden = false;
-  unsigned long notesCleanDeadlineMs = 0;
+  unsigned long notesScrubDeadlineMs = 0;
+  NotesDirtyBox notesScrubUpper{};
+  NotesDirtyBox notesScrubKeyboard{};
 
   void releaseNotesWindowShadow();
   void refreshNotesPanel();
-  void scheduleNotesIdleClean();
-  void forceNotesClean();
+  void scheduleNotesIdleScrub();
 
-  static constexpr uint16_t NOTES_IDLE_CLEAN_MS = 250;
+  static constexpr uint16_t NOTES_IDLE_SCRUB_MS = 700;
   static constexpr uint16_t LONG_PRESS_MS = 500;
   static constexpr uint16_t DEL_LONG_PRESS_MS = 1500;
   static constexpr uint16_t TOUCH_LONG_PRESS_MS = 350;

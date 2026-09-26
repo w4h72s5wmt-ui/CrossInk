@@ -162,9 +162,11 @@ void NotesFastKeyboardActivity::onEnter() {
   viewerPage = 0;
   viewerLayoutDirty = true;
   notesWindowShadowValid = false;
-  notesCleanPending = false;
-  notesForceHalfRefresh = false;
-  notesCleanDeadlineMs = 0;
+  notesScrubPending = false;
+  notesScrubRequested = false;
+  notesScrubDeadlineMs = 0;
+  notesScrubUpper.changed = false;
+  notesScrubKeyboard.changed = false;
   // Touch typing should not paint the tapped key black. Hardware navigation
   // can make the selection visible again when it is actually useful.
   touchSelectionHidden = mappedInput.hasTouchHardware();
@@ -441,20 +443,17 @@ void NotesFastKeyboardActivity::releaseNotesWindowShadow() {
     notesWindowShadow = nullptr;
   }
   notesWindowShadowValid = false;
-  notesCleanPending = false;
-  notesForceHalfRefresh = false;
-  notesCleanDeadlineMs = 0;
+  notesScrubPending = false;
+  notesScrubRequested = false;
+  notesScrubDeadlineMs = 0;
+  notesScrubUpper.changed = false;
+  notesScrubKeyboard.changed = false;
 }
 
-void NotesFastKeyboardActivity::scheduleNotesIdleClean() {
-  notesCleanPending = true;
-  notesCleanDeadlineMs = millis() + NOTES_IDLE_CLEAN_MS;
-}
-
-void NotesFastKeyboardActivity::forceNotesClean() {
-  notesCleanPending = false;
-  notesForceHalfRefresh = true;
-  requestUpdate();
+void NotesFastKeyboardActivity::scheduleNotesIdleScrub() {
+  notesScrubPending = true;
+  notesScrubRequested = false;
+  notesScrubDeadlineMs = millis() + NOTES_IDLE_SCRUB_MS;
 }
 
 void NotesFastKeyboardActivity::refreshNotesPanel() {
@@ -466,10 +465,12 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
 
   if (fb == nullptr || bufferSize == 0 || wb == 0 || panelW == 0 || panelH == 0 ||
       renderer.getOrientation() != GfxRenderer::Portrait) {
-    renderer.displayBuffer(notesForceHalfRefresh ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     notesWindowShadowValid = false;
-    notesCleanPending = false;
-    notesForceHalfRefresh = false;
+    notesScrubPending = false;
+    notesScrubRequested = false;
+    notesScrubUpper.changed = false;
+    notesScrubKeyboard.changed = false;
     return;
   }
 
@@ -479,25 +480,22 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
     notesWindowShadowValid = false;
   }
 
-  auto cleanRefresh = [&]() {
-    // Notes readability wins here: HALF actually scrubs accumulated ghosting,
-    // unlike another FAST pass over an already contaminated physical image.
+  auto baselineRefresh = [&]() {
+    // Entering the editor is the one place where a clean global baseline is
+    // acceptable. During typing we stay strictly local.
     renderer.displayBuffer(HalDisplay::HALF_REFRESH);
     if (notesWindowShadow != nullptr) {
       memcpy(notesWindowShadow, fb, bufferSize);
       notesWindowShadowValid = true;
     }
-    notesCleanPending = false;
-    notesForceHalfRefresh = false;
+    notesScrubPending = false;
+    notesScrubRequested = false;
+    notesScrubUpper.changed = false;
+    notesScrubKeyboard.changed = false;
   };
 
-  if (notesForceHalfRefresh) {
-    cleanRefresh();
-    return;
-  }
-
   if (notesWindowShadow == nullptr || !notesWindowShadowValid) {
-    cleanRefresh();
+    baselineRefresh();
     return;
   }
 
@@ -505,25 +503,48 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
   for (uint32_t i = 0; i < bufferSize; ++i) {
     if (fb[i] != notesWindowShadow[i]) ++changedBytes;
   }
-  if (changedBytes == 0) return;
 
-  // A layout/layer change dirties a large part of the keyboard. Clean it
-  // immediately rather than trying to preserve a dirty fast-waveform result.
-  if (changedBytes > 3500) {
-    cleanRefresh();
+  auto scrubBox = [&](const NotesDirtyBox& box) {
+    if (!box.changed) return;
+    const uint16_t x = static_cast<uint16_t>(box.minByte * 8);
+    const uint16_t y = box.minY;
+    const uint16_t w = static_cast<uint16_t>((box.maxByte - box.minByte + 1) * 8);
+    const uint16_t h = static_cast<uint16_t>(box.maxY - box.minY + 1);
+    const uint16_t copyBytes = static_cast<uint16_t>(box.maxByte - box.minByte + 1);
+
+    // Local erase pass. The framebuffer is restored immediately from the
+    // desired-state shadow before the second local redraw.
+    for (uint16_t row = box.minY; row <= box.maxY; ++row) {
+      const uint32_t offset = static_cast<uint32_t>(row) * wb + box.minByte;
+      memset(fb + offset, 0xFF, copyBytes);
+    }
+    display.displayWindow(x, y, w, h, false);
+
+    for (uint16_t row = box.minY; row <= box.maxY; ++row) {
+      const uint32_t offset = static_cast<uint32_t>(row) * wb + box.minByte;
+      memcpy(fb + offset, notesWindowShadow + offset, copyBytes);
+    }
+    display.displayWindow(x, y, w, h, false);
+  };
+
+  if (changedBytes == 0) {
+    if (notesScrubRequested) {
+      scrubBox(notesScrubUpper);
+      scrubBox(notesScrubKeyboard);
+      notesScrubUpper.changed = false;
+      notesScrubKeyboard.changed = false;
+      notesScrubRequested = false;
+      notesScrubPending = false;
+    }
     return;
   }
 
-  struct DirtyBox {
-    uint16_t minByte;
-    uint16_t maxByte;
-    uint16_t minY;
-    uint16_t maxY;
-    bool changed;
-  };
+  // New input always wins over a pending idle scrub. The dirty regions stay
+  // accumulated and will be scrubbed after the next real pause.
+  notesScrubRequested = false;
 
   auto findDirty = [&](const uint16_t firstByte, const uint16_t endByte) {
-    DirtyBox box{endByte, 0, panelH, 0, false};
+    NotesDirtyBox box{endByte, 0, panelH, 0, false};
     for (uint16_t y = 0; y < panelH; ++y) {
       const uint32_t row = static_cast<uint32_t>(y) * wb;
       for (uint16_t bx = firstByte; bx < endByte; ++bx) {
@@ -539,7 +560,7 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
     return box;
   };
 
-  auto displayDirty = [&](const DirtyBox& box) {
+  auto displayDirty = [&](const NotesDirtyBox& box) {
     if (!box.changed) return;
     const uint16_t x = static_cast<uint16_t>(box.minByte * 8);
     const uint16_t y = box.minY;
@@ -554,6 +575,18 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
     }
   };
 
+  auto mergeDirty = [](NotesDirtyBox& pending, const NotesDirtyBox& current) {
+    if (!current.changed) return;
+    if (!pending.changed) {
+      pending = current;
+      return;
+    }
+    pending.minByte = std::min(pending.minByte, current.minByte);
+    pending.maxByte = std::max(pending.maxByte, current.maxByte);
+    pending.minY = std::min(pending.minY, current.minY);
+    pending.maxY = std::max(pending.maxY, current.maxY);
+  };
+
   // Portrait rendering maps logical Y to physical X. Split text/prediction
   // from the keyboard so a changed glyph and a changed key never create one
   // giant physical refresh rectangle spanning the whole display.
@@ -561,14 +594,16 @@ void NotesFastKeyboardActivity::refreshNotesPanel() {
   const int splitPixel = std::clamp(static_cast<int>(kb.y) & ~7, 8, static_cast<int>(panelW) - 8);
   const uint16_t splitByte = static_cast<uint16_t>(splitPixel / 8);
 
-  const DirtyBox upper = findDirty(0, splitByte);
-  const DirtyBox keyboard = findDirty(splitByte, wb);
+  const NotesDirtyBox upper = findDirty(0, splitByte);
+  const NotesDirtyBox keyboard = findDirty(splitByte, wb);
   displayDirty(upper);
   displayDirty(keyboard);
+  mergeDirty(notesScrubUpper, upper);
+  mergeDirty(notesScrubKeyboard, keyboard);
 
-  // Every local fast update postpones the scrub. Continuous typing remains
-  // responsive; the first 250 ms pause cleans the whole current UI once.
-  scheduleNotesIdleClean();
+  // Continuous typing remains purely differential. A later idle render will
+  // locally erase/redraw only the accumulated dirty regions.
+  scheduleNotesIdleScrub();
 }
 
 const fui::KeyboardLayout& NotesFastKeyboardActivity::currentLayout() const {
@@ -978,11 +1013,13 @@ void NotesFastKeyboardActivity::loop() {
     return;
   }
 
-  // Debounced physical cleanup: only after at least one local fast refresh,
-  // and only once after the user has stopped interacting for 250 ms.
-  if (notesCleanPending &&
-      static_cast<int32_t>(millis() - notesCleanDeadlineMs) >= 0) {
-    forceNotesClean();
+  // Debounced local cleanup. It never requests a whole-screen refresh:
+  // after a real pause, refreshNotesPanel() scrubs only accumulated dirty boxes.
+  if (notesScrubPending &&
+      static_cast<int32_t>(millis() - notesScrubDeadlineMs) >= 0) {
+    notesScrubPending = false;
+    notesScrubRequested = true;
+    requestUpdate();
     return;
   }
 
@@ -1014,9 +1051,9 @@ void NotesFastKeyboardActivity::loop() {
           hintVisible = false;
           shifted = false;
           touchRouter.reset();
-          // A suggestion changes both the text line and the whole prediction
-          // bar. Scrub immediately so neither leaves a layered residue.
-          forceNotesClean();
+          // Suggestion selection stays local like normal typing. The resulting
+          // text + prediction changes are scrubbed together after the idle gap.
+          requestUpdate();
         }
         return;
       }
