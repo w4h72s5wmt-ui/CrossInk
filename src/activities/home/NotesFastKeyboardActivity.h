@@ -153,6 +153,8 @@ class NotesFastKeyboardActivity : public Activity {
   uint32_t keyboardCacheKey = 0;
   bool keyboardCacheValid = false;
   bool touchSelectionHidden = false;
+  freeink::ui::Rect touchFeedbackRect{};
+  bool touchFeedbackValid = false;
 
   // The render task and the main input loop run concurrently. Keep the mutable
   // text/cursor pair coherent for prediction snapshots without ever holding a
@@ -162,6 +164,9 @@ class NotesFastKeyboardActivity : public Activity {
 
   void releaseKeyboardCache();
   void requestImmediateEditorUpdate();
+  void rememberTouchFeedback(int16_t value);
+  void clearTouchFeedback();
+  void drawTouchFeedback();
   uint32_t keyboardVisualKey() const;
 
   static constexpr size_t TEXT_RESERVE_HEADROOM = 512;

@@ -148,6 +148,7 @@ void NotesFastKeyboardActivity::onEnter() {
   }
   keyboardCacheValid = false;
   touchSelectionHidden = mappedInput.hasTouchHardware();
+  touchFeedbackValid = false;
   cursorPos = text.length();
   layoutId = inputType == InputType::Url ? fui::KeyboardLayoutId::QwertyEn : keyboard_layouts::startingLayout();
   const uint16_t enabledLayouts = keyboard_layouts::enabled();
@@ -204,6 +205,47 @@ void NotesFastKeyboardActivity::releaseKeyboardCache() {
 
 void NotesFastKeyboardActivity::requestImmediateEditorUpdate() {
   requestUpdate();
+}
+
+void NotesFastKeyboardActivity::rememberTouchFeedback(const int16_t value) {
+  const size_t count = interactions.publishedCount();
+  const fui::Interaction* items = interactions.publishedData();
+  for (size_t i = 0; i < count; ++i) {
+    if (items[i].action != ACTION_KEY || items[i].value != value) continue;
+    xSemaphoreTake(textStateMutex, portMAX_DELAY);
+    touchFeedbackRect = items[i].rect;
+    touchFeedbackValid = true;
+    xSemaphoreGive(textStateMutex);
+    return;
+  }
+}
+
+void NotesFastKeyboardActivity::clearTouchFeedback() {
+  if (textStateMutex == nullptr) {
+    touchFeedbackValid = false;
+    return;
+  }
+  xSemaphoreTake(textStateMutex, portMAX_DELAY);
+  touchFeedbackValid = false;
+  xSemaphoreGive(textStateMutex);
+}
+
+void NotesFastKeyboardActivity::drawTouchFeedback() {
+  fui::Rect rect{};
+  bool valid = false;
+  xSemaphoreTake(textStateMutex, portMAX_DELAY);
+  rect = touchFeedbackRect;
+  valid = touchFeedbackValid;
+  xSemaphoreGive(textStateMutex);
+  if (!valid || rect.width < 10 || rect.height < 10) return;
+
+  // Thin inner outline: visible acknowledgment without the heavy black key
+  // inversion that produced residue in the earlier windowed-refresh tests.
+  constexpr int inset = 3;
+  renderer.drawRoundedRect(rect.x + inset, rect.y + inset,
+                           std::max(1, static_cast<int>(rect.width) - inset * 2),
+                           std::max(1, static_cast<int>(rect.height) - inset * 2),
+                           1, 4, true);
 }
 
 uint32_t NotesFastKeyboardActivity::keyboardVisualKey() const {
@@ -263,6 +305,7 @@ void NotesFastKeyboardActivity::clampSelection() {
 
 void NotesFastKeyboardActivity::moveSelectionRow(const int delta) {
   touchSelectionHidden = false;
+  clearTouchFeedback();
   const fui::KeyboardLayout& layout = currentLayout();
   if (layout.rowCount == 0) return;
   const int oldCols = selRow < layout.rowCount ? layout.rows[selRow].count : 1;
@@ -278,6 +321,7 @@ void NotesFastKeyboardActivity::moveSelectionRow(const int delta) {
 
 void NotesFastKeyboardActivity::moveSelectionCol(const int delta) {
   touchSelectionHidden = false;
+  clearTouchFeedback();
   const fui::KeyboardLayout& layout = currentLayout();
   if (selRow < 0 || selRow >= layout.rowCount) return;
   const int cols = layout.rows[selRow].count;
@@ -643,6 +687,7 @@ fui::Rect NotesFastKeyboardActivity::predictiveBarRect() const {
 void NotesFastKeyboardActivity::loop() {
 #if CROSSINK_APP_CAP_TOUCH
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
+    clearTouchFeedback();
     if (inputType == InputType::Multiline) {
       onComplete(text);
     } else {
@@ -661,6 +706,7 @@ void NotesFastKeyboardActivity::loop() {
     if (predictiveEnabled() && !cursorMode && !symbols && !urlPanel) {
       const fui::Rect bar = predictiveBarRect();
       if (tx >= bar.x && tx < bar.x + bar.width && ty >= bar.y && ty < bar.y + bar.height) {
+        clearTouchFeedback();
         std::array<std::string, 3> options{};
         xSemaphoreTake(textStateMutex, portMAX_DELAY);
         const std::string predictionText = text;
@@ -691,6 +737,7 @@ void NotesFastKeyboardActivity::loop() {
     size_t touchedCursorPos = 0;
     const InputFieldTouchTarget inputTarget = inputFieldTouchTargetFromPoint(tx, ty, touchedCursorPos);
     if (inputTarget == InputFieldTouchTarget::PasswordToggle) {
+      clearTouchFeedback();
       passwordVisible = !passwordVisible;
       togglePos = false;
       hintVisible = false;
@@ -698,6 +745,7 @@ void NotesFastKeyboardActivity::loop() {
       return;
     }
     if (inputTarget == InputFieldTouchTarget::Cursor) {
+      clearTouchFeedback();
       xSemaphoreTake(textStateMutex, portMAX_DELAY);
       cursorPos = std::min(touchedCursorPos, text.length());
       xSemaphoreGive(textStateMutex);
@@ -732,6 +780,7 @@ void NotesFastKeyboardActivity::loop() {
                            static_cast<int16_t>(tapX), static_cast<int16_t>(tapY), inContact, millis());
     if (result.event) {
       touchSelectionHidden = true;
+      rememberTouchFeedback(result.event.value);
       if (activateValue(result.event.value, result.event.longPress)) {
         // No app-level batching: the ActivityManager render task already
         // coalesces requests that arrive while the e-ink refresh is busy.
@@ -860,6 +909,7 @@ void NotesFastKeyboardActivity::loop() {
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
     touchSelectionHidden = false;
+    clearTouchFeedback();
     confirmHeld = true;
     confirmLongHandled = false;
   }
@@ -1194,16 +1244,21 @@ void NotesFastKeyboardActivity::render(RenderLock&&) {
     }
   }
 
-  // The keyboard itself is static during ordinary touch typing. Cache only its
-  // framebuffer region; text and predictions above it remain fully dynamic.
+  // Cache the whole static footer (keyboard + button hints) rather than only
+  // the key grid. Predictions stay above kbRect.y and remain dynamic.
   const uint32_t visualKey = keyboardVisualKey();
-  bool restoredKeyboard = false;
+  const int footerX = 0;
+  const int footerY = kbRect.y;
+  const int footerWidth = renderer.getScreenWidth();
+  const int footerHeight = std::max(1, renderer.getScreenHeight() - footerY);
+
+  bool restoredFooter = false;
   if (keyboardCacheValid && keyboardCache != nullptr && keyboardCacheKey == visualKey) {
-    restoredKeyboard = renderer.copyBufferToRegion(
-        kbRect.x, kbRect.y, kbRect.width, kbRect.height, keyboardCache, keyboardCacheSize);
+    restoredFooter = renderer.copyBufferToRegion(
+        footerX, footerY, footerWidth, footerHeight, keyboardCache, keyboardCacheSize);
   }
 
-  if (!restoredKeyboard) {
+  if (!restoredFooter) {
     fui::GfxRendererTarget target(renderer);
     target.setFont(fui::GfxRendererTarget::FONT_SMALL, SMALL_FONT_ID);
     target.setFont(fui::GfxRendererTarget::FONT_BODY, UI_12_FONT_ID);
@@ -1234,8 +1289,14 @@ void NotesFastKeyboardActivity::render(RenderLock&&) {
     interactions.publish();
     interactionsReady.store(true, std::memory_order_release);
 
+    const auto labels =
+        mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT),
+                              tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    GUI.drawSideButtonHints(renderer, ">", "<");
+
     const size_t needed =
-        renderer.getRegionByteSize(kbRect.x, kbRect.y, kbRect.width, kbRect.height);
+        renderer.getRegionByteSize(footerX, footerY, footerWidth, footerHeight);
     if (needed > 0) {
       if (keyboardCache == nullptr || keyboardCacheSize < needed) {
         releaseKeyboardCache();
@@ -1245,7 +1306,7 @@ void NotesFastKeyboardActivity::render(RenderLock&&) {
       }
       if (keyboardCache != nullptr &&
           renderer.copyRegionToBuffer(
-              kbRect.x, kbRect.y, kbRect.width, kbRect.height, keyboardCache, keyboardCacheSize)) {
+              footerX, footerY, footerWidth, footerHeight, keyboardCache, keyboardCacheSize)) {
         keyboardCacheKey = visualKey;
         keyboardCacheValid = true;
       } else {
@@ -1254,11 +1315,9 @@ void NotesFastKeyboardActivity::render(RenderLock&&) {
     }
   }
 
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_LEFT),
-                                            tr(STR_DIR_RIGHT));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-
-  GUI.drawSideButtonHints(renderer, ">", "<");
+  // Draw after caching so the normal footer cache never contains the feedback.
+  // The outline rides on the same e-ink refresh as the text change.
+  drawTouchFeedback();
 
   renderer.displayBuffer();
 }
