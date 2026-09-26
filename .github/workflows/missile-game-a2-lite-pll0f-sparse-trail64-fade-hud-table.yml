@@ -3,7 +3,7 @@ name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster
 on:
   push:
     branches:
-      - x4-pro-missile-profile1-entryhalf-explosion2-basemode17-preselected-hard-speeds
+      - x4-pro-missile-basemode17-consolidation-capture
 
 jobs:
   build-x4-pro:
@@ -147,6 +147,25 @@ jobs:
 
       - name: Apply BaseMode17 preselected hard-mode speeds
         run: python scripts/missile_basemode17_preselected_hard_speeds.py
+
+      - name: Capture consolidated modified sources
+        run: |
+          git diff --name-only --diff-filter=AM > /tmp/consolidated-files.txt
+          mkdir -p /tmp/consolidated-root
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            mkdir -p "/tmp/consolidated-root/$(dirname "$f")"
+            cp "$f" "/tmp/consolidated-root/$f"
+          done < /tmp/consolidated-files.txt
+          cp /tmp/consolidated-files.txt /tmp/consolidated-root/consolidated-files.txt
+          tar -C /tmp/consolidated-root -czf /tmp/basemode17-consolidated-sources.tar.gz .
+
+      - name: Upload consolidated modified sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: basemode17-consolidated-sources-${{ github.run_number }}
+          path: /tmp/basemode17-consolidated-sources.tar.gz
+          if-no-files-found: error
 
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
