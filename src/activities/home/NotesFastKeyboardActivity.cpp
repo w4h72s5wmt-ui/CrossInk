@@ -672,7 +672,9 @@ fui::Rect NotesFastKeyboardActivity::keyboardRect() const {
 fui::Rect NotesFastKeyboardActivity::predictiveBarRect() const {
   const fui::Rect kb = keyboardRect();
   const auto& metrics = UITheme::getInstance().getMetrics();
-  const int height = std::max(38, renderer.getLineHeight(UI_10_FONT_ID) + 16);
+  // Notes uses a taller prediction bar than the generic keyboard: easier
+  // to read and a larger touch target without changing the global keyboard UI.
+  const int height = std::max(52, renderer.getLineHeight(UI_10_FONT_ID) + 24);
   const int y = std::max(0, static_cast<int>(kb.y) - metrics.verticalSpacing - height);
   return fui::Rect{kb.x, static_cast<int16_t>(y), kb.width, static_cast<int16_t>(height)};
 }
