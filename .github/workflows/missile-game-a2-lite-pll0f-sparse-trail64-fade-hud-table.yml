@@ -150,7 +150,16 @@ jobs:
 
       - name: Capture consolidated modified sources
         run: |
-          git diff --name-only --diff-filter=AM > /tmp/consolidated-files.txt
+          : > /tmp/consolidated-files.txt
+          git diff --name-only --diff-filter=AM | while IFS= read -r f; do
+            [ -f "$f" ] && printf '%s\n' "$f"
+          done >> /tmp/consolidated-files.txt
+          if [ -d freeink-sdk/.git ] || [ -f freeink-sdk/.git ]; then
+            git -C freeink-sdk diff --name-only --diff-filter=AM | while IFS= read -r f; do
+              [ -f "freeink-sdk/$f" ] && printf 'freeink-sdk/%s\n' "$f"
+            done >> /tmp/consolidated-files.txt
+          fi
+          sort -u /tmp/consolidated-files.txt -o /tmp/consolidated-files.txt
           mkdir -p /tmp/consolidated-root
           while IFS= read -r f; do
             [ -z "$f" ] && continue
