@@ -1,12 +1,10 @@
-name: Missile GAME-A2 Lite PLL0F Sparse Trail64 Fade Header HUD OPT12 4P Cluster1 PROFILE1 EntryHalf Explosion2 BaseMode17 PreselectedHardSpeeds X4 Pro
+name: Missile BaseMode17 Consolidated X4 Pro
 
 on:
   push:
     branches:
       - x4-pro-missile-basemode17-consolidated
-
-permissions:
-  contents: write
+  workflow_dispatch:
 
 jobs:
   build-x4-pro:
@@ -37,140 +35,8 @@ jobs:
       - name: Install PlatformIO Core
         run: uv tool install platformio
 
-      - name: Apply Stage B window transfer patch
-        run: python scripts/uc8279_window_benchmark_patch.py
-
-      - name: Preserve stable Missile gameplay timing
-        run: python scripts/missile_stageb_gameplay_fix.py
-
-      - name: Apply Fast40 Hybrid-A waveform and benchmark
-        run: python scripts/uc8279_fast40_hybrid_a.py
-
-      - name: Apply GAME-A2 Lite transition-only waveform and wave scrub
-        run: python scripts/uc8279_game_a2_lite_wave_scrub.py
-
-      - name: Apply temporary dirty-window PLL 0x0F
-        run: python scripts/uc8279_game_a2_lite_pll0f.py
-
-      - name: Apply sparse-DTM tiled upload and menu scrub
-        run: python scripts/uc8279_game_a2_lite_sparse_dtm.py
-
-      - name: Apply pinned-SDK sparse compile fix
-        run: python scripts/uc8279_sparse_compile_fix.py
-
-      - name: Apply Trail64 fade clipping
-        run: python scripts/missile_sparse_trail64_fade_clean.py
-
-      - name: Restore normal app exit and scrub only on game-menu return
-        run: python scripts/missile_menu_scrub_exit_normal_fix.py
-
-      - name: Apply fixed-cell HUD table
-        run: python scripts/missile_sparse_trail64_hud_table.py
-
-      - name: Move wave/cities to header and keep Score/Record below
-        run: python scripts/missile_header_score_record_hud.py
-
-      - name: Clean header alignment and update cities per wave only
-        run: python scripts/missile_header_hud_clean_wave_city.py
-
-      - name: Reserve visible header counter lane
-        run: python scripts/missile_header_hud_reserved_meta_fix.py
-
-      - name: Refresh displayed Record only per wave
-        run: python scripts/missile_record_refresh_per_wave.py
-
-      - name: Align Vague/Villes to title baseline
-        run: python scripts/missile_header_baseline_align.py
-
-      - name: Apply OPT12 sparse DTM1 and spatial Bayer
-        run: python scripts/missile_opt12_sparse_dtm1_bayer.py
-
-      - name: Lock header counters to exact title baseline
-        run: python scripts/missile_header_true_baseline.py
-
-      - name: Apply A2-Lite 4P and single title-line header
-        run: python scripts/missile_opt12_4p_titleline.py
-
-      - name: Apply compact French title and one-frame dirty-cluster deferral
-        run: python scripts/missile_4p_titlefr_cluster1.py
-
-      - name: Apply PROFILE1 instrumentation
-        run: python scripts/missile_cluster1_profile1.py
-
-      - name: Apply clean HALF gameplay-entry baseline
-        run: python scripts/missile_profile1_entry_half.py
-
-      - name: Apply smoother faster Explosion2 gameplay polish
-        run: python scripts/missile_explosion2_polish.py
-
-      - name: Apply three-base gameplay mode
-        run: python scripts/missile_base_mode.py
-
-      - name: Apply BaseMode2 menu/save/explosion cleanup
-        run: python scripts/missile_basemode_cleanup.py
-
-      - name: Apply BaseMode3 rotated explosion cache and bench fix
-        run: python scripts/missile_basemode3_rotcache.py
-
-      - name: Apply BaseMode4 animated large rotation
-        run: python scripts/missile_basemode4_rotanim.py
-
-      - name: Apply BaseMode5 regular polygons and mode score table
-        run: python scripts/missile_basemode5_polyscores.py
-
-      - name: Apply BaseMode7 realistic explosions and reset scores
-        run: python scripts/missile_basemode7_realistic.py
-
-      - name: Apply BaseMode8 score scrub and realistic polygon hitboxes
-        run: python scripts/missile_basemode8_score2s_hitpoly.py
-
-      - name: Apply BaseMode9 wave-only score refresh
-        run: python scripts/missile_basemode9_score_wave.py
-
-      - name: Apply BaseMode10 zero-cost explosion polish
-        run: python scripts/missile_basemode10_explosion_polish.py
-
-      - name: Apply BaseMode11 turret ammo gauge
-        run: python scripts/missile_basemode11_ammo_gauge.py
-
-      - name: Apply BaseMode12 inter-wave summary and full-height field
-        run: python scripts/missile_basemode12_interwave_fullfield.py
-
-      - name: Apply BaseMode13 true inter-wave popup
-        run: python scripts/missile_basemode13_true_popup.py
-
-      - name: Apply BaseMode14 popup local refresh
-        run: python scripts/missile_basemode14_popup_local_refresh.py
-
-      - name: Apply BaseMode15 inter-wave stats and preparation
-        run: python scripts/missile_basemode15_interwave_stats_prep.py
-
-      - name: Apply BaseMode16 hard-mode speed variance
-        run: python scripts/missile_basemode16_hard_speed_variance.py
-
-      - name: Apply BaseMode17 preselected hard-mode speeds
-        run: python scripts/missile_basemode17_preselected_hard_speeds.py
-
-      - name: Consolidate BaseMode17 sources into repository
-        run: |
-          set -e
-          mkdir -p consolidated/freeink-sdk/libs/display/FreeInkDisplay/include
-          mkdir -p consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver
-          mkdir -p consolidated/freeink-sdk/libs/display/FreeInkDisplay/src
-          cp freeink-sdk/libs/display/FreeInkDisplay/include/FreeInkDisplay.h consolidated/freeink-sdk/libs/display/FreeInkDisplay/include/FreeInkDisplay.h
-          cp freeink-sdk/libs/display/FreeInkDisplay/src/FreeInkDisplay.cpp consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/FreeInkDisplay.cpp
-          cp freeink-sdk/libs/display/FreeInkDisplay/src/driver/PanelDriver.h consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver/PanelDriver.h
-          cp freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.cpp consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.cpp
-          cp freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.h consolidated/freeink-sdk/libs/display/FreeInkDisplay/src/driver/Uc8279X4Driver.h
-          git add src/activities/home/MissileCommandActivity.cpp src/activities/home/MissileCommandActivity.h
-          git add lib/hal/HalDisplay.cpp lib/hal/HalDisplay.h
-          git add consolidated/freeink-sdk
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if ! git diff --cached --quiet; then
-            git commit -m "refactor: consolidate BaseMode17 source state [skip ci]"
-            git push origin HEAD:x4-pro-missile-basemode17-consolidated
-          fi
+      - name: Apply frozen freeink-sdk source overlay
+        run: cp -a consolidated/freeink-sdk/. freeink-sdk/
 
       - name: Clean X4 Pro build output
         run: pio run -e x4-pro -t clean
@@ -181,13 +47,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode17-preselected-hard-speeds-${{ github.run_number }}
+          name: missile-basemode17-consolidated-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-profile1-entryhalf-explosion2-basemode17-preselected-hard-speeds-${{ github.run_number }}-log
+          name: missile-basemode17-consolidated-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
