@@ -13,6 +13,9 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "util/ButtonNavigator.h"
 #include "activities/util/PredictiveText.h"
+#include "components/TouchHeaderBackButton.h"
+#include "components/UIScale.h"
+#include "fontIds.h"
 
 // Text entry on the FreeInkUI keyboard component: the SDK layout tables and
 // keyboard() do the key rendering and hit-rect registration, InteractionBuffer
