@@ -39,6 +39,11 @@ class HalDisplay {
                             bool fromProgmem = false) const;
 
   void displayBuffer(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
+  // Experimental UC8279 window path: physical panel coordinates, byte-aligned X.
+  void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
+  void displaySparseWindow(const uint8_t* tileMask, uint16_t tileCols, uint16_t tileRows, uint16_t tileW, uint16_t tileH,
+                           uint16_t bboxX, uint16_t bboxY, uint16_t bboxW, uint16_t bboxH,
+                           bool turnOffScreen = false);
   // Persistently invert panel output while leaving framebuffer drawing in its
   // normal logical colors.
   void setInverted(bool inverted);
