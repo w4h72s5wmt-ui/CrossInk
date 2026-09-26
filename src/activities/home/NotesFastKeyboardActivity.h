@@ -149,18 +149,11 @@ class NotesFastKeyboardActivity : public Activity {
   uint32_t keyboardCacheKey = 0;
   bool keyboardCacheValid = false;
   bool touchSelectionHidden = false;
-  bool typingRenderPending = false;
-  uint8_t pendingTypingEdits = 0;
-  unsigned long typingRenderDeadlineMs = 0;
 
   void releaseKeyboardCache();
   void requestImmediateEditorUpdate();
-  void scheduleTypingRender();
-  bool isBatchableTouchValue(int16_t value, bool longPress) const;
   uint32_t keyboardVisualKey() const;
 
-  static constexpr uint16_t TYPING_IDLE_MS = 220;
-  static constexpr uint8_t TYPING_BATCH_EDITS = 2;
   static constexpr size_t TEXT_RESERVE_HEADROOM = 512;
 
   static constexpr uint16_t LONG_PRESS_MS = 500;

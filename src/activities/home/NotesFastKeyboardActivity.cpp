@@ -133,9 +133,6 @@ void NotesFastKeyboardActivity::onEnter() {
   }
   keyboardCacheValid = false;
   touchSelectionHidden = mappedInput.hasTouchHardware();
-  typingRenderPending = false;
-  pendingTypingEdits = 0;
-  typingRenderDeadlineMs = 0;
   cursorPos = text.length();
   layoutId = inputType == InputType::Url ? fui::KeyboardLayoutId::QwertyEn : keyboard_layouts::startingLayout();
   const uint16_t enabledLayouts = keyboard_layouts::enabled();
@@ -185,44 +182,7 @@ void NotesFastKeyboardActivity::releaseKeyboardCache() {
 }
 
 void NotesFastKeyboardActivity::requestImmediateEditorUpdate() {
-  typingRenderPending = false;
-  pendingTypingEdits = 0;
-  typingRenderDeadlineMs = 0;
   requestUpdate();
-}
-
-void NotesFastKeyboardActivity::scheduleTypingRender() {
-  const unsigned long now = millis();
-  if (!typingRenderPending) {
-    typingRenderPending = true;
-    pendingTypingEdits = 1;
-    typingRenderDeadlineMs = now + TYPING_IDLE_MS;
-    return;
-  }
-
-  ++pendingTypingEdits;
-  if (pendingTypingEdits >= TYPING_BATCH_EDITS) {
-    requestImmediateEditorUpdate();
-  } else {
-    typingRenderDeadlineMs = now + TYPING_IDLE_MS;
-  }
-}
-
-bool NotesFastKeyboardActivity::isBatchableTouchValue(const int16_t value, const bool longPress) const {
-  if (longPress) return false;
-  if (value == fui::QWERTY_KEY_BACKSPACE) return true;
-  if (value == fui::QWERTY_KEY_SHIFT || value == fui::QWERTY_KEY_MODE ||
-      value == fui::QWERTY_KEY_LANG || value == fui::QWERTY_KEY_ENTER ||
-      value == URL_PANEL_KEY) {
-    return false;
-  }
-
-  // Auto-release of Shift changes the visible keyboard layer, so that key must
-  // repaint immediately even though the inserted character itself is ordinary.
-  if (shifted && !symbols) return false;
-
-  const char* out = fui::keyboardOutputFor(currentLayout(), value);
-  return out != nullptr && !outputEndsWord(out);
 }
 
 uint32_t NotesFastKeyboardActivity::keyboardVisualKey() const {
@@ -640,11 +600,6 @@ fui::Rect NotesFastKeyboardActivity::predictiveBarRect() const {
 }
 
 void NotesFastKeyboardActivity::loop() {
-  if (typingRenderPending &&
-      static_cast<int32_t>(millis() - typingRenderDeadlineMs) >= 0) {
-    requestImmediateEditorUpdate();
-  }
-
 #if CROSSINK_APP_CAP_TOUCH
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
     if (inputType == InputType::Multiline) {
@@ -719,13 +674,12 @@ void NotesFastKeyboardActivity::loop() {
                            static_cast<int16_t>(tapX), static_cast<int16_t>(tapY), inContact, millis());
     if (result.event) {
       touchSelectionHidden = true;
-      const bool batchable = isBatchableTouchValue(result.event.value, result.event.longPress);
       if (activateValue(result.event.value, result.event.longPress)) {
-        if (batchable) {
-          scheduleTypingRender();
-        } else {
-          requestImmediateEditorUpdate();
-        }
+        // No app-level batching: the ActivityManager render task already
+        // coalesces requests that arrive while the e-ink refresh is busy.
+        // This keeps the first character responsive without generating a
+        // second artificial 220 ms wait in Notes.
+        requestImmediateEditorUpdate();
       }
       return;
     }
