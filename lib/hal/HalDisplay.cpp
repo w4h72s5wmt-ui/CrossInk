@@ -71,6 +71,19 @@ void HalDisplay::displayBuffer(HalDisplay::RefreshMode mode, bool turnOffScreen)
   einkDisplay.displayBuffer(convertRefreshMode(mode), turnOffScreen);
 }
 
+void HalDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen) {
+  HalSpiBus::Lock spiLock;
+  einkDisplay.displayWindow(x, y, w, h, turnOffScreen);
+}
+
+void HalDisplay::displaySparseWindow(const uint8_t* tileMask, uint16_t tileCols, uint16_t tileRows,
+                                     uint16_t tileW, uint16_t tileH, uint16_t bboxX, uint16_t bboxY,
+                                     uint16_t bboxW, uint16_t bboxH, bool turnOffScreen) {
+  HalSpiBus::Lock spiLock;
+  einkDisplay.displaySparseWindow(tileMask, tileCols, tileRows, tileW, tileH, bboxX, bboxY, bboxW, bboxH,
+                                  turnOffScreen);
+}
+
 void HalDisplay::setInverted(bool inverted) {
   HalSpiBus::Lock spiLock;
   einkDisplay.setInverted(inverted);
