@@ -19,7 +19,7 @@
 
 #include "MappedInputManager.h"
 #include "activities/util/ConfirmationActivity.h"
-#include "activities/util/NotesViewerKeyboardBase.h"
+#include "NotesViewerKeyboardBase.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/OptionPopup.h"
 #include "components/UITheme.h"
