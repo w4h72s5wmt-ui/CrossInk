@@ -2,15 +2,19 @@
 #include "RssFetchDiagnostics.h"
 
 #include <Arduino.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <SecureHttpClient.h>
+#include <WiFiClient.h>
 #include <strings.h>
+#include <sys/time.h>
+#include <wolfssl/ssl.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -18,8 +22,18 @@ namespace RssFigaroAuth {
 namespace {
 constexpr char AUTH_PATH[] = "/RSS/figaro_auth.txt";
 constexpr size_t MAX_AUTH_BYTES = 4096;
+constexpr size_t IO_BUFFER_SIZE = 2048;
+constexpr size_t MAX_HEADER_LINE = 8192;
+constexpr uint32_t TCP_TIMEOUT_MS = 15000;
+constexpr uint32_t TLS_TIMEOUT_MS = 20000;
 constexpr uint32_t HTTP_TIMEOUT_MS = 30000;
 constexpr uint8_t MAX_REDIRECTS = 5;
+constexpr uint16_t MIN_TLS_CLOCK_YEAR = 2024;
+
+// Build 230 showed that the X4 Pro wolfSSL configuration rejects PEM trust-anchor
+// loading before the handshake. Keep the same public DigiCert Global Root G3
+// trust anchor in DER so verification does not depend on the optional PEM decoder.
+#include "RssFigaroRootG3.inc"
 
 struct ParsedUrl {
   std::string host;
@@ -38,13 +52,9 @@ bool parseUrl(const std::string& url, ParsedUrl& out) {
   if (url.size() <= sizeof(PREFIX) - 1 || strncasecmp(url.c_str(), PREFIX, sizeof(PREFIX) - 1) != 0) return false;
   const size_t hostStart = sizeof(PREFIX) - 1;
   const size_t pathStart = url.find_first_of("/?#", hostStart);
-  const std::string authority =
-      url.substr(hostStart, pathStart == std::string::npos ? std::string::npos : pathStart - hostStart);
+  const std::string authority = url.substr(hostStart, pathStart == std::string::npos ? std::string::npos : pathStart - hostStart);
   if (authority.empty() || authority.find(':') != std::string::npos ||
-      authority.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") !=
-          std::string::npos) {
-    return false;
-  }
+      authority.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != std::string::npos) return false;
   out.host = authority;
   out.path = pathStart == std::string::npos ? "/" : url.substr(pathStart);
   if (out.path.empty() || out.path.front() != '/') out.path.insert(out.path.begin(), '/');
@@ -54,10 +64,8 @@ bool parseUrl(const std::string& url, ParsedUrl& out) {
 bool isFigaroHost(const std::string& host) {
   static constexpr char ROOT[] = "lefigaro.fr";
   if (strcasecmp(host.c_str(), ROOT) == 0) return true;
-  const size_t hostLength = host.size();
-  const size_t rootLength = sizeof(ROOT) - 1;
-  return hostLength > rootLength && host[hostLength - rootLength - 1] == '.' &&
-         strcasecmp(host.c_str() + hostLength - rootLength, ROOT) == 0;
+  const size_t hl = host.size(), rl = sizeof(ROOT) - 1;
+  return hl > rl && host[hl - rl - 1] == '.' && strcasecmp(host.c_str() + hl - rl, ROOT) == 0;
 }
 
 bool isAllowedUrl(const std::string& url) {
@@ -68,15 +76,12 @@ bool isAllowedUrl(const std::string& url) {
 std::string redirectUrl(const std::string& baseUrl, const std::string& location) {
   if (location.rfind("https://", 0) == 0) return location;
   if (location.rfind("//", 0) == 0) return "https:" + location;
-
   ParsedUrl base;
   if (!parseUrl(baseUrl, base)) return {};
   if (!location.empty() && location.front() == '/') return "https://" + base.host + location;
-
   const size_t query = base.path.find_first_of("?#");
   if (query != std::string::npos) base.path.erase(query);
   if (!location.empty() && location.front() == '?') return "https://" + base.host + base.path + location;
-
   const size_t slash = base.path.rfind('/');
   return "https://" + base.host + (slash == std::string::npos ? "/" : base.path.substr(0, slash + 1)) + location;
 }
@@ -84,44 +89,26 @@ std::string redirectUrl(const std::string& baseUrl, const std::string& location)
 bool readCookie(std::string& out) {
   out.clear();
   if (!Storage.exists(AUTH_PATH)) return false;
-
   FsFile file;
   if (!Storage.openFileForRead("RSS", AUTH_PATH, file)) return false;
   const size_t bytes = std::min(static_cast<size_t>(file.size()), MAX_AUTH_BYTES + 1);
-  if (bytes == 0 || bytes > MAX_AUTH_BYTES) {
-    file.close();
-    return false;
-  }
-
+  if (bytes == 0 || bytes > MAX_AUTH_BYTES) { file.close(); return false; }
   out.resize(bytes);
   const int read = file.read(out.data(), bytes);
   file.close();
-  if (read <= 0) {
-    out.clear();
-    return false;
-  }
-
+  if (read <= 0) { out.clear(); return false; }
   out.resize(static_cast<size_t>(read));
   while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back()))) out.pop_back();
-
   size_t start = 0;
   while (start < out.size() && std::isspace(static_cast<unsigned char>(out[start]))) ++start;
   if (start) out.erase(0, start);
-
   static constexpr char COOKIE_PREFIX[] = "Cookie:";
-  if (out.size() >= sizeof(COOKIE_PREFIX) - 1 &&
-      strncasecmp(out.c_str(), COOKIE_PREFIX, sizeof(COOKIE_PREFIX) - 1) == 0) {
+  if (out.size() >= sizeof(COOKIE_PREFIX) - 1 && strncasecmp(out.c_str(), COOKIE_PREFIX, sizeof(COOKIE_PREFIX) - 1) == 0) {
     out.erase(0, sizeof(COOKIE_PREFIX) - 1);
     while (!out.empty() && std::isspace(static_cast<unsigned char>(out.front()))) out.erase(out.begin());
   }
-
   if (out.empty()) return false;
-  for (const unsigned char c : out) {
-    if (c < 0x20 || c == 0x7f) {
-      out.clear();
-      return false;
-    }
-  }
+  for (const unsigned char c : out) if (c < 0x20 || c == 0x7f) { out.clear(); return false; }
   return true;
 }
 
@@ -132,10 +119,7 @@ bool ensureCookie() {
 }
 
 uint64_t fnv1a64(const std::string& text, uint64_t hash = 14695981039346656037ULL) {
-  for (const unsigned char c : text) {
-    hash ^= c;
-    hash *= 1099511628211ULL;
-  }
+  for (const unsigned char c : text) { hash ^= c; hash *= 1099511628211ULL; }
   return hash;
 }
 
@@ -143,6 +127,234 @@ bool isRedirectStatus(const int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
+bool isLeapYear(const uint16_t year) {
+  return (year % 4U == 0U && year % 100U != 0U) || year % 400U == 0U;
+}
+
+uint8_t daysInMonth(const uint16_t year, const uint8_t month) {
+  static constexpr uint8_t DAYS[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12) return 0;
+  return month == 2 && isLeapYear(year) ? 29 : DAYS[month - 1];
+}
+
+// Gregorian civil date -> days since 1970-01-01. This keeps the Figaro path
+// independent of timezone state and avoids mktime()/TZ conversions: the X4 Pro
+// RTC exposed by HalClock is already stored in UTC.
+int64_t daysFromCivil(int year, const unsigned month, const unsigned day) {
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(year - era * 400);
+  const int shiftedMonth = static_cast<int>(month) + (month > 2 ? -3 : 9);
+  const unsigned doy = (153U * static_cast<unsigned>(shiftedMonth) + 2U) / 5U + day - 1U;
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  return static_cast<int64_t>(era) * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+bool syncSystemClockFromRtc(int& detail) {
+  uint16_t year = 0;
+  uint8_t month = 0, day = 0, hour = 0, minute = 0;
+  if (!halClock.getDateTime(year, month, day, hour, minute)) {
+    detail = -1006;
+    return false;
+  }
+  const uint8_t monthDays = daysInMonth(year, month);
+  if (year < MIN_TLS_CLOCK_YEAR || year > 2099 || monthDays == 0 || day < 1 || day > monthDays || hour > 23 ||
+      minute > 59) {
+    detail = -1007;
+    return false;
+  }
+
+  const int64_t epoch = daysFromCivil(static_cast<int>(year), month, day) * 86400LL +
+                        static_cast<int64_t>(hour) * 3600LL + static_cast<int64_t>(minute) * 60LL;
+  if (epoch <= 0) {
+    detail = -1007;
+    return false;
+  }
+
+  timeval tv{};
+  tv.tv_sec = static_cast<time_t>(epoch);
+  tv.tv_usec = 0;
+  if (settimeofday(&tv, nullptr) != 0) {
+    detail = -1008;
+    return false;
+  }
+  detail = 0;
+  return true;
+}
+
+int wolfRecv(WOLFSSL*, char* buf, int size, void* ctx) {
+  auto* tcp = static_cast<WiFiClient*>(ctx);
+  if (!tcp->connected() && tcp->available() == 0) return WOLFSSL_CBIO_ERR_CONN_CLOSE;
+  if (tcp->available() == 0) return WOLFSSL_CBIO_ERR_WANT_READ;
+  const int n = tcp->read(reinterpret_cast<uint8_t*>(buf), static_cast<size_t>(size));
+  return n > 0 ? n : WOLFSSL_CBIO_ERR_WANT_READ;
+}
+
+int wolfSend(WOLFSSL*, char* buf, int size, void* ctx) {
+  auto* tcp = static_cast<WiFiClient*>(ctx);
+  const int n = tcp->write(reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(size));
+  if (n > 0) return n;
+  return tcp->connected() ? WOLFSSL_CBIO_ERR_WANT_WRITE : WOLFSSL_CBIO_ERR_CONN_CLOSE;
+}
+
+bool wantIo(const int error) {
+  return error == WOLFSSL_ERROR_WANT_READ || error == WOLFSSL_ERROR_WANT_WRITE;
+}
+
+class VerifiedTls {
+ public:
+  ~VerifiedTls() { close(); }
+
+  bool connect(const char* host, int& detail) {
+    close();
+    // wolfSSL validates the trust anchor while it is loaded, before the peer
+    // verify callback can run. Build 233 proved libc time was stale there even
+    // while the X4 Pro RTC/UI date was correct. Seed libc from that existing UTC
+    // RTC first, then keep normal strict certificate date verification.
+    if (!syncSystemClockFromRtc(detail)) return false;
+
+    tcp.setConnectionTimeout(TCP_TIMEOUT_MS);
+    tcp.setTimeout(HTTP_TIMEOUT_MS);
+    if (!tcp.connect(host, 443)) { detail = -1001; return false; }
+    ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
+    if (!ctx) { detail = -1002; return false; }
+    wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, nullptr);
+    const int trustResult = wolfSSL_CTX_load_verify_buffer(ctx, DIGICERT_GLOBAL_ROOT_G3_DER,
+                                                           DIGICERT_GLOBAL_ROOT_G3_DER_SIZE,
+                                                           WOLFSSL_FILETYPE_ASN1);
+    if (trustResult != WOLFSSL_SUCCESS) {
+      detail = trustResult;
+      return false;
+    }
+    wolfSSL_SetIORecv(ctx, wolfRecv);
+    wolfSSL_SetIOSend(ctx, wolfSend);
+    ssl = wolfSSL_new(ctx);
+    if (!ssl) { detail = -1004; return false; }
+    wolfSSL_SetIOReadCtx(ssl, &tcp);
+    wolfSSL_SetIOWriteCtx(ssl, &tcp);
+    if (wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, host, std::strlen(host)) != WOLFSSL_SUCCESS ||
+        wolfSSL_check_domain_name(ssl, host) != WOLFSSL_SUCCESS) {
+      detail = -1005; return false;
+    }
+#if defined(WOLFSSL_TLS13) && defined(HAVE_CURVE25519)
+    wolfSSL_UseKeyShare(ssl, WOLFSSL_ECC_X25519);
+#endif
+#ifdef HAVE_MAX_FRAGMENT
+    wolfSSL_UseMaxFragment(ssl, WOLFSSL_MFL_2_11);
+#endif
+    const uint32_t deadline = millis() + TLS_TIMEOUT_MS;
+    while (true) {
+      const int result = wolfSSL_connect(ssl);
+      if (result == WOLFSSL_SUCCESS) { detail = 0; return true; }
+      detail = wolfSSL_get_error(ssl, result);
+      if (!wantIo(detail) || static_cast<int32_t>(millis() - deadline) >= 0) return false;
+      delay(5);
+    }
+  }
+
+  bool writeAll(const char* data, size_t length, int& detail) {
+    size_t offset = 0;
+    const uint32_t deadline = millis() + HTTP_TIMEOUT_MS;
+    while (offset < length) {
+      const int n = wolfSSL_write(ssl, data + offset, static_cast<int>(length - offset));
+      if (n > 0) { offset += static_cast<size_t>(n); continue; }
+      detail = wolfSSL_get_error(ssl, n);
+      if (!wantIo(detail) || static_cast<int32_t>(millis() - deadline) >= 0) return false;
+      delay(2);
+    }
+    return true;
+  }
+
+  int readSome(uint8_t* out, size_t capacity, uint32_t deadline, int& detail) {
+    while (true) {
+      const int n = wolfSSL_read(ssl, out, static_cast<int>(capacity));
+      if (n > 0) return n;
+      detail = wolfSSL_get_error(ssl, n);
+      if (detail == WOLFSSL_ERROR_ZERO_RETURN || (!tcp.connected() && tcp.available() == 0)) return 0;
+      if (!wantIo(detail) || static_cast<int32_t>(millis() - deadline) >= 0) return -1;
+      delay(2);
+    }
+  }
+
+  void close() {
+    if (ssl) { wolfSSL_free(ssl); ssl = nullptr; }
+    if (ctx) { wolfSSL_CTX_free(ctx); ctx = nullptr; }
+    tcp.stop();
+  }
+
+ private:
+  WiFiClient tcp;
+  WOLFSSL_CTX* ctx = nullptr;
+  WOLFSSL* ssl = nullptr;
+};
+
+bool readLine(VerifiedTls& tls, std::string& line, int& detail) {
+  line.clear();
+  const uint32_t deadline = millis() + HTTP_TIMEOUT_MS;
+  uint8_t byte = 0;
+  while (line.size() < MAX_HEADER_LINE) {
+    const int n = tls.readSome(&byte, 1, deadline, detail);
+    if (n <= 0) return false;
+    if (byte == '\n') {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      return true;
+    }
+    line.push_back(static_cast<char>(byte));
+  }
+  detail = -1010;
+  return false;
+}
+
+bool deliverFixed(VerifiedTls& tls, size_t remaining, const HttpDownloader::DataCallback& onData,
+                  const HttpDownloader::CancelCallback& cancel, RssFetchDiagnostics::Record& d, int& detail) {
+  auto buffer = makePsramByteBufferNoThrow(IO_BUFFER_SIZE);
+  if (!buffer) return false;
+  while (remaining > 0) {
+    if (cancel && cancel()) { detail = -1011; return false; }
+    const size_t wanted = std::min(remaining, IO_BUFFER_SIZE);
+    const int n = tls.readSome(buffer.get(), wanted, millis() + HTTP_TIMEOUT_MS, detail);
+    if (n <= 0) return false;
+    d.received += static_cast<size_t>(n);
+    if (!onData(buffer.get(), static_cast<size_t>(n))) { detail = -1012; return false; }
+    d.stored += static_cast<size_t>(n);
+    remaining -= static_cast<size_t>(n);
+  }
+  return true;
+}
+
+bool deliverUntilClose(VerifiedTls& tls, const HttpDownloader::DataCallback& onData,
+                       const HttpDownloader::CancelCallback& cancel, RssFetchDiagnostics::Record& d, int& detail) {
+  auto buffer = makePsramByteBufferNoThrow(IO_BUFFER_SIZE);
+  if (!buffer) return false;
+  while (true) {
+    if (cancel && cancel()) { detail = -1011; return false; }
+    const int n = tls.readSome(buffer.get(), IO_BUFFER_SIZE, millis() + HTTP_TIMEOUT_MS, detail);
+    if (n == 0) return true;
+    if (n < 0) return false;
+    d.received += static_cast<size_t>(n);
+    if (!onData(buffer.get(), static_cast<size_t>(n))) { detail = -1012; return false; }
+    d.stored += static_cast<size_t>(n);
+  }
+}
+
+bool deliverChunked(VerifiedTls& tls, const HttpDownloader::DataCallback& onData,
+                    const HttpDownloader::CancelCallback& cancel, RssFetchDiagnostics::Record& d, int& detail) {
+  std::string line;
+  while (true) {
+    if (!readLine(tls, line, detail)) return false;
+    const size_t semicolon = line.find(';');
+    const std::string hex = line.substr(0, semicolon);
+    char* end = nullptr;
+    const unsigned long size = std::strtoul(hex.c_str(), &end, 16);
+    if (!end || end == hex.c_str()) { detail = -1013; return false; }
+    if (size == 0) {
+      while (readLine(tls, line, detail) && !line.empty()) {}
+      return line.empty();
+    }
+    if (!deliverFixed(tls, static_cast<size_t>(size), onData, cancel, d, detail)) return false;
+    if (!readLine(tls, line, detail) || !line.empty()) { detail = -1014; return false; }
+  }
+}
 }  // namespace
 
 bool isConfiguredFor(const std::string& url) {
@@ -151,8 +363,6 @@ bool isConfiguredFor(const std::string& url) {
 
 uint64_t cacheKeyFor(const std::string& url) {
   if (!isConfiguredFor(url)) return 0;
-  // Preserve the historical cache key so changing transport does not invalidate
-  // already-downloaded Figaro bodies.
   const uint64_t hash = fnv1a64(session.cookie, fnv1a64("Figaro AUTH wolfSSL RTC v8"));
   return hash ? hash : 1;
 }
@@ -167,113 +377,100 @@ HttpDownloader::DownloadError streamUrl(const std::string& url, const HttpDownlo
                                         const HttpDownloader::CancelCallback& shouldCancel) {
   RssFetchDiagnostics::Record d;
   d.startedMs = millis();
-  d.transport = "figaro-auth-securehttp-v160";
+  d.transport = "figaro-auth-wolfssl";
   d.phase = "configuration";
-
-  const auto finish = [&](const HttpDownloader::DownloadError result) {
+  const auto finish = [&](HttpDownloader::DownloadError result) {
     d.result = static_cast<int>(result);
     RssFetchDiagnostics::write(url.c_str(), d);
     return result;
   };
-
   if (shouldCancel && shouldCancel()) return finish(HttpDownloader::ABORTED);
   if (!onData || !isAllowedUrl(url) || !ensureCookie()) return finish(HttpDownloader::HTTP_ERROR);
-  if (session.noResponseThisRefresh) {
-    d.phase = "circuit-open";
-    return finish(HttpDownloader::HTTP_ERROR);
-  }
+  if (session.noResponseThisRefresh) { d.phase = "circuit-open"; return finish(HttpDownloader::HTTP_ERROR); }
 
   std::string current = url;
   for (uint8_t hop = 0; hop < MAX_REDIRECTS; ++hop) {
-    if (shouldCancel && shouldCancel()) return finish(HttpDownloader::ABORTED);
-
     ParsedUrl parsed;
-    if (!parseUrl(current, parsed) || !isFigaroHost(parsed.host)) {
-      d.phase = "redirect";
+    if (!parseUrl(current, parsed) || !isFigaroHost(parsed.host)) return finish(HttpDownloader::HTTP_ERROR);
+    VerifiedTls tls;
+    d.phase = "tls";
+    const uint32_t openStart = millis();
+    int detail = 0;
+    if (!tls.connect(parsed.host.c_str(), detail)) {
+      d.openMs += millis() - openStart;
+      d.detail = detail;
       return finish(HttpDownloader::HTTP_ERROR);
     }
+    d.openMs += millis() - openStart;
 
-    freeink::SecureHttpClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
-
-    // Use the exact wolfSSL-backed client already used by CrossInk v1.6's
-    // working RSS transport. The verified custom Figaro path is incompatible
-    // with this SDK's wolfSSL feature set, while ESP HTTP connects but stalls
-    // before receiving response headers from Figaro.
-    http.setInsecure();
-    if (!http.begin(current)) {
-      d.phase = "client-init";
-      d.detail = -1021;
-      session.noResponseThisRefresh = true;
-      return finish(HttpDownloader::HTTP_ERROR);
-    }
-
-    http.setUserAgent("Mozilla/5.0 (XTEINK X4 Pro; CrossInk RSS)");
-    http.addHeader("Accept", "text/html,application/xhtml+xml");
-    http.addHeader("Accept-Encoding", "identity");
-    http.addHeader("Connection", "close");
-    http.addHeader("Cookie", session.cookie);
-
+    std::string request;
+    request.reserve(parsed.path.size() + session.cookie.size() + 256);
+    request += "GET "; request += parsed.path; request += " HTTP/1.1\r\nHost: "; request += parsed.host;
+    request += "\r\nUser-Agent: Mozilla/5.0 (XTEINK X4 Pro; CrossInk RSS)\r\n";
+    request += "Accept: text/html,application/xhtml+xml\r\nAccept-Encoding: identity\r\nConnection: close\r\nCookie: ";
+    request += session.cookie;
+    request += "\r\n\r\n";
     d.phase = "request";
-    const uint32_t requestStart = millis();
-    const int status = http.GET(
-        [&http, &onData, &d](const uint8_t* data, const size_t len) {
-          const int responseStatus = http.getStatus();
-          if (responseStatus != 200) return true;
-          if (d.expected < 0 && http.hasContentLength()) {
-            d.expected = static_cast<int64_t>(http.getContentLength());
-          }
-          d.received += len;
-          if (!onData(data, len)) return false;
-          d.stored += len;
-          return true;
-        },
-        [&shouldCancel]() { return shouldCancel && shouldCancel(); });
-    d.bodyMs += millis() - requestStart;
+    if (!tls.writeAll(request.data(), request.size(), detail)) { d.detail = detail; return finish(HttpDownloader::HTTP_ERROR); }
 
-    if (http.aborted()) return finish(HttpDownloader::ABORTED);
-
-    d.httpStatus = status;
-    if (http.hasContentLength()) d.expected = static_cast<int64_t>(http.getContentLength());
-
-    if (status < 0) {
-      d.phase = "request";
-      d.detail = status;
+    d.phase = "headers";
+    const uint32_t headerStart = millis();
+    std::string line;
+    if (!readLine(tls, line, detail)) {
+      d.headersMs += millis() - headerStart;
+      d.detail = detail;
       session.noResponseThisRefresh = true;
       return finish(HttpDownloader::HTTP_ERROR);
     }
+    d.headersMs += millis() - headerStart;
+    if (line.rfind("HTTP/", 0) != 0) { d.detail = -1020; return finish(HttpDownloader::HTTP_ERROR); }
+    const size_t space = line.find(' ');
+    d.httpStatus = space == std::string::npos ? 0 : std::atoi(line.c_str() + space + 1);
 
-    if (isRedirectStatus(status)) {
-      const std::string location = http.getHeader("location");
+    bool haveLength = false;
+    size_t contentLength = 0;
+    bool chunked = false;
+    bool identityEncoding = true;
+    std::string location;
+    while (readLine(tls, line, detail)) {
+      if (line.empty()) break;
+      const size_t colon = line.find(':');
+      if (colon == std::string::npos) continue;
+      std::string name = line.substr(0, colon), value = line.substr(colon + 1);
+      while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.erase(value.begin());
+      std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      std::string lower = value;
+      std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (name == "content-length") { contentLength = static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10)); haveLength = true; }
+      else if (name == "transfer-encoding" && lower.find("chunked") != std::string::npos) chunked = true;
+      else if (name == "content-encoding" && !lower.empty() && lower != "identity") identityEncoding = false;
+      else if (name == "location") location = value;
+    }
+    if (!line.empty()) { d.detail = detail; return finish(HttpDownloader::HTTP_ERROR); }
+    d.expected = haveLength ? static_cast<int64_t>(contentLength) : -1;
+
+    if (isRedirectStatus(d.httpStatus)) {
       const std::string next = redirectUrl(current, location);
-      if (location.empty() || !isAllowedUrl(next)) {
-        d.phase = "redirect";
-        return finish(HttpDownloader::HTTP_ERROR);
-      }
+      if (location.empty() || !isAllowedUrl(next)) { d.phase = "redirect"; return finish(HttpDownloader::HTTP_ERROR); }
       current = next;
       continue;
     }
-
-    if (status != 200) {
-      d.phase = "http-status";
+    if (d.httpStatus != 200 || !identityEncoding) {
+      d.phase = identityEncoding ? "http-status" : "encoded-response";
       return finish(HttpDownloader::HTTP_ERROR);
     }
 
-    if (http.callbackAborted()) {
-      d.phase = "body-callback";
-      d.detail = -1012;
-      return finish(HttpDownloader::HTTP_ERROR);
-    }
-
-    if (!http.responseComplete()) {
-      d.phase = "incomplete";
-      return finish(HttpDownloader::HTTP_ERROR);
-    }
-
+    d.phase = "body";
+    const uint32_t bodyStart = millis();
+    const bool ok = chunked ? deliverChunked(tls, onData, shouldCancel, d, detail)
+                            : haveLength ? deliverFixed(tls, contentLength, onData, shouldCancel, d, detail)
+                                         : deliverUntilClose(tls, onData, shouldCancel, d, detail);
+    d.bodyMs = millis() - bodyStart;
+    d.detail = detail;
+    if (!ok) return finish((shouldCancel && shouldCancel()) ? HttpDownloader::ABORTED : HttpDownloader::HTTP_ERROR);
     d.phase = "body-ready";
     return finish(HttpDownloader::OK);
   }
-
   d.phase = "redirect-limit";
   return finish(HttpDownloader::HTTP_ERROR);
 }
