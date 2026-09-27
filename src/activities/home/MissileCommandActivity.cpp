@@ -39,7 +39,7 @@ constexpr const char SAVE_PATH[] = "/.crosspoint/missile-command.bin";
 constexpr const char SCORE_PATH[] = "/.crosspoint/missile-command-score.bin";
 
 constexpr const char MISSILE_PROFILE1_TRACE_PATH[] =
-    "/missile-command-bm17-preselected-hard-speeds-trace.csv";
+    "/missile-command-v160-timing-trace.csv";
 constexpr uint32_t MISSILE_PROFILE1_SAMPLES = 200;
 
 struct MissileProfile1Row {
