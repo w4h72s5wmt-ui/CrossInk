@@ -1901,7 +1901,9 @@ void MissileCommandActivity::refreshPlayingWindow(bool forceFullRefresh) {
 
       for (uint8_t c = 0; c < componentCount; ++c) {
         const DirtyComponent& satellite = components[c];
-        if (static_cast<uint32_t>(satellite.count) * 100u > static_cast<uint32_t>(dirtyTiles) * 40u) continue;
+        const uint32_t maxDeferredPct = dirtyTiles >= 28 ? 45u : 40u;
+        if (static_cast<uint32_t>(satellite.count) * 100u >
+            static_cast<uint32_t>(dirtyTiles) * maxDeferredPct) continue;
 
         uint16_t rMinTx = TILE_COLS;
         uint16_t rMaxTx = 0;
@@ -1930,7 +1932,8 @@ void MissileCommandActivity::refreshPlayingWindow(bool forceFullRefresh) {
         const uint32_t rx1 = std::min<uint32_t>(panelW, static_cast<uint32_t>(rMaxTx + 1) * TILE_W);
         const uint32_t ry1 = std::min<uint32_t>(panelH, static_cast<uint32_t>(rMaxTy + 1) * TILE_H);
         const uint32_t remainArea = (rx1 - rx0) * (ry1 - ry0);
-        if (remainArea * 10u > globalArea * 7u) continue;  // need >=30% scan-area reduction
+        const uint32_t maxRemainPct = dirtyTiles >= 28 ? 85u : 70u;
+        if (remainArea * 100u > globalArea * maxRemainPct) continue;
         if (remainArea < bestRemainArea) {
           bestRemainArea = remainArea;
           bestDefer = c;
@@ -2118,12 +2121,43 @@ void MissileCommandActivity::renderPlaying() {
 
 void MissileCommandActivity::renderWaveComplete() {
   // TRUE popup: keep the exact last gameplay framebuffer as the backdrop.
-  // Only paint an opaque white card over it. No clearScreen(), no header redraw,
-  // no full-screen UI reconstruction.
+  // Clean ONLY the popup rectangle in two local passes:
+  //   1) opaque white card, to physically erase the previous-wave residue;
+  //   2) border/text/action, still limited to the same rectangle.
+  // Nothing outside the popup is driven before the popup is dismissed.
   const Rect box = waveCompleteBox(renderer, mappedInput);
   const Rect action = waveCompleteActionRect(renderer, mappedInput);
 
+  const uint16_t panelW = display.getDisplayWidth();
+  const uint16_t panelH = display.getDisplayHeight();
+  const uint16_t wb = display.getDisplayWidthBytes();
+  uint8_t* const fb = display.getFrameBuffer();
+
+  const int alignedX = std::max(0, box.x & ~7);
+  const int right = std::min<int>(panelW, box.x + box.width);
+  const int alignedRight = std::min<int>(panelW, (right + 7) & ~7);
+  const uint16_t popupX = static_cast<uint16_t>(alignedX);
+  const uint16_t popupY = static_cast<uint16_t>(std::max(0, box.y));
+  const uint16_t popupW = static_cast<uint16_t>(std::max(8, alignedRight - alignedX));
+  const uint16_t popupH = static_cast<uint16_t>(
+      std::max(1, std::min<int>(panelH, box.y + box.height) - popupY));
+
+  const auto syncPopupShadow = [&]() {
+    if (windowShadow_ == nullptr || fb == nullptr || wb == 0) return;
+    const uint16_t startByte = static_cast<uint16_t>(popupX / 8);
+    const uint16_t copyBytes = static_cast<uint16_t>(popupW / 8);
+    for (uint16_t row = 0; row < popupH; ++row) {
+      const uint32_t offset = static_cast<uint32_t>(popupY + row) * wb + startByte;
+      memcpy(windowShadow_ + offset, fb + offset, copyBytes);
+    }
+  };
+
+  // Pass 1: erase the old battlefield underneath the card.
   renderer.fillRect(box.x, box.y, box.width, box.height, false);
+  display.displayWindow(popupX, popupY, popupW, popupH, false);
+  syncPopupShadow();
+
+  // Pass 2: draw the card contents on the now-clean white background.
   renderer.drawRoundedRect(box.x, box.y, box.width, box.height, 2, 8, true);
 
   char line[72];
@@ -2151,13 +2185,11 @@ void MissileCommandActivity::renderWaveComplete() {
   renderer.drawRoundedRect(action.x, action.y, action.width, action.height, 1, 6, true);
   drawCenteredText(renderer, UI_10_FONT_ID, action, "Vague suivante");
 
-  // Keep the frozen battlefield physically untouched. Reuse the already proven
-  // dirty-window path so only the popup rectangle is driven on the panel.
-  //
-  // IMPORTANT: do NOT invalidate the gameplay shadow here. When the user presses
-  // "Vague suivante", beginPreparedWave() invalidates it and the accepted
-  // EntryHalf path performs the full clean transition AFTER the popup disappears.
-  refreshPlayingWindow(false);
+  display.displayWindow(popupX, popupY, popupW, popupH, false);
+  syncPopupShadow();
+
+  // Keep the gameplay shadow valid. beginPreparedWave() still owns the accepted
+  // clean transition after the popup disappears.
   cycleRenderPending_.store(false);
 }
 
