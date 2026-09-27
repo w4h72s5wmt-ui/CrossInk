@@ -91,8 +91,14 @@ void drawClearIcon(GfxRenderer& renderer, const Rect& rect) {
 }
 
 void drawRenameIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
-  const int cx = rect.x + rect.width / 2;
-  const int cy = rect.y + rect.height / 2;
+  constexpr int buttonSize = 34;
+  const Rect button{rect.x + (rect.width - buttonSize) / 2,
+                    rect.y + (rect.height - buttonSize) / 2,
+                    buttonSize, buttonSize};
+  renderer.drawRoundedRect(button.x, button.y, button.width, button.height, 1, 5, black);
+
+  const int cx = button.x + button.width / 2;
+  const int cy = button.y + button.height / 2;
   renderer.drawLine(cx - 8, cy + 8, cx + 8, cy - 8, 3, black);
   renderer.drawLine(cx - 10, cy + 10, cx - 5, cy + 9, 2, black);
   renderer.drawLine(cx + 6, cy - 10, cx + 10, cy - 6, 2, black);
