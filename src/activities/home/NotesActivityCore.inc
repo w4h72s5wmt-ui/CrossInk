@@ -32,9 +32,10 @@ constexpr int kControlHeight = 52;
 constexpr int kControlGap = 8;
 constexpr int kSideButtonWidth = 52;
 constexpr int kSearchClearWidth = 44;
-constexpr int kDeleteButtonWidth = 48;
-constexpr int kRenameButtonWidth = 44;
+constexpr int kDeleteButtonWidth = 58;
+constexpr int kRenameButtonWidth = 58;
 constexpr int kLockButtonWidth = 48;
+constexpr int kActionButtonGap = 6;
 constexpr int kRowHeight = 58;
 constexpr size_t kPatternLength = 6;
 constexpr size_t kMaxEncryptedPlaintextBytes = 32 * 1024;
@@ -122,6 +123,13 @@ void drawClearIcon(GfxRenderer& renderer, const Rect& rect) {
   const int half = 7;
   renderer.drawLine(cx - half, cy - half, cx + half, cy + half, 2, true);
   renderer.drawLine(cx + half, cy - half, cx - half, cy + half, 2, true);
+}
+
+void drawActionButtonFrame(GfxRenderer& renderer, const Rect& rect) {
+  constexpr int insetX = 2;
+  constexpr int insetY = 4;
+  renderer.drawRoundedRect(rect.x + insetX, rect.y + insetY, rect.width - insetX * 2,
+                           rect.height - insetY * 2, 1, kCornerRadius, true);
 }
 
 void drawRenameIcon(GfxRenderer& renderer, const Rect& rect, const bool black) {
@@ -1407,9 +1415,11 @@ void NotesActivity::loop() {
         const Rect rowRect{kTopMargin, listTop + row * kRowHeight, width - kTopMargin * 2, kRowHeight - 2};
         const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                               rowRect.height};
-        const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,
+        const Rect lockRect{deleteRect.x - (vaultMode ? kActionButtonGap + kLockButtonWidth : 0), rowRect.y,
                             vaultMode ? kLockButtonWidth : 0, rowRect.height};
-        const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+        const int renameRight = vaultMode ? lockRect.x : deleteRect.x;
+        const Rect renameRect{renameRight - kActionButtonGap - kRenameButtonWidth, rowRect.y, kRenameButtonWidth,
+                              rowRect.height};
         if (pointInRect(deleteRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           const std::string path = std::string(kNotesDir) + "/" + filename;
@@ -1546,9 +1556,11 @@ void NotesActivity::render(RenderLock&&) {
       const Rect rowRect{kTopMargin, rowY, width - kTopMargin * 2, kRowHeight - 2};
       const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                             rowRect.height};
-      const Rect lockRect{deleteRect.x - (vaultMode ? kLockButtonWidth : 0), rowRect.y,
+      const Rect lockRect{deleteRect.x - (vaultMode ? kActionButtonGap + kLockButtonWidth : 0), rowRect.y,
                           vaultMode ? kLockButtonWidth : 0, rowRect.height};
-      const Rect renameRect{lockRect.x - kRenameButtonWidth, rowRect.y, kRenameButtonWidth, rowRect.height};
+      const int renameRight = vaultMode ? lockRect.x : deleteRect.x;
+      const Rect renameRect{renameRight - kActionButtonGap - kRenameButtonWidth, rowRect.y, kRenameButtonWidth,
+                            rowRect.height};
       const bool selected = index == selectorIndex;
       if (selected) {
         auto target = makeUiTarget(renderer);
@@ -1559,9 +1571,11 @@ void NotesActivity::render(RenderLock&&) {
       const size_t rowNoteIndex = filteredNotes[static_cast<size_t>(index)];
       const std::string& rowFilename = notes[rowNoteIndex];
       const bool rowLocked = rowNoteIndex < noteLockedStates.size() && noteLockedStates[rowNoteIndex] != 0;
-      const std::string title = renderer.truncatedText(UI_12_FONT_ID, displayName(rowFilename).c_str(),
-                                                       rowRect.width - kRowSidePadding * 2 - kRenameButtonWidth -
-                                                           kDeleteButtonWidth - (vaultMode ? kLockButtonWidth : 0));
+      const int actionReserve = kRenameButtonWidth + kDeleteButtonWidth + kActionButtonGap +
+                                (vaultMode ? kLockButtonWidth + kActionButtonGap : 0);
+      const std::string title =
+          renderer.truncatedText(UI_12_FONT_ID, displayName(rowFilename).c_str(),
+                                 rowRect.width - kRowSidePadding * 2 - actionReserve);
       const int textH = renderer.getLineHeight(UI_12_FONT_ID);
       const int textY = rowRect.y + (rowRect.height - textH) / 2;
       const int rowBaselineY = textY + renderer.getFontAscenderSize(UI_12_FONT_ID);
@@ -1574,6 +1588,8 @@ void NotesActivity::render(RenderLock&&) {
       };
       // Real visible bottoms relative to each action rectangle's center:
       // pencil +11px, lock body +15px, trash can +10px.
+      drawActionButtonFrame(renderer, renameRect);
+      drawActionButtonFrame(renderer, deleteRect);
       drawRenameIcon(renderer, artworkOnBaseline(renameRect, 11), true);
       if (vaultMode && rowLocked) drawLockIcon(renderer, artworkOnBaseline(lockRect, 15), true);
       drawTrashIcon(renderer, artworkOnBaseline(deleteRect, 10), true);
