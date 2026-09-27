@@ -9,7 +9,7 @@
 #include <cstring>
 
 #include "DeviceCapabilities.h"
-#include "KeyboardLayoutSet.h"
+#include "activities/util/KeyboardLayoutSet.h"
 #include "MappedInputManager.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
