@@ -357,6 +357,8 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
   }
 
   void drawPencil(const Rect& rect) {
+    renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 1, 6, true);
+
     const int cx = rect.x + rect.width / 2;
     const int cy = rect.y + rect.height / 2;
     renderer.drawLine(cx - 9, cy + 8, cx + 8, cy - 9, 3, true);
