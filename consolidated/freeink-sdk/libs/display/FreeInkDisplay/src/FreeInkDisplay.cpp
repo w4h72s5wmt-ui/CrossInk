@@ -775,25 +775,6 @@ void FreeInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t 
 #endif
 }
 
-
-void FreeInkDisplay::displaySparseWindow(const uint8_t* tileMask, uint16_t tileCols, uint16_t tileRows,
-                                         uint16_t tileW, uint16_t tileH, uint16_t bboxX, uint16_t bboxY,
-                                         uint16_t bboxW, uint16_t bboxH, bool turnOffScreen) {
-  if (_inverted || _inversionDirty) {
-    displayBuffer(FAST_REFRESH, turnOffScreen);
-    return;
-  }
-  syncPendingAsync();
-#ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE
-  _driver->displaySparseWindow(_bus, frameBuffer, nullptr, tileMask, tileCols, tileRows, tileW, tileH,
-                               bboxX, bboxY, bboxW, bboxH, turnOffScreen);
-  _shadowValid = false;
-#else
-  _driver->displaySparseWindow(_bus, frameBuffer, frameBufferActive, tileMask, tileCols, tileRows, tileW, tileH,
-                               bboxX, bboxY, bboxW, bboxH, turnOffScreen);
-#endif
-}
-
 void FreeInkDisplay::displayGrayBuffer(bool turnOffScreen, const unsigned char* lut, bool factoryMode) {
 #if defined(SSD1677_PROBE_DEBUG) && SSD1677_PROBE_DEBUG
   Serial.printf("[EPD] displayGrayBuffer\n");
