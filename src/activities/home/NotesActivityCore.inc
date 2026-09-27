@@ -1151,7 +1151,7 @@ void NotesActivity::editNote(const std::string& path, const std::string& title) 
 
 void NotesActivity::createNote() {
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_TITLE), "", 48, InputType::Text, 1),
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_TITLE_LABEL, "", 48, InputType::Text, 1),
       [this](const ActivityResult& result) {
         if (result.isCancelled) {
           requestUpdate();
@@ -1179,7 +1179,7 @@ void NotesActivity::renameNote(const std::string& filename) {
   const std::string oldPath = std::string(kNotesDir) + "/" + filename;
   const bool wasLocked = noteLockedByPath(oldPath);
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_TITLE), oldTitle, 48,
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_TITLE_LABEL, oldTitle, 48,
                                               InputType::Text, 1),
       [this, filename, oldPath, wasLocked](const ActivityResult& result) {
         if (result.isCancelled) {
@@ -1234,7 +1234,7 @@ void NotesActivity::renameNote(const std::string& filename) {
 
 void NotesActivity::editSearch() {
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_SEARCH_NOTES), searchQuery, 80,
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_SEARCH_LABEL, searchQuery, 80,
                                               InputType::Text),
       [this](const ActivityResult& result) {
         if (!result.isCancelled) {
@@ -1510,7 +1510,7 @@ void NotesActivity::render(RenderLock&&) {
   const Rect searchIconRect{searchRect.x, searchRect.y, 34, searchRect.height};
   drawSearchIcon(renderer, searchIconRect);
 
-  const char* placeholder = tr(STR_SEARCH_NOTES);
+  const char* placeholder = NOTES_SEARCH_LABEL;
   const int searchTextReserve = searchQuery.empty() ? 8 : 8 + kSearchClearWidth;
   const int searchTextX = searchRect.x + searchIconRect.width + 4;
   const int searchTextWidth = std::max(1, searchRect.x + searchRect.width - searchTextX - searchTextReserve);
@@ -1537,7 +1537,7 @@ void NotesActivity::render(RenderLock&&) {
   topIndex = std::clamp(topIndex, 0, maxTop);
 
   if (filteredNotes.empty()) {
-    renderer.drawCenteredText(UI_12_FONT_ID, listTop + kRowHeight, tr(STR_NO_NOTES), true);
+    renderer.drawCenteredText(UI_12_FONT_ID, listTop + kRowHeight, NOTES_EMPTY_LABEL, true);
   } else {
     for (int row = 0; row < visibleRows; ++row) {
       const int index = topIndex + row;
