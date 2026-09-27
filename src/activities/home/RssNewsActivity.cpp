@@ -93,10 +93,6 @@ int64_t makeDateKey(int year, int month, int day, int hour, int minute, int seco
          minute * 60LL + second - zoneOffsetSeconds;
 }
 
-bool isFigaroFeedUrl(const std::string& url) {
-  return url.find("lefigaro.fr/rss/") != std::string::npos;
-}
-
 int64_t publishedDateKey(const char* value) {
   if (!value || !value[0]) return 0;
 
@@ -274,11 +270,8 @@ bool RssNewsActivity::ensureBuffers() {
   size_t requestedFeedCapacity = 1;
   for (size_t i = 0; i < sourceCount; ++i) {
     requestedArticleCapacity += std::clamp<size_t>(sources[i].historyLimit, 1, ITEMS_PER_SOURCE);
-    size_t sourceScanLimit = std::clamp<size_t>(sources[i].syncLimit, 1, FEED_ITEM_CAPACITY);
-    if (isFigaroFeedUrl(sources[i].url)) {
-      sourceScanLimit = std::max<size_t>(sourceScanLimit, 30);
-    }
-    requestedFeedCapacity = std::max(requestedFeedCapacity, sourceScanLimit);
+    requestedFeedCapacity = std::max(
+        requestedFeedCapacity, std::clamp<size_t>(sources[i].syncLimit, 1, FEED_ITEM_CAPACITY));
   }
   articleCapacity = std::clamp<size_t>(requestedArticleCapacity, 1, MAX_ARTICLES);
   feedItemCapacity = std::clamp<size_t>(requestedFeedCapacity, 1, FEED_ITEM_CAPACITY);
@@ -1125,10 +1118,7 @@ bool RssNewsActivity::fetchSource(const uint8_t sourceIndex, size_t& outCount, b
   std::memset(feedItems, 0, sizeof(RssItem) * feedItemCapacity);
 
   const size_t syncLimit = std::clamp<size_t>(sources[sourceIndex].syncLimit, 1, feedItemCapacity);
-  const bool figaroFeed = isFigaroFeedUrl(sources[sourceIndex].url);
-  const size_t scanLimit = figaroFeed ? std::min<size_t>(feedItemCapacity, std::max<size_t>(syncLimit, 30))
-                                      : syncLimit;
-  RssParser parser(feedItems, scanLimit);
+  RssParser parser(feedItems, syncLimit);
   HttpDownloader::DownloadOptions options;
   options.bufferSize = HTTP_BUFFER_SIZE;
   options.transport = HttpDownloader::Transport::WOLFSSL;
@@ -1164,17 +1154,7 @@ bool RssNewsActivity::fetchSource(const uint8_t sourceIndex, size_t& outCount, b
     return false;
   }
   outCount = parser.getItemCount();
-  if (figaroFeed && outCount > syncLimit) {
-    std::stable_sort(feedItems, feedItems + outCount, [](const RssItem& left, const RssItem& right) {
-      const int64_t leftDate = publishedDateKey(left.published);
-      const int64_t rightDate = publishedDateKey(right.published);
-      if (leftDate != rightDate) return leftDate > rightDate;
-      return false;
-    });
-    outCount = syncLimit;
-  }
-  if (parser.wasTruncated()) LOG_DBG("RSS", "%s feed truncated to %zu scanned items", sources[sourceIndex].name.c_str(),
-                                     parser.getItemCount());
+  if (parser.wasTruncated()) LOG_DBG("RSS", "%s feed truncated to %zu items", sources[sourceIndex].name.c_str(), outCount);
   return outCount > 0;
 }
 
