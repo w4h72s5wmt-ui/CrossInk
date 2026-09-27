@@ -1919,18 +1919,12 @@ void MissileCommandActivity::refreshPlayingWindow(bool forceFullRefresh) {
         }
         if (remainCount == 0) continue;
 
-        // Require a genuine spatial gap. Then a bbox refresh of the remainder
-        // cannot accidentally paint any byte belonging to the deferred island.
-        const bool separated = satellite.maxTx < rMinTx || satellite.minTx > rMaxTx ||
-                               satellite.maxTy < rMinTy || satellite.minTy > rMaxTy;
-        if (!separated) continue;
-
         const uint32_t rx0 = static_cast<uint32_t>(rMinTx) * TILE_W;
         const uint32_t ry0 = static_cast<uint32_t>(rMinTy) * TILE_H;
         const uint32_t rx1 = std::min<uint32_t>(panelW, static_cast<uint32_t>(rMaxTx + 1) * TILE_W);
         const uint32_t ry1 = std::min<uint32_t>(panelH, static_cast<uint32_t>(rMaxTy + 1) * TILE_H);
         const uint32_t remainArea = (rx1 - rx0) * (ry1 - ry0);
-        if (remainArea * 10u > globalArea * 7u) continue;  // need >=30% scan-area reduction
+        if (remainArea * 20u > globalArea * 17u) continue;  // need >=15% scan-area reduction
         if (remainArea < bestRemainArea) {
           bestRemainArea = remainArea;
           bestDefer = c;
@@ -1997,14 +1991,34 @@ void MissileCommandActivity::refreshPlayingWindow(bool forceFullRefresh) {
   }
   missileRefreshPanelCallUs = static_cast<uint32_t>(esp_timer_get_time() - missilePanelCallStartUs);
 
-  // The deferred component is guaranteed outside this bbox on at least one
-  // axis, so copying the refreshed bbox cannot falsely acknowledge it. It stays
-  // different from windowShadow_ and is therefore mandatory on the next frame.
+  // A sparse upload may intentionally omit one dirty component even when its
+  // tile range overlaps the scan bbox on one axis. Only acknowledge bytes from
+  // tiles that were actually uploaded; omitted tiles must remain dirty so the
+  // mandatory catch-up frame still sees them.
   const int64_t missileShadowCopyStartUs = esp_timer_get_time();
-  const uint16_t copyBytes = static_cast<uint16_t>(refreshW / 8);
-  for (uint16_t row = 0; row < refreshH; ++row) {
-    const uint32_t offset = static_cast<uint32_t>(refreshY + row) * wb + refreshMinByte;
-    memcpy(windowShadow_ + offset, fb + offset, copyBytes);
+  if (useSparse) {
+    for (uint16_t bit = 0; bit < TILE_COUNT; ++bit) {
+      if ((refreshMask[bit >> 3] & static_cast<uint8_t>(1u << (bit & 7))) == 0) continue;
+      const uint16_t tx = static_cast<uint16_t>(bit % TILE_COLS);
+      const uint16_t ty = static_cast<uint16_t>(bit / TILE_COLS);
+      const uint16_t tileX = static_cast<uint16_t>(tx * TILE_W);
+      const uint16_t tileY = static_cast<uint16_t>(ty * TILE_H);
+      if (tileX >= panelW || tileY >= panelH) continue;
+      const uint16_t tileW = std::min<uint16_t>(TILE_W, static_cast<uint16_t>(panelW - tileX));
+      const uint16_t tileH = std::min<uint16_t>(TILE_H, static_cast<uint16_t>(panelH - tileY));
+      const uint16_t tileMinByte = static_cast<uint16_t>(tileX / 8);
+      const uint16_t tileBytes = static_cast<uint16_t>((tileW + 7) / 8);
+      for (uint16_t row = 0; row < tileH; ++row) {
+        const uint32_t offset = static_cast<uint32_t>(tileY + row) * wb + tileMinByte;
+        memcpy(windowShadow_ + offset, fb + offset, tileBytes);
+      }
+    }
+  } else {
+    const uint16_t copyBytes = static_cast<uint16_t>(refreshW / 8);
+    for (uint16_t row = 0; row < refreshH; ++row) {
+      const uint32_t offset = static_cast<uint32_t>(refreshY + row) * wb + refreshMinByte;
+      memcpy(windowShadow_ + offset, fb + offset, copyBytes);
+    }
   }
   missileRefreshShadowCopyUs = static_cast<uint32_t>(esp_timer_get_time() - missileShadowCopyStartUs);
 }
