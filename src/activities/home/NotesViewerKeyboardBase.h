@@ -214,7 +214,7 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
 
   Rect pencilRect() const {
     constexpr int width = 58;
-    constexpr int height = 44;
+    constexpr int height = 56;
     return Rect{(renderer.getScreenWidth() - width) / 2, renderer.getScreenHeight() - height - 10, width, height};
   }
 
@@ -357,7 +357,10 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
   }
 
   void drawPencil(const Rect& rect) {
-    renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 1, 6, true);
+    constexpr int insetX = 2;
+    constexpr int insetY = 4;
+    renderer.drawRoundedRect(rect.x + insetX, rect.y + insetY, rect.width - insetX * 2,
+                             rect.height - insetY * 2, 1, 6, true);
 
     const int cx = rect.x + rect.width / 2;
     const int cy = rect.y + rect.height / 2;
