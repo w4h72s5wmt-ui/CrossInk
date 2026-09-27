@@ -54,12 +54,6 @@ class PanelDriver {
                              uint16_t h, bool turnOff) {
     display(bus, fb, prev, RefreshMode::Fast, turnOff);
   }
-  virtual void displaySparseWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, const uint8_t* tileMask,
-                                   uint16_t tileCols, uint16_t tileRows, uint16_t tileW, uint16_t tileH,
-                                   uint16_t bboxX, uint16_t bboxY, uint16_t bboxW, uint16_t bboxH, bool turnOff) {
-    (void)tileMask; (void)tileCols; (void)tileRows; (void)tileW; (void)tileH;
-    displayWindow(bus, fb, prev, bboxX, bboxY, bboxW, bboxH, turnOff);
-  }
 
   // True when displayStart() defers (returns true) rather than completing
   // inline. Lets the facade skip async scaffolding (shadow setup) on blocking
