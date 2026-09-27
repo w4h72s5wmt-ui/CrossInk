@@ -5,6 +5,7 @@ on:
     branches:
       - x4-pro-v1.6.0-all-apps-migration
       - diag/x4-pro-v160-missile-timing
+      - opt/x4-pro-v160-missile-dirty
   workflow_dispatch:
 
 jobs:
