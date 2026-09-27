@@ -11,8 +11,6 @@ constexpr char NOTES_SEARCH_LABEL[] = "Rechercher";
 constexpr char NOTES_EMPTY_LABEL[] = "Aucune note";
 }  // namespace
 
-#define KeyboardEntryActivity NotesViewerKeyboardBase
 #define drawHeaderAction drawNotesHeaderAction
 #include "NotesActivityCore.inc"
 #undef drawHeaderAction
-#undef KeyboardEntryActivity
