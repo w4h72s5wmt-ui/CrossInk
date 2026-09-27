@@ -1924,7 +1924,7 @@ void MissileCommandActivity::refreshPlayingWindow(bool forceFullRefresh) {
         const uint32_t rx1 = std::min<uint32_t>(panelW, static_cast<uint32_t>(rMaxTx + 1) * TILE_W);
         const uint32_t ry1 = std::min<uint32_t>(panelH, static_cast<uint32_t>(rMaxTy + 1) * TILE_H);
         const uint32_t remainArea = (rx1 - rx0) * (ry1 - ry0);
-        if (remainArea * 20u > globalArea * 17u) continue;  // need >=15% scan-area reduction
+        if (remainArea * 4u > globalArea * 3u) continue;  // need >=25% scan-area reduction
         if (remainArea < bestRemainArea) {
           bestRemainArea = remainArea;
           bestDefer = c;
