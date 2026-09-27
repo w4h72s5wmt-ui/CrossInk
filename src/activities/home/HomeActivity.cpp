@@ -25,6 +25,10 @@
 #include "../reader/BookReadingStats.h"
 #include "../reader/BookStatsActivity.h"
 #include "../reader/EpubReaderUtils.h"
+#include "Game2048Activity.h"
+#include "MinesweeperActivity.h"
+#include "MissileCommandActivity.h"
+#include "NotesActivity.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -61,6 +65,10 @@ enum class HomeMenuAction {
   OpdsBrowser,
   ReadingStats,
   Bookmarks,
+  Notes,
+  Minesweeper,
+  Game2048,
+  MissileCommand,
   FileTransfer,
   Settings,
 };
@@ -72,7 +80,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 8;
+  static constexpr int kCapacity = 12;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -278,6 +286,10 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
     items.push({savedItemsLabel(hasBookmarks, hasClippings), BookmarkIcon, HomeMenuAction::Bookmarks});
   }
 
+  items.push({"Notes", Text, HomeMenuAction::Notes});
+  items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
+  items.push({"2048", Chart, HomeMenuAction::Game2048});
+  items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
@@ -302,6 +314,10 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
     items.push({tr(STR_READING_STATS), Chart, HomeMenuAction::ReadingStats});
   }
 
+  items.push({"Notes", Text, HomeMenuAction::Notes});
+  items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
+  items.push({"2048", Chart, HomeMenuAction::Game2048});
+  items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   return items;
 }
@@ -1573,6 +1589,18 @@ void HomeActivity::loop() {
           case HomeMenuAction::Bookmarks:
             onSavedItemsOpen();
             break;
+          case HomeMenuAction::Notes:
+            onNotesOpen();
+            break;
+          case HomeMenuAction::Minesweeper:
+            onMinesweeperOpen();
+            break;
+          case HomeMenuAction::Game2048:
+            onGame2048Open();
+            break;
+          case HomeMenuAction::MissileCommand:
+            onMissileCommandOpen();
+            break;
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
@@ -1817,6 +1845,18 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Bookmarks:
         onSavedItemsOpen();
+        break;
+      case HomeMenuAction::Notes:
+        onNotesOpen();
+        break;
+      case HomeMenuAction::Minesweeper:
+        onMinesweeperOpen();
+        break;
+      case HomeMenuAction::Game2048:
+        onGame2048Open();
+        break;
+      case HomeMenuAction::MissileCommand:
+        onMissileCommandOpen();
         break;
       case HomeMenuAction::FileTransfer:
         onFileTransferOpen();
@@ -2370,6 +2410,22 @@ void HomeActivity::onRecentsOpen() { activityManager.goToRecentBooks(); }
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+
+void HomeActivity::onNotesOpen() {
+  startActivityForResult(std::make_unique<NotesActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+
+void HomeActivity::onMinesweeperOpen() {
+  startActivityForResult(std::make_unique<MinesweeperActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+
+void HomeActivity::onGame2048Open() {
+  startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
+
+void HomeActivity::onMissileCommandOpen() {
+  startActivityForResult(std::make_unique<MissileCommandActivity>(renderer, mappedInput), [](const ActivityResult&) {});
+}
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 
