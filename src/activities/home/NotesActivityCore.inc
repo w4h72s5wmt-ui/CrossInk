@@ -773,7 +773,7 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
   NotesKeyboardActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string title,
                         std::string initialText, const size_t maxLength, std::string path, std::string vaultPattern)
       : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
-                              InputType::Multiline),
+                              NotesInputType::Multiline),
         path(std::move(path)), vaultPattern(std::move(vaultPattern)) {
     capturePersistedState();
   }
@@ -1151,7 +1151,7 @@ void NotesActivity::editNote(const std::string& path, const std::string& title) 
 
 void NotesActivity::createNote() {
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_TITLE_LABEL, "", 48, InputType::Text, 1),
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_TITLE_LABEL, "", 48, NotesInputType::Text, 1),
       [this](const ActivityResult& result) {
         if (result.isCancelled) {
           requestUpdate();
@@ -1180,7 +1180,7 @@ void NotesActivity::renameNote(const std::string& filename) {
   const bool wasLocked = noteLockedByPath(oldPath);
   startActivityForResult(
       std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_TITLE_LABEL, oldTitle, 48,
-                                              InputType::Text, 1),
+                                              NotesInputType::Text, 1),
       [this, filename, oldPath, wasLocked](const ActivityResult& result) {
         if (result.isCancelled) {
           requestUpdate();
@@ -1235,7 +1235,7 @@ void NotesActivity::renameNote(const std::string& filename) {
 void NotesActivity::editSearch() {
   startActivityForResult(
       std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_SEARCH_LABEL, searchQuery, 80,
-                                              InputType::Text),
+                                              NotesInputType::Text),
       [this](const ActivityResult& result) {
         if (!result.isCancelled) {
           const auto* keyboard = std::get_if<KeyboardResult>(&result.data);
