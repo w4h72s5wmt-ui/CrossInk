@@ -1415,11 +1415,10 @@ void NotesActivity::loop() {
         const Rect rowRect{kTopMargin, listTop + row * kRowHeight, width - kTopMargin * 2, kRowHeight - 2};
         const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                               rowRect.height};
-        const Rect lockRect{deleteRect.x - (vaultMode ? kActionButtonGap + kLockButtonWidth : 0), rowRect.y,
-                            vaultMode ? kLockButtonWidth : 0, rowRect.height};
-        const int renameRight = vaultMode ? lockRect.x : deleteRect.x;
-        const Rect renameRect{renameRight - kActionButtonGap - kRenameButtonWidth, rowRect.y, kRenameButtonWidth,
+        const Rect renameRect{deleteRect.x - kActionButtonGap - kRenameButtonWidth, rowRect.y, kRenameButtonWidth,
                               rowRect.height};
+        const Rect lockRect{renameRect.x - (vaultMode ? kActionButtonGap + kLockButtonWidth : 0), rowRect.y,
+                            vaultMode ? kLockButtonWidth : 0, rowRect.height};
         if (pointInRect(deleteRect, tx, ty)) {
           const std::string& filename = notes[filteredNotes[static_cast<size_t>(index)]];
           const std::string path = std::string(kNotesDir) + "/" + filename;
@@ -1556,11 +1555,10 @@ void NotesActivity::render(RenderLock&&) {
       const Rect rowRect{kTopMargin, rowY, width - kTopMargin * 2, kRowHeight - 2};
       const Rect deleteRect{rowRect.x + rowRect.width - kDeleteButtonWidth, rowRect.y, kDeleteButtonWidth,
                             rowRect.height};
-      const Rect lockRect{deleteRect.x - (vaultMode ? kActionButtonGap + kLockButtonWidth : 0), rowRect.y,
-                          vaultMode ? kLockButtonWidth : 0, rowRect.height};
-      const int renameRight = vaultMode ? lockRect.x : deleteRect.x;
-      const Rect renameRect{renameRight - kActionButtonGap - kRenameButtonWidth, rowRect.y, kRenameButtonWidth,
+      const Rect renameRect{deleteRect.x - kActionButtonGap - kRenameButtonWidth, rowRect.y, kRenameButtonWidth,
                             rowRect.height};
+      const Rect lockRect{renameRect.x - (vaultMode ? kActionButtonGap + kLockButtonWidth : 0), rowRect.y,
+                          vaultMode ? kLockButtonWidth : 0, rowRect.height};
       const bool selected = index == selectorIndex;
       if (selected) {
         auto target = makeUiTarget(renderer);
