@@ -75,11 +75,6 @@ class Uc8279X4Driver : public PanelDriver {
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
-  void displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y,
-                     uint16_t w, uint16_t h, bool turnOff) override;
-  void displaySparseWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, const uint8_t* tileMask,
-                           uint16_t tileCols, uint16_t tileRows, uint16_t tileW, uint16_t tileH,
-                           uint16_t bboxX, uint16_t bboxY, uint16_t bboxW, uint16_t bboxH, bool turnOff) override;
   bool supportsAsyncDisplay() const override { return true; }
 
   void requestResync(uint8_t settlePasses) override;
@@ -117,11 +112,6 @@ class Uc8279X4Driver : public PanelDriver {
   // sub-variants), then 0xFF padding to the addressed gate count. `invert`
   // bitwise-inverts the image rows (AA planes only, per the vendor reference).
   void streamPlane(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, bool invert = false);
-  // Stream only the currently selected PTL rectangle. x/w are visible-panel
-  // coordinates and must be byte aligned. Partial mode/window must already
-  // be active before this is called.
-  void streamWindowPlane(EpdBus& bus, uint8_t ramCmd, const uint8_t* fb, uint16_t x, uint16_t y,
-                         uint16_t w, uint16_t h, bool invert = false);
   // Stream (lhs XOR rhs) into a RAM plane with the same geometry/mirroring as
   // streamPlane (used to build absolute grayscale plane1 = plane0 ^ maskMsb).
   void streamPlaneXor(EpdBus& bus, uint8_t ramCmd, const uint8_t* lhs, const uint8_t* rhs, bool invert = false);
