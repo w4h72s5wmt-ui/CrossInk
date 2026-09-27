@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - x4-pro-v1.6.0-all-apps-migration
+      - diag/x4-pro-v160-missile-timing
   workflow_dispatch:
 
 jobs:
