@@ -5,14 +5,11 @@
 
 #include "NotesViewerKeyboardBase.h"
 
-// The i18n generator scans .cpp sources. The Notes implementation lives in an
-// included .inc file so keep these IDs visible here, otherwise code generation
-// strips them before the compiler sees NotesActivityCore.inc.
-[[maybe_unused]] static void retainNotesTranslationIds() {
-  (void)tr(STR_NOTE_TITLE);
-  (void)tr(STR_SEARCH_NOTES);
-  (void)tr(STR_NO_NOTES);
-}
+namespace {
+constexpr char NOTES_TITLE_LABEL[] = "Titre de la note";
+constexpr char NOTES_SEARCH_LABEL[] = "Rechercher";
+constexpr char NOTES_EMPTY_LABEL[] = "Aucune note";
+}  // namespace
 
 #define KeyboardEntryActivity NotesViewerKeyboardBase
 #define drawHeaderAction drawNotesHeaderAction
