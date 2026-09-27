@@ -940,6 +940,11 @@ void MissileCommandActivity::newGame() {
   pendingTap_ = false;
   pendingBack_ = false;
   sceneNeedsFullRedraw_ = true;
+  // The menu is a physically different full-screen image. Invalidate the
+  // gameplay shadow so renderPlaying() performs its existing full-surface
+  // HALF scrub before the first local/Cluster1 gameplay refresh.
+  windowShadowValid_ = false;
+  clusterCatchupPending_ = false;
   cycleRenderPending_.store(true);
   requestUpdate();
 }
@@ -962,6 +967,10 @@ void MissileCommandActivity::continueGame() {
   pendingTap_ = false;
   pendingBack_ = false;
   sceneNeedsFullRedraw_ = true;
+  // Continuing from the menu needs the same clean physical baseline as a new
+  // game; otherwise the old menu can remain visible behind local updates.
+  windowShadowValid_ = false;
+  clusterCatchupPending_ = false;
   cycleRenderPending_.store(true);
   requestUpdate();
 }
