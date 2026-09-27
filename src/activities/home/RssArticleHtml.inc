@@ -1,0 +1,648 @@
+// RSS-local HTML extraction. Included inside RssArticleCache's private namespace.
+// All parsing uses bounded views into the existing HTML buffer: no DOM or heap.
+
+bool htmlSpace(const char c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+}
+
+#include "RssHtmlEntities.inc"
+
+constexpr char RSS_LINK_START[] = "\xEE\x80\x80";  // U+E000
+constexpr char RSS_LINK_END[] = "\xEE\x80\x81";    // U+E001
+constexpr size_t RSS_LINK_MARKER_BYTES = 3;
+// Internal one-byte marker used only while extracting. Whenever a block of
+// non-editorial inline content is removed, keep the seam explicit until a
+// final pass can decide whether the separator belongs before or after
+// punctuation. Source HTML control bytes are never copied into output, so
+// 0x1e cannot collide with real article text or the UTF-8 link markers.
+constexpr char RSS_REMOVAL_BOUNDARY = '\x1e';
+
+bool htmlEquals(const char* data, const size_t length, const char* literal) {
+  const size_t n = std::strlen(literal);
+  if (length != n) return false;
+  for (size_t i = 0; i < n; ++i) {
+    if (!asciiEqual(data[i], literal[i])) return false;
+  }
+  return true;
+}
+
+// HTML '>' inside a quoted attribute does not terminate the tag.
+size_t htmlTagEnd(const char* html, const size_t length, const size_t start) {
+  char quote = 0;
+  for (size_t i = start + 1; i < length; ++i) {
+    const char c = html[i];
+    if (quote) {
+      if (c == quote) quote = 0;
+    } else if (c == '\'' || c == '"') {
+      quote = c;
+    } else if (c == '>') {
+      return i;
+    }
+  }
+  return std::string::npos;
+}
+
+bool noiseIdentity(const char* token, const size_t length) {
+  // Whole component names, not arbitrary substrings such as "has-sidebar" or
+  // "container-with-sidebar". Ambiguous paywall/promo/content modifiers are
+  // deliberately not interpreted as instructions to discard an entire body.
+  static constexpr const char* NAMES[] = {
+      "ad", "ads", "advert", "advertisement", "advertising", "publicite",
+      "ad-container", "ad_container", "ad-slot", "adslot", "native-ad",
+      "outbrain", "taboola", "sidebar", "sidebar-content-container", "breadcrumb", "breadcrumbs",
+      "social", "share", "sharing", "share-buttons", "social-share",
+      "newsletter", "newsletter-box", "newsletter-form", "newsletter-signup", "newsletter-container",
+      "promo-container", "promo-box", "promo-banner", "article-footer", "article-comments",
+      "cookie-banner", "cookie-consent",
+      "consent-banner", "comments", "comment-list", "comment-form",
+      "related", "related-posts", "related-articles", "recommendations",
+      "most-read", "mostread", "read-more", "readmore", "also-read",
+  };
+  for (const char* name : NAMES) {
+    const size_t n = std::strlen(name);
+    if (length < n || !htmlEquals(token, n, name)) continue;
+    if (length == n) return true;
+    // BEM elements/modifiers and numbered component IDs, not suffix matches.
+    if (length > n + 2 && ((token[n] == '_' && token[n + 1] == '_') ||
+                          (token[n] == '-' && token[n + 1] == '-'))) return true;
+    if (length > n + 1 && (token[n] == '-' || token[n] == '_')) {
+      bool numeric = true;
+      for (size_t i = n + 1; i < length; ++i) numeric &= token[i] >= '0' && token[i] <= '9';
+      if (numeric) return true;
+    }
+  }
+  static constexpr const char* PREFIXES[] = {"optidigital-adslot-", "div-gpt-ad-"};
+  for (const char* prefix : PREFIXES) {
+    const size_t n = std::strlen(prefix);
+    if (length > n && htmlEquals(token, n, prefix)) return true;
+  }
+  return false;
+}
+
+bool isNoiseContainer(const char* name, const char* html, const size_t start, const size_t end) {
+  if (isAlwaysSkippedTag(name)) return true;
+  if (!tagEquals(name, "div") && !tagEquals(name, "section") && !tagEquals(name, "ul") &&
+      !tagEquals(name, "ol") && !tagEquals(name, "article")) return false;
+
+  size_t pos = start + 1;
+  while (pos < end && !htmlSpace(html[pos]) && html[pos] != '/') ++pos; // tag name
+  while (pos < end) {
+    while (pos < end && (htmlSpace(html[pos]) || html[pos] == '/')) ++pos;
+    const size_t key = pos;
+    while (pos < end && !htmlSpace(html[pos]) && html[pos] != '=' && html[pos] != '/') ++pos;
+    const size_t keyLength = pos - key;
+    if (keyLength == 0) { ++pos; continue; }
+    while (pos < end && htmlSpace(html[pos])) ++pos;
+    if (pos == end || html[pos] != '=') continue; // boolean attribute
+    ++pos;
+    while (pos < end && htmlSpace(html[pos])) ++pos;
+    char quote = 0;
+    if (pos < end && (html[pos] == '\'' || html[pos] == '"')) quote = html[pos++];
+    const size_t value = pos;
+    while (pos < end && (quote ? html[pos] != quote : !htmlSpace(html[pos]))) ++pos;
+    const size_t valueEnd = pos;
+    if (quote && pos < end) ++pos;
+    const bool classes = htmlEquals(html + key, keyLength, "class");
+    const bool id = htmlEquals(html + key, keyLength, "id");
+    if (!classes && !id) continue; // never inspect URLs, data-*, titles, style...
+    if (id) {
+      if (noiseIdentity(html + value, valueEnd - value)) return true;
+    } else {
+      size_t token = value;
+      while (token < valueEnd) {
+        while (token < valueEnd && htmlSpace(html[token])) ++token;
+        size_t next = token;
+        while (next < valueEnd && !htmlSpace(html[next])) ++next;
+        if (noiseIdentity(html + token, next - token)) return true;
+        token = next;
+      }
+    }
+  }
+  return false;
+}
+
+struct HtmlTag {
+  size_t start = 0;
+  size_t end = 0;
+  char name[24] = {};
+  bool closing = false;
+  bool selfClosing = false;
+};
+
+bool nextHtmlTag(const char* html, const size_t length, size_t& pos, HtmlTag& tag) {
+  while (pos < length) {
+    if (html[pos] != '<') { ++pos; continue; }
+    if (startsWithInsensitive(html, length, pos, "<!--")) {
+      const size_t end = findInsensitive(html, length, "-->", pos + 4);
+      pos = end == std::string::npos ? length : end + 3;
+      continue;
+    }
+    tag.start = pos;
+    tag.end = htmlTagEnd(html, length, pos);
+    if (tag.end == std::string::npos) { pos = length; return false; }
+    pos = tag.end + 1;
+    if (parseTagName(html, tag.start, tag.end, tag.name, sizeof(tag.name),
+                     tag.closing, tag.selfClosing) > 0) return true;
+  }
+  return false;
+}
+
+bool htmlRawText(const char* name) {
+  return tagEquals(name, "script") || tagEquals(name, "style") || tagEquals(name, "textarea") ||
+         tagEquals(name, "title");
+}
+
+// Raw-text elements may contain '<div>' or '</article>' in JS/CSS strings.
+// Only their own real closing tag is meaningful to the HTML parser.
+size_t skipHtmlRaw(const char* html, const size_t length, const HtmlTag& open) {
+  char marker[28];
+  std::snprintf(marker, sizeof(marker), "</%s", open.name);
+  size_t pos = open.end + 1;
+  while ((pos = findInsensitive(html, length, marker, pos)) != std::string::npos) {
+    const size_t after = pos + std::strlen(marker);
+    if (after < length && (htmlSpace(html[after]) || html[after] == '>' || html[after] == '/')) {
+      const size_t end = htmlTagEnd(html, length, pos);
+      return end == std::string::npos ? length : end + 1;
+    }
+    ++pos;
+  }
+  return length;
+}
+
+size_t htmlElementEnd(const char* html, const size_t length, const HtmlTag& open, size_t& after) {
+  size_t pos = open.end + 1;
+  size_t depth = 1;
+  HtmlTag tag;
+  while (nextHtmlTag(html, length, pos, tag)) {
+    if (!tag.closing && htmlRawText(tag.name)) {
+      pos = skipHtmlRaw(html, length, tag);
+      continue;
+    }
+    if (!tagEquals(tag.name, open.name)) continue;
+    if (tag.closing) {
+      if (--depth == 0) { after = pos; return tag.start; }
+    } else if (!tag.selfClosing) {
+      ++depth;
+    }
+  }
+  after = length;
+  return length;
+}
+
+// Cheap visibility score used only to choose the page's editorial root. It
+// reuses the bounded parser and skips the same noise/raw subtrees as extraction,
+// but never allocates or decodes text. This prevents teaser <article> cards from
+// winning simply because they appear before the real story.
+size_t readableCandidateScore(const char* html, const size_t begin, const size_t end) {
+  size_t score = 0;
+  size_t pos = begin;
+  while (pos < end) {
+    if (html[pos] == '<') {
+      if (startsWithInsensitive(html, end, pos, "<!--")) {
+        const size_t close = findInsensitive(html, end, "-->", pos + 4);
+        pos = close == std::string::npos ? end : close + 3;
+        continue;
+      }
+      HtmlTag tag;
+      tag.start = pos;
+      tag.end = htmlTagEnd(html, end, pos);
+      if (tag.end == std::string::npos) break;
+      const size_t next = tag.end + 1;
+      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
+        pos = next;
+        continue;
+      }
+      if (!tag.closing && htmlRawText(tag.name)) {
+        pos = skipHtmlRaw(html, end, tag);
+        continue;
+      }
+      if (!tag.closing && isNoiseContainer(tag.name, html, tag.start, tag.end)) {
+        if (tag.selfClosing) pos = next;
+        else htmlElementEnd(html, end, tag, pos);
+        continue;
+      }
+      pos = next;
+      continue;
+    }
+    if (html[pos] == '&') {
+      // One entity is roughly one visible character. Skip a short valid-looking
+      // entity so long encoded strings do not inflate a teaser's score.
+      const size_t limit = std::min(end, pos + 12);
+      size_t next = pos + 1;
+      while (next < limit && html[next] != ';' && html[next] != '<' && html[next] != '&' &&
+             !htmlSpace(html[next])) ++next;
+      pos = next < limit && html[next] == ';' ? next + 1 : pos + 1;
+      ++score;
+    } else {
+      const unsigned char c = static_cast<unsigned char>(html[pos++]);
+      if (c >= 0x20 && !htmlSpace(static_cast<char>(c))) ++score;
+    }
+    if (score >= MAX_TEXT_BYTES * 2U) return score;
+  }
+  return score;
+}
+
+void readableHtmlRange(const char* html, const size_t length, size_t& begin, size_t& end) {
+  begin = 0;
+  end = length;
+  static constexpr size_t STRONG_ARTICLE_SCORE = 512;
+
+  HtmlTag firstMain, firstBody, bestArticle, tag;
+  bool haveMain = false;
+  bool haveBody = false;
+  bool haveArticle = false;
+  size_t bestArticleEnd = 0;
+  size_t bestArticleScore = 0;
+  size_t pos = 0;
+  while (nextHtmlTag(html, length, pos, tag)) {
+    if (tag.closing) continue;
+    if (htmlRawText(tag.name)) { pos = skipHtmlRaw(html, length, tag); continue; }
+    if (!haveMain && tagEquals(tag.name, "main")) { firstMain = tag; haveMain = true; }
+    if (!haveBody && tagEquals(tag.name, "body")) { firstBody = tag; haveBody = true; }
+    if (!tagEquals(tag.name, "article") || tag.selfClosing ||
+        isNoiseContainer(tag.name, html, tag.start, tag.end)) continue;
+
+    size_t after = length;
+    const size_t candidateEnd = htmlElementEnd(html, length, tag, after);
+    if (candidateEnd <= tag.end + 1) continue;
+    const size_t score = readableCandidateScore(html, tag.end + 1, candidateEnd);
+    if (!haveArticle || score > bestArticleScore) {
+      bestArticle = tag;
+      bestArticleEnd = candidateEnd;
+      bestArticleScore = score;
+      haveArticle = true;
+    }
+  }
+
+  // A sizeable <article> is the safest root. Science & Vie/Futura pages also
+  // contain short teaser <article> cards before the story; those stay below the
+  // strong threshold and let <main> compete instead of being cached as a body.
+  if (haveArticle && bestArticleScore >= STRONG_ARTICLE_SCORE) {
+    begin = bestArticle.end + 1;
+    end = bestArticleEnd;
+    return;
+  }
+
+  if (haveMain && !firstMain.selfClosing) {
+    size_t after = length;
+    const size_t mainEnd = htmlElementEnd(html, length, firstMain, after);
+    if (mainEnd > firstMain.end + 1) {
+      const size_t mainScore = readableCandidateScore(html, firstMain.end + 1, mainEnd);
+      if (mainScore >= STRONG_ARTICLE_SCORE && (!haveArticle || mainScore > bestArticleScore)) {
+        begin = firstMain.end + 1;
+        end = mainEnd;
+        return;
+      }
+    }
+  }
+
+  if (haveArticle && bestArticleScore >= MIN_EXTRACTED_TEXT) {
+    begin = bestArticle.end + 1;
+    end = bestArticleEnd;
+    return;
+  }
+
+  if (haveMain && !firstMain.selfClosing) {
+    size_t after = length;
+    const size_t mainEnd = htmlElementEnd(html, length, firstMain, after);
+    if (mainEnd > firstMain.end + 1) {
+      begin = firstMain.end + 1;
+      end = mainEnd;
+      return;
+    }
+  }
+
+  if (haveBody && !firstBody.selfClosing) {
+    size_t after = length;
+    const size_t bodyEnd = htmlElementEnd(html, length, firstBody, after);
+    begin = firstBody.end + 1;
+    end = bodyEnd > begin ? bodyEnd : length;
+  }
+}
+
+bool looksLikeVisibleUrl(const char* text, size_t length) {
+  if (!text || length == 0) return false;
+  size_t start = 0;
+  while (start < length && htmlSpace(text[start])) ++start;
+  while (length > start && htmlSpace(text[length - 1])) --length;
+  if (start >= length) return false;
+  const size_t visible = length - start;
+  return startsWithInsensitive(text + start, visible, 0, "http://") ||
+         startsWithInsensitive(text + start, visible, 0, "https://") ||
+         startsWithInsensitive(text + start, visible, 0, "www.");
+}
+
+bool cleanupPunctuationAttachesLeft(const char value) {
+  switch (value) {
+    case '.':
+    case ',':
+    case ';':
+    case ':':
+    case '!':
+    case '?':
+    case '%':
+    case ')':
+    case ']':
+    case '}':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool cleanupPunctuationNeedsFollowingSpace(const char value) {
+  return cleanupPunctuationAttachesLeft(value);
+}
+
+void appendRemovalBoundary(char* text, size_t& length) {
+  if (!text || length == 0 || length >= MAX_TEXT_BYTES) return;
+  const unsigned char previous = static_cast<unsigned char>(text[length - 1]);
+  if (std::isspace(previous) || text[length - 1] == RSS_REMOVAL_BOUNDARY) return;
+  appendChar(text, length, RSS_REMOVAL_BOUNDARY);
+}
+
+size_t normalizeRemovalBoundaries(char* text, const size_t length) {
+  if (!text || length == 0) return 0;
+  size_t read = 0;
+  size_t write = 0;
+  bool pendingBoundary = false;
+  while (read < length) {
+    const char value = text[read++];
+    if (value == RSS_REMOVAL_BOUNDARY) {
+      pendingBoundary = true;
+      continue;
+    }
+    if (pendingBoundary) {
+      const unsigned char c = static_cast<unsigned char>(value);
+      if (std::isspace(c)) {
+        pendingBoundary = false;
+      } else if (write == 0 || std::isspace(static_cast<unsigned char>(text[write - 1]))) {
+        pendingBoundary = false;
+      } else if (cleanupPunctuationAttachesLeft(value)) {
+        text[write++] = value;
+        pendingBoundary = cleanupPunctuationNeedsFollowingSpace(value);
+        continue;
+      } else {
+        text[write++] = ' ';
+        pendingBoundary = false;
+      }
+    }
+    text[write++] = value;
+  }
+  while (write > 0 && text[write - 1] == ' ') --write;
+  text[write] = '\0';
+  return write;
+}
+
+bool anchorBoundaryGluesAfterText(const char* text, const size_t length) {
+  if (!text || length == 0) return true;
+  const unsigned char last = static_cast<unsigned char>(text[length - 1]);
+  if (std::isspace(last) || text[length - 1] == RSS_REMOVAL_BOUNDARY) return true;
+  switch (text[length - 1]) {
+    case '\'':
+    case '"':
+    case '-':
+    case '/':
+    case '(':
+    case '[':
+    case '{':
+      return true;
+    default:
+      break;
+  }
+  if (length >= 3) {
+    const unsigned char a = static_cast<unsigned char>(text[length - 3]);
+    const unsigned char b = static_cast<unsigned char>(text[length - 2]);
+    const unsigned char c = static_cast<unsigned char>(text[length - 1]);
+    // Curly apostrophes/opening quote can legitimately bind directly to the
+    // following linked phrase. A closing quote is intentionally not included:
+    // a card following quoted prose still needs a separator.
+    if (a == 0xe2 && b == 0x80 && (c == 0x98 || c == 0x99 || c == 0x9c)) return true;
+  }
+  return false;
+}
+
+bool anchorBoundaryGluesBeforeSource(const char* html, const size_t length, const size_t pos) {
+  if (!html || pos >= length) return true;
+  const unsigned char c = static_cast<unsigned char>(html[pos]);
+  if (htmlSpace(static_cast<char>(c))) return true;
+  if (html[pos] == '\'' || html[pos] == '"' || html[pos] == '-' || html[pos] == '/') return true;
+  if (pos + 3 <= length && c == 0xe2 && static_cast<unsigned char>(html[pos + 1]) == 0x80) {
+    const unsigned char tail = static_cast<unsigned char>(html[pos + 2]);
+    if (tail == 0x99 || tail == 0x9d) return true;  // closing curly quote/apostrophe
+  }
+  static constexpr const char* GLUE_ENTITIES[] = {
+      "&apos;", "&rsquo;", "&#39;", "&#x27;", "&#8217;", "&#x2019;",
+      "&nbsp;", "&#32;", "&#x20;", "&#160;", "&#xa0;",
+  };
+  for (const char* entity : GLUE_ENTITIES) {
+    if (startsWithInsensitive(html, length, pos, entity)) return true;
+  }
+  return false;
+}
+
+bool semanticInlineBoundaryTag(const char* name) {
+  // Modern news templates often build flex/grid rows from adjacent inline
+  // wrappers. We only separate sibling wrappers; ordinary inline emphasis is
+  // deliberately left untouched so <strong>mot</strong>s stays "mots".
+  return tagEquals(name, "span") || tagEquals(name, "strong") || tagEquals(name, "b") ||
+         tagEquals(name, "em") || tagEquals(name, "i") || tagEquals(name, "u") ||
+         tagEquals(name, "small") || tagEquals(name, "mark") || tagEquals(name, "label") ||
+         tagEquals(name, "time") || tagEquals(name, "abbr") || tagEquals(name, "cite");
+}
+
+bool inlineBoundaryGlueTag(const char* name) {
+  // These tags commonly decorate a word/value itself. Crossing them must not
+  // manufacture a word boundary (x<sup>2</sup>, H<sub>2</sub>O, ruby, ...).
+  return tagEquals(name, "sup") || tagEquals(name, "sub") || tagEquals(name, "wbr") ||
+         tagEquals(name, "ruby") || tagEquals(name, "rt") || tagEquals(name, "rp");
+}
+
+bool rawStructuralBoundaryTag(const char* name) {
+  // Strong structural fields may touch raw prose in source even though CSS
+  // renders them as separate cells/rows. Plain <span> is intentionally NOT in
+  // this list: <span>mot</span>s must remain "mots".
+  return tagEquals(name, "label") || tagEquals(name, "time") || tagEquals(name, "figcaption") ||
+         tagEquals(name, "figure") || tagEquals(name, "summary") || tagEquals(name, "data") ||
+         tagEquals(name, "output") || std::strchr(name, '-') != nullptr;
+}
+
+bool inlineRangeLooksPhrase(const char* text, const size_t begin, const size_t end) {
+  if (!text || begin >= end) return false;
+  bool hasVisible = false;
+  for (size_t i = begin; i < end; ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[i]);
+    if (text[i] == RSS_REMOVAL_BOUNDARY) continue;
+    if (std::isspace(c)) {
+      if (hasVisible) return true;
+      continue;
+    }
+    hasVisible = true;
+  }
+  size_t pos = end;
+  while (pos > begin && (text[pos - 1] == RSS_REMOVAL_BOUNDARY ||
+                         std::isspace(static_cast<unsigned char>(text[pos - 1])))) --pos;
+  return pos > begin && cleanupPunctuationNeedsFollowingSpace(text[pos - 1]);
+}
+
+bool extractReadableText(const char* html, const size_t htmlLength, char* text, size_t& textLength) {
+  textLength = 0;
+  if (!html || !text || htmlLength == 0) return false;
+  size_t begin, end;
+  readableHtmlRange(html, htmlLength, begin, end);
+  size_t pos = begin;
+  size_t anchorTextStart = 0;
+  size_t anchorMarkerStart = 0;
+  bool inAnchor = false;
+  bool pendingElementBoundary = false;
+  bool pendingRawBoundary = false;
+  static constexpr size_t INLINE_STACK_CAPACITY = 12;
+  size_t inlineStarts[INLINE_STACK_CAPACITY] = {};
+  size_t inlineDepth = 0;
+  while (pos < end && textLength < MAX_TEXT_BYTES) {
+    if (html[pos] == '<') {
+      if (startsWithInsensitive(html, end, pos, "<!--")) {
+        const size_t close = findInsensitive(html, end, "-->", pos + 4);
+        const size_t afterRemoved = close == std::string::npos ? end : close + 3;
+        if (textLength > 0 && afterRemoved < end) appendRemovalBoundary(text, textLength);
+        pos = afterRemoved;
+        continue;
+      }
+      HtmlTag tag;
+      tag.start = pos;
+      tag.end = htmlTagEnd(html, end, pos);
+      if (tag.end == std::string::npos) break;
+      const size_t next = tag.end + 1;
+      if (parseTagName(html, pos, tag.end, tag.name, sizeof(tag.name), tag.closing, tag.selfClosing) == 0) {
+        pendingElementBoundary = false;
+        pendingRawBoundary = false;
+        pos = next;
+        continue;
+      }
+      const bool semanticInline = semanticInlineBoundaryTag(tag.name);
+      const bool structuralInline = rawStructuralBoundaryTag(tag.name);
+      const bool glueTag = inlineBoundaryGlueTag(tag.name);
+      if (!tag.closing) {
+        // Keep a semantic seam alive through closing parent wrappers. This is
+        // the real-page case missed by the old immediate </span><span> rule:
+        // </span></data><data><span> must still separate the two cells.
+        if ((pendingElementBoundary || structuralInline) && !glueTag && !inAnchor && textLength > 0 &&
+            !anchorBoundaryGluesAfterText(text, textLength)) {
+          appendRemovalBoundary(text, textLength);
+        }
+        pendingElementBoundary = false;
+        pendingRawBoundary = false;
+        if (semanticInline && !tag.selfClosing && inlineDepth < INLINE_STACK_CAPACITY) {
+          inlineStarts[inlineDepth++] = textLength;
+        }
+      }
+      if (!tag.closing && htmlRawText(tag.name)) {
+        const size_t afterRemoved = skipHtmlRaw(html, end, tag);
+        if (textLength > 0 && afterRemoved < end) appendRemovalBoundary(text, textLength);
+        pos = afterRemoved;
+        continue;
+      }
+      if (!tag.closing && isNoiseContainer(tag.name, html, tag.start, tag.end)) {
+        if (tag.selfClosing) pos = next;
+        else htmlElementEnd(html, end, tag, pos);
+        if (textLength > 0 && pos < end) appendRemovalBoundary(text, textLength);
+        continue;
+      }
+      // Images and <source> nodes contribute no visible text to our reader.
+      // Preserve a seam when they sit directly between prose/caption text so
+      // "phrase.<img>© Crédit" cannot collapse into "phrase.© Crédit".
+      if (!tag.closing && (tagEquals(tag.name, "img") || tagEquals(tag.name, "source"))) {
+        if (!inAnchor && textLength > 0 && next < end) appendRemovalBoundary(text, textLength);
+        pos = next;
+        continue;
+      }
+      if (tagEquals(tag.name, "a")) {
+        if (!tag.closing && !tag.selfClosing && !inAnchor) {
+          // HTML/CSS frequently makes links visually separate even when the
+          // source omits literal whitespace. Keep a semantic seam for every
+          // anchor, not only long teaser/card links. Grammar that genuinely
+          // binds to the link (apostrophe, opening parenthesis, etc.) is kept.
+          if (textLength > 0 && !anchorBoundaryGluesAfterText(text, textLength)) {
+            appendRemovalBoundary(text, textLength);
+          }
+          inAnchor = true;
+          anchorMarkerStart = textLength;
+          for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_START[i]);
+          anchorTextStart = textLength;
+        } else if (tag.closing && inAnchor) {
+          const size_t anchorTextBytes = textLength > anchorTextStart ? textLength - anchorTextStart : 0;
+          if (looksLikeVisibleUrl(text + anchorTextStart, anchorTextBytes)) {
+            textLength = anchorMarkerStart;
+            while (textLength > 0 && text[textLength - 1] == ' ' &&
+                   (next < end && htmlSpace(html[next]))) {
+              --textLength;
+            }
+            if (next < end) appendRemovalBoundary(text, textLength);
+          } else if (anchorTextBytes > 0) {
+            for (size_t i = 0; i < RSS_LINK_MARKER_BYTES; ++i) appendChar(text, textLength, RSS_LINK_END[i]);
+            if (next < end && !anchorBoundaryGluesBeforeSource(html, end, next)) {
+              appendRemovalBoundary(text, textLength);
+            }
+          } else {
+            textLength = anchorMarkerStart;
+            if (next < end) appendRemovalBoundary(text, textLength);
+          }
+          inAnchor = false;
+        }
+      }
+      if (tag.closing && !inAnchor && !tagEquals(tag.name, "a") && !glueTag &&
+          (semanticInline || structuralInline)) {
+        // Closing parents must not erase the fact that visible text just ended.
+        // For plain semantic wrappers, crossing into raw text is safe only when
+        // the wrapper contained a phrase or ended a sentence. This preserves
+        // <span>mot</span>s while fixing <span>dans une</span>éponge and
+        // <span>stable.</span>Le contraste.
+        bool phraseBoundary = false;
+        if (semanticInline && inlineDepth > 0) {
+          const size_t start = inlineStarts[--inlineDepth];
+          phraseBoundary = inlineRangeLooksPhrase(text, start, textLength);
+        }
+        pendingElementBoundary = true;
+        pendingRawBoundary = pendingRawBoundary || structuralInline || phraseBoundary;
+      }
+      if (tagEquals(tag.name, "br") || tagEquals(tag.name, "tr") || tagEquals(tag.name, "dt") || tagEquals(tag.name, "dd")) {
+        appendLineBreak(text, textLength);
+      } else if (tagEquals(tag.name, "li")) {
+        appendLineBreak(text, textLength);
+        if (!tag.closing) { appendChar(text, textLength, '-'); appendChar(text, textLength, ' '); }
+      } else if (tagEquals(tag.name, "td") || tagEquals(tag.name, "th")) {
+        appendSpace(text, textLength);
+      } else if (isParagraphTag(tag.name)) {
+        appendParagraphBreak(text, textLength);
+      }
+      pos = next;
+      continue;
+    }
+    if (html[pos] == '&') {
+      if (pendingRawBoundary && !inAnchor && textLength > 0 &&
+          !anchorBoundaryGluesAfterText(text, textLength) &&
+          !anchorBoundaryGluesBeforeSource(html, end, pos)) {
+        appendRemovalBoundary(text, textLength);
+      }
+      pendingElementBoundary = false;
+      pendingRawBoundary = false;
+      pos = decodeEntityUtf8(html, end, pos, text, textLength);
+      continue;
+    }
+    if (pendingRawBoundary && !inAnchor && textLength > 0 &&
+        !anchorBoundaryGluesAfterText(text, textLength) &&
+        !anchorBoundaryGluesBeforeSource(html, end, pos)) {
+      appendRemovalBoundary(text, textLength);
+    }
+    pendingElementBoundary = false;
+    pendingRawBoundary = false;
+    const unsigned char c = static_cast<unsigned char>(html[pos++]);
+    if (htmlSpace(static_cast<char>(c))) appendSpace(text, textLength);
+    else if (c >= 0x20) appendChar(text, textLength, static_cast<char>(c));
+  }
+  const bool atCapacity = textLength >= MAX_TEXT_BYTES;
+  textLength = normalizeRemovalBoundaries(text, textLength);
+  while (textLength > 0 && (text[textLength - 1] == ' ' || text[textLength - 1] == '\n')) --textLength;
+  text[textLength] = '\0';
+  return !atCapacity && textLength >= MIN_EXTRACTED_TEXT;
+}
