@@ -13,24 +13,24 @@
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
 #include "SdCardFontSystem.h"
-#include "activities/util/KeyboardEntryActivity.h"
+#include "NotesKeyboardEntryBase.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UIScale.h"
 #include "fontIds.h"
 
 // Read-only-first decorator used by Notes. Non-multiline entry fields keep the
-// normal KeyboardEntryActivity behavior, so title/search dialogs are unchanged.
-class NotesViewerKeyboardBase : public KeyboardEntryActivity {
+// normal NotesKeyboardEntryBase behavior, so title/search dialogs are unchanged.
+class NotesViewerKeyboardBase : public NotesKeyboardEntryBase {
  public:
   explicit NotesViewerKeyboardBase(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                    std::string title = "Enter Text", std::string initialText = "",
-                                   const size_t maxLength = 0, InputType inputType = InputType::Text,
+                                   const size_t maxLength = 0, NotesInputType inputType = NotesInputType::Text,
                                    const size_t minLength = 0)
-      : KeyboardEntryActivity(renderer, mappedInput, title, std::move(initialText), maxLength, inputType, minLength),
-        viewerTitle(std::move(title)), viewerInputType(inputType) {}
+      : NotesKeyboardEntryBase(renderer, mappedInput, title, std::move(initialText), maxLength, inputType, minLength),
+        viewerTitle(std::move(title)), viewerNotesInputType(inputType) {}
 
   void onEnter() override {
-    KeyboardEntryActivity::onEnter();
+    NotesKeyboardEntryBase::onEnter();
     editing = false;
     viewerPage = 0;
     viewerLayoutDirty = true;
@@ -41,11 +41,11 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
     }
   }
 
-  void onExit() override { KeyboardEntryActivity::onExit(); }
+  void onExit() override { NotesKeyboardEntryBase::onExit(); }
 
   void loop() override {
     if (!viewerEnabled() || editing) {
-      KeyboardEntryActivity::loop();
+      NotesKeyboardEntryBase::loop();
       return;
     }
 
@@ -90,7 +90,7 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
 
   void render(RenderLock&& lock) override {
     if (!viewerEnabled() || editing) {
-      KeyboardEntryActivity::render(std::move(lock));
+      NotesKeyboardEntryBase::render(std::move(lock));
       return;
     }
 
@@ -138,7 +138,7 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
   }
 
  protected:
-  bool viewerEnabled() const { return viewerInputType == InputType::Multiline && headerActionReserveWidth() > 0; }
+  bool viewerEnabled() const { return viewerNotesInputType == NotesInputType::Multiline && headerActionReserveWidth() > 0; }
 
   virtual bool headerActionLocked() const { return currentNoteLooksLocked(); }
 
@@ -183,7 +183,7 @@ class NotesViewerKeyboardBase : public KeyboardEntryActivity {
 
  private:
   std::string viewerTitle;
-  InputType viewerInputType = InputType::Text;
+  NotesInputType viewerNotesInputType = NotesInputType::Text;
   bool editing = false;
   bool viewerLayoutDirty = true;
   int viewerFontId = UI_12_FONT_ID;
