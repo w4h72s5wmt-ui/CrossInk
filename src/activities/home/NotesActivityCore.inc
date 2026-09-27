@@ -19,7 +19,7 @@
 
 #include "MappedInputManager.h"
 #include "activities/util/ConfirmationActivity.h"
-#include "activities/util/KeyboardEntryActivity.h"
+#include "activities/util/NotesViewerKeyboardBase.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/OptionPopup.h"
 #include "components/UITheme.h"
@@ -768,11 +768,11 @@ bool saveNoteFile(const std::string& path, const std::string& text) {
   return written == text.size();
 }
 
-class NotesKeyboardActivity final : public KeyboardEntryActivity {
+class NotesKeyboardActivity final : public NotesViewerKeyboardBase {
  public:
   NotesKeyboardActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string title,
                         std::string initialText, const size_t maxLength, std::string path, std::string vaultPattern)
-      : KeyboardEntryActivity(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
+      : NotesViewerKeyboardBase(renderer, mappedInput, std::move(title), std::move(initialText), maxLength,
                               NotesInputType::Multiline),
         path(std::move(path)), vaultPattern(std::move(vaultPattern)) {
     capturePersistedState();
@@ -790,7 +790,7 @@ class NotesKeyboardActivity final : public KeyboardEntryActivity {
     }
     std::fill(vaultPattern.begin(), vaultPattern.end(), '\0');
     vaultPattern.clear();
-    KeyboardEntryActivity::onExit();
+    NotesViewerKeyboardBase::onExit();
   }
 
  protected:
@@ -1151,7 +1151,7 @@ void NotesActivity::editNote(const std::string& path, const std::string& title) 
 
 void NotesActivity::createNote() {
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_TITLE_LABEL, "", 48, NotesInputType::Text, 1),
+      std::make_unique<NotesViewerKeyboardBase>(renderer, mappedInput, NOTES_TITLE_LABEL, "", 48, NotesInputType::Text, 1),
       [this](const ActivityResult& result) {
         if (result.isCancelled) {
           requestUpdate();
@@ -1179,7 +1179,7 @@ void NotesActivity::renameNote(const std::string& filename) {
   const std::string oldPath = std::string(kNotesDir) + "/" + filename;
   const bool wasLocked = noteLockedByPath(oldPath);
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_TITLE_LABEL, oldTitle, 48,
+      std::make_unique<NotesViewerKeyboardBase>(renderer, mappedInput, NOTES_TITLE_LABEL, oldTitle, 48,
                                               NotesInputType::Text, 1),
       [this, filename, oldPath, wasLocked](const ActivityResult& result) {
         if (result.isCancelled) {
@@ -1234,7 +1234,7 @@ void NotesActivity::renameNote(const std::string& filename) {
 
 void NotesActivity::editSearch() {
   startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, NOTES_SEARCH_LABEL, searchQuery, 80,
+      std::make_unique<NotesViewerKeyboardBase>(renderer, mappedInput, NOTES_SEARCH_LABEL, searchQuery, 80,
                                               NotesInputType::Text),
       [this](const ActivityResult& result) {
         if (!result.isCancelled) {
