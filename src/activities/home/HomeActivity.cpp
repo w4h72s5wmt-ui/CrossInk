@@ -40,6 +40,7 @@
 #include "MinesweeperActivity.h"
 #include "Game2048Activity.h"
 #include "MissileCommandActivity.h"
+#include "RssNewsActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -50,7 +51,7 @@ namespace {
 constexpr uint32_t CAROUSEL_CACHE_MAGIC = 0x43434152;  // "CCAR"
 // Cached frames include all Home visuals, including the menu icons. Bump this
 // whenever their rendering changes so stale snapshots are rebuilt after OTA.
-constexpr uint16_t CAROUSEL_CACHE_VERSION = 6;
+constexpr uint16_t CAROUSEL_CACHE_VERSION = 7;
 constexpr char CAROUSEL_CACHE_PATH[] = "/.crosspoint/home_carousel_cache.bin";
 constexpr char CAROUSEL_CACHE_TMP_PATH[] = "/.crosspoint/home_carousel_cache.tmp";
 constexpr uint32_t CAROUSEL_FRAME_MIN_FREE_AFTER_ALLOC = 64U * 1024U;
@@ -69,6 +70,7 @@ enum class HomeMenuAction {
   Minesweeper,
   Game2048,
   MissileCommand,
+  RssNews,
   FileTransfer,
   Settings,
 };
@@ -80,7 +82,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 12;
+  static constexpr int kCapacity = 13;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -290,6 +292,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
   items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
   items.push({"2048", Chart, HomeMenuAction::Game2048});
   items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
@@ -318,6 +321,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
   items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
   items.push({"2048", Chart, HomeMenuAction::Game2048});
   items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   return items;
 }
@@ -1601,6 +1605,9 @@ void HomeActivity::loop() {
           case HomeMenuAction::MissileCommand:
             onMissileCommandOpen();
             break;
+          case HomeMenuAction::RssNews:
+            onRssNewsOpen();
+            break;
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
@@ -1857,6 +1864,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::MissileCommand:
         onMissileCommandOpen();
+        break;
+      case HomeMenuAction::RssNews:
+        onRssNewsOpen();
         break;
       case HomeMenuAction::FileTransfer:
         onFileTransferOpen();
@@ -2478,5 +2488,10 @@ void HomeActivity::onGame2048Open() {
 
 void HomeActivity::onMissileCommandOpen() {
   startActivityForResult(std::make_unique<MissileCommandActivity>(renderer, mappedInput),
+                         [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void HomeActivity::onRssNewsOpen() {
+  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput),
                          [this](const ActivityResult&) { requestUpdate(); });
 }
