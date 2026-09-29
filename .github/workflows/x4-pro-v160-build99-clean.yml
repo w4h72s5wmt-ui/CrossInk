@@ -36,6 +36,9 @@ jobs:
       - name: Install PlatformIO Core
         run: uv tool install platformio
 
+      - name: Apply X4 Pro display overlay
+        run: cp -a consolidated/freeink-sdk/. freeink-sdk/
+
       - name: Build X4 Pro firmware
         run: set -o pipefail; pio run -e x4-pro | tee build-x4-pro.log
 
