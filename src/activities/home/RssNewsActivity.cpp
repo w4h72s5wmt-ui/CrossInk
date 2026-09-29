@@ -260,7 +260,7 @@ void RssNewsActivity::onExit() {
     }
     // Keep the post-WiFi reboot that defragments the ESP network heap and
     // resume at the normal Home screen, like native applications.
-    silentRestartAfterNetwork();
+    silentRestart();
   }
 #endif
 }
