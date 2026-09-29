@@ -71,6 +71,11 @@ void HalDisplay::displayBuffer(HalDisplay::RefreshMode mode, bool turnOffScreen)
   einkDisplay.displayBuffer(convertRefreshMode(mode), turnOffScreen);
 }
 
+bool HalDisplay::seedPreviousWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+  HalSpiBus::Lock spiLock;
+  return einkDisplay.seedPreviousWindow(x, y, w, h);
+}
+
 void HalDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen) {
   HalSpiBus::Lock spiLock;
   einkDisplay.displayWindow(x, y, w, h, turnOffScreen);

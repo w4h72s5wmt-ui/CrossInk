@@ -44,6 +44,8 @@ class HalDisplay {
                             bool fromProgmem = false) const;
 
   void displayBuffer(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
+  // Seed the X4 Pro UC8279 OLD plane for one physical window without refreshing it.
+  bool seedPreviousWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
   // X4 Pro Missile Command local/sparse window refresh path.
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
   void displaySparseWindow(const uint8_t* tileMask, uint16_t tileCols, uint16_t tileRows, uint16_t tileW, uint16_t tileH,
