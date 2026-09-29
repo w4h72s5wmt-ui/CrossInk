@@ -1,9 +1,9 @@
-name: Missile BaseMode17 Consolidated X4 Pro
+name: Build99 XTC Zoom X4 Pro
 
 on:
   push:
     branches:
-      - x4-pro-missile-basemode17-consolidated
+      - x4-pro-build99-xtc-zoom
   workflow_dispatch:
 
 jobs:
@@ -47,13 +47,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: missile-basemode17-consolidated-${{ github.run_number }}
+          name: build99-xtc-zoom-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: missile-basemode17-consolidated-${{ github.run_number }}-log
+          name: build99-xtc-zoom-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
