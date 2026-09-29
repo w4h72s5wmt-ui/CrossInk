@@ -38,8 +38,12 @@ class XtcReaderActivity final : public Activity {
   // Queue the turn so it follows the same guarded XTC page-turn path.
   bool shortcutPageTurnPending = false;
   bool shortcutPreviousPagePending = false;
-  // Session-only display toggle; fixed-layout XTC pages are never regenerated.
+  // Session-only display toggles; fixed-layout XTC pages are never regenerated.
   bool statusBarVisible = true;
+  bool zoomActive = false;
+  uint32_t zoomPage = 0;
+  int zoomTapX = 0;
+  int zoomTapY = 0;
   bool longPressMenuHandled = false;
   bool sideButtonLongPressHandled = false;
   bool frontButtonLongPressHandled = false;
