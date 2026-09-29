@@ -992,25 +992,21 @@ static void armSleepClockAlignedTimer() {
   uint32_t wakeSeconds = refreshSeconds;
   uint8_t hour = 0;
   uint8_t minute = 0;
-  uint8_t second = 0;
 
-  if (halClock.getTime(hour, minute, second)) {
+  if (halClock.getTime(hour, minute)) {
     if (refreshMinutes == 5u) {
-      // Five-minute mode displays the nearest 5-minute value. The visible
-      // value therefore changes halfway between marks: :02:30, :07:30, ...
-      constexpr uint32_t SWITCH_SECOND = 2u * 60u + 30u;
-      const uint32_t secondsIntoBlock = static_cast<uint32_t>(minute % 5u) * 60u + second;
-      wakeSeconds = secondsIntoBlock < SWITCH_SECOND
-                        ? SWITCH_SECOND - secondsIntoBlock
-                        : refreshSeconds + SWITCH_SECOND - secondsIntoBlock;
+      // CrossInk 1.6 exposes the RTC at minute precision. Match the overlay's
+      // app-local nearest-5-minute rule: the visible value switches on minute 3.
+      const uint32_t minuteInBlock = static_cast<uint32_t>(minute % 5u);
+      const uint32_t minutesUntilSwitch = minuteInBlock < 3u ? 3u - minuteInBlock : 8u - minuteInBlock;
+      wakeSeconds = minutesUntilSwitch * 60u;
     } else {
-      // One-minute mode keeps normal wall-clock semantics and changes on :00.
-      wakeSeconds = second == 0 ? 60u : 60u - second;
+      wakeSeconds = 60u;
     }
 
-    LOG_INF("SLPCLK", "Next %lu-minute aligned wake in %lus (RTC %02u:%02u:%02u)",
+    LOG_INF("SLPCLK", "Next %lu-minute wake in %lus (RTC %02u:%02u)",
             static_cast<unsigned long>(refreshMinutes), static_cast<unsigned long>(wakeSeconds),
-            static_cast<unsigned>(hour), static_cast<unsigned>(minute), static_cast<unsigned>(second));
+            static_cast<unsigned>(hour), static_cast<unsigned>(minute));
   } else {
     LOG_INF("SLPCLK", "RTC seconds unavailable; falling back to a %lu-minute interval",
             static_cast<unsigned long>(refreshMinutes));

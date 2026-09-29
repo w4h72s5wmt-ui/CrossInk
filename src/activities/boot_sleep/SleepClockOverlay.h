@@ -55,7 +55,7 @@ inline int layoutMargin() {
 }
 
 inline int dateTextHeight(const GfxRenderer& renderer) {
-  return renderer.getTextHeight(LEXENDDECA_20_FONT_ID);
+  return renderer.getTextHeight(LEXENDDECA_16_FONT_ID);
 }
 
 inline int dateY(const GfxRenderer& renderer) {
@@ -279,7 +279,10 @@ inline bool roundFiveMinuteDisplay(char* time, const size_t timeSize, const uint
 
   int totalMinutes = hour24 * 60 + minute;
   const int remainder = minute % 5;
-  const bool roundUp = remainder > 2 || (remainder == 2 && second >= 30);
+  // CrossInk 1.6 intentionally exposes the RTC at minute precision.
+  // Keep the 5-minute overlay app-local: switch on minute 3 rather than
+  // reintroducing a seconds API into HalClock.
+  const bool roundUp = remainder >= 3;
   totalMinutes += roundUp ? (5 - remainder) : -remainder;
   totalMinutes = ((totalMinutes % 1440) + 1440) % 1440;
 
@@ -302,12 +305,11 @@ inline bool formatCurrentState(ClockTextState& state) {
 
   uint8_t rtcHour = 0;
   uint8_t rtcMinute = 0;
-  uint8_t rtcSecond = 0;
-  if (!halClock.getTime(rtcHour, rtcMinute, rtcSecond)) return false;
+  if (!halClock.getTime(rtcHour, rtcMinute)) return false;
 
   if (!halClock.formatTime(state.time, sizeof(state.time), SETTINGS.clockUtcOffsetQ,
                            SETTINGS.clockFormat != 0) ||
-      !roundFiveMinuteDisplay(state.time, sizeof(state.time), rtcSecond)) {
+      !roundFiveMinuteDisplay(state.time, sizeof(state.time), 0)) {
     return false;
   }
 
@@ -338,9 +340,9 @@ inline bool drawState(GfxRenderer& renderer, const ClockTextState& state) {
 
   if (state.hasDate && state.date[0] != '\0') {
     const auto style = EpdFontFamily::BOLD;
-    const int dateWidth = renderer.getTextWidth(LEXENDDECA_20_FONT_ID, state.date, style);
+    const int dateWidth = renderer.getTextWidth(LEXENDDECA_16_FONT_ID, state.date, style);
     const int dateX = (renderer.getScreenWidth() - dateWidth) / 2;
-    drawOutlinedSystemText(renderer, LEXENDDECA_20_FONT_ID, dateX, dateY(renderer), state.date, style, 2);
+    drawOutlinedSystemText(renderer, LEXENDDECA_16_FONT_ID, dateX, dateY(renderer), state.date, style, 2);
   }
 
   const int timeWidth = measureTime(mainTime);
@@ -351,11 +353,11 @@ inline bool drawState(GfxRenderer& renderer, const ClockTextState& state) {
 
   if (suffix[0] != '\0') {
     const auto style = EpdFontFamily::BOLD;
-    const int suffixWidth = renderer.getTextWidth(LEXENDDECA_18_FONT_ID, suffix, style);
+    const int suffixWidth = renderer.getTextWidth(LEXENDDECA_12_FONT_ID, suffix, style);
     int suffixX = timeX + timeWidth + 10;
     const int maxSuffixX = renderer.getScreenWidth() - SIDE_MARGIN - suffixWidth;
     if (suffixX > maxSuffixX) suffixX = maxSuffixX;
-    drawOutlinedSystemText(renderer, LEXENDDECA_18_FONT_ID, suffixX, timeY + 84, suffix, style);
+    drawOutlinedSystemText(renderer, LEXENDDECA_12_FONT_ID, suffixX, timeY + 84, suffix, style);
   }
 
   return true;
