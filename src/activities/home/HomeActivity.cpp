@@ -36,6 +36,11 @@
 #include "RecentBookProgress.h"
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
+#include "NotesActivity.h"
+#include "MinesweeperActivity.h"
+#include "Game2048Activity.h"
+#include "MissileCommandActivity.h"
+#include "RssNewsActivity.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -46,7 +51,7 @@ namespace {
 constexpr uint32_t CAROUSEL_CACHE_MAGIC = 0x43434152;  // "CCAR"
 // Cached frames include all Home visuals, including the menu icons. Bump this
 // whenever their rendering changes so stale snapshots are rebuilt after OTA.
-constexpr uint16_t CAROUSEL_CACHE_VERSION = 5;
+constexpr uint16_t CAROUSEL_CACHE_VERSION = 6;
 constexpr char CAROUSEL_CACHE_PATH[] = "/.crosspoint/home_carousel_cache.bin";
 constexpr char CAROUSEL_CACHE_TMP_PATH[] = "/.crosspoint/home_carousel_cache.tmp";
 constexpr uint32_t CAROUSEL_FRAME_MIN_FREE_AFTER_ALLOC = 64U * 1024U;
@@ -61,6 +66,11 @@ enum class HomeMenuAction {
   OpdsBrowser,
   ReadingStats,
   Bookmarks,
+  Notes,
+  Minesweeper,
+  Game2048,
+  MissileCommand,
+  RssNews,
   FileTransfer,
   Settings,
 };
@@ -72,7 +82,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 8;
+  static constexpr int kCapacity = 13;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -278,6 +288,11 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
     items.push({savedItemsLabel(hasBookmarks, hasClippings), BookmarkIcon, HomeMenuAction::Bookmarks});
   }
 
+  items.push({"Notes", BookmarkIcon, HomeMenuAction::Notes});
+  items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
+  items.push({"2048", Chart, HomeMenuAction::Game2048});
+  items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
@@ -302,6 +317,11 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
     items.push({tr(STR_READING_STATS), Chart, HomeMenuAction::ReadingStats});
   }
 
+  items.push({"Notes", BookmarkIcon, HomeMenuAction::Notes});
+  items.push({"Demineur", Chart, HomeMenuAction::Minesweeper});
+  items.push({"2048", Chart, HomeMenuAction::Game2048});
+  items.push({"Missile Command", Chart, HomeMenuAction::MissileCommand});
+  items.push({"RSS", Library, HomeMenuAction::RssNews});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   return items;
 }
@@ -1573,6 +1593,22 @@ void HomeActivity::loop() {
           case HomeMenuAction::Bookmarks:
             onSavedItemsOpen();
             break;
+          case HomeMenuAction::Notes:
+            onNotesOpen();
+            break;
+          case HomeMenuAction::Minesweeper:
+            onMinesweeperOpen();
+            break;
+          case HomeMenuAction::Game2048:
+            onGame2048Open();
+            break;
+          case HomeMenuAction::MissileCommand:
+            onMissileCommandOpen();
+            break;
+
+          case HomeMenuAction::RssNews:
+            onRssNewsOpen();
+            break;
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
@@ -1817,6 +1853,22 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Bookmarks:
         onSavedItemsOpen();
+        break;
+      case HomeMenuAction::Notes:
+        onNotesOpen();
+        break;
+      case HomeMenuAction::Minesweeper:
+        onMinesweeperOpen();
+        break;
+      case HomeMenuAction::Game2048:
+        onGame2048Open();
+        break;
+      case HomeMenuAction::MissileCommand:
+        onMissileCommandOpen();
+        break;
+
+      case HomeMenuAction::RssNews:
+        onRssNewsOpen();
         break;
       case HomeMenuAction::FileTransfer:
         onFileTransferOpen();
@@ -2418,5 +2470,30 @@ void HomeActivity::onReadingStatsOpen() {
 
 void HomeActivity::onSavedItemsOpen() {
   startActivityForResult(std::make_unique<SavedItemsHomeActivity>(renderer, mappedInput),
+                         [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void HomeActivity::onNotesOpen() {
+  startActivityForResult(std::make_unique<NotesActivity>(renderer, mappedInput),
+                         [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void HomeActivity::onMinesweeperOpen() {
+  startActivityForResult(std::make_unique<MinesweeperActivity>(renderer, mappedInput),
+                         [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void HomeActivity::onGame2048Open() {
+  startActivityForResult(std::make_unique<Game2048Activity>(renderer, mappedInput),
+                         [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void HomeActivity::onMissileCommandOpen() {
+  startActivityForResult(std::make_unique<MissileCommandActivity>(renderer, mappedInput),
+                         [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void HomeActivity::onRssNewsOpen() {
+  startActivityForResult(std::make_unique<RssNewsActivity>(renderer, mappedInput),
                          [this](const ActivityResult&) { requestUpdate(); });
 }

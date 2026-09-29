@@ -264,6 +264,7 @@ class FreeInkDisplay {
   bool isX3Mode() const { return _panelSel == PanelSel::X3; }
 
   // EXPERIMENTAL: Windowed update - display only a rectangular region
+  bool seedPreviousWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
   void displaySparseWindow(const uint8_t* tileMask, uint16_t tileCols, uint16_t tileRows, uint16_t tileW, uint16_t tileH,
                            uint16_t bboxX, uint16_t bboxY, uint16_t bboxW, uint16_t bboxH,

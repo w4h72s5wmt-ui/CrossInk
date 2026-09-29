@@ -595,6 +595,52 @@ void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
   }
 }
 
+bool Uc8279X4Driver::seedPreviousWindow(EpdBus& bus, const uint8_t* fb, uint16_t x, uint16_t y,
+                                         uint16_t w, uint16_t h) {
+  if (!fb || w == 0 || h == 0 || x + w > _w || y + h > _h) return false;
+  if ((x & 0x07) != 0 || (w & 0x07) != 0) return false;
+
+  uint16_t xStart = x;
+  uint16_t xEnd = static_cast<uint16_t>(x + w - 1);
+  uint16_t yStartVisible = y;
+  uint16_t yEndVisible = static_cast<uint16_t>(y + h - 1);
+#if FREEINK_UC8279X4_XMIRROR
+  xStart = static_cast<uint16_t>(_w - (x + w));
+  xEnd = static_cast<uint16_t>(_w - 1 - x);
+#endif
+#if FREEINK_UC8279X4_ROWREV
+  yStartVisible = static_cast<uint16_t>(_h - (y + h));
+  yEndVisible = static_cast<uint16_t>(_h - 1 - y);
+#endif
+  const uint16_t yStart = static_cast<uint16_t>(_cfg.gateOffset + yStartVisible);
+  const uint16_t yEnd = static_cast<uint16_t>(_cfg.gateOffset + yEndVisible);
+
+  // PON must precede PTIN/PTL on this controller. Otherwise a short DTM1
+  // payload is consumed with full-plane addressing after deep sleep.
+  powerOnIfNeeded(bus, " 8279x4_window_seed_PON");
+  bus.cmd(CMD_PARTIAL_IN);
+  bus.cmd(CMD_PARTIAL_WINDOW);
+  bus.data(static_cast<uint8_t>(xStart >> 8));
+  bus.data(static_cast<uint8_t>(xStart & 0xF8));
+  bus.data(static_cast<uint8_t>(xEnd >> 8));
+  bus.data(static_cast<uint8_t>(xEnd | 0x07));
+  bus.data(static_cast<uint8_t>(yStart >> 8));
+  bus.data(static_cast<uint8_t>(yStart & 0xFF));
+  bus.data(static_cast<uint8_t>(yEnd >> 8));
+  bus.data(static_cast<uint8_t>(yEnd & 0xFF));
+  bus.data(0x01);
+  streamWindowPlane(bus, CMD_DTM1, fb, x, y, w, h);
+  bus.cmd(CMD_PARTIAL_OUT);
+
+  _grayBaseValid = false;
+  _absoluteGrayPlanes = false;
+  _oldPlaneValid = true;
+  _needFullClear = false;
+  _redriveAfterGray = false;
+  return true;
+}
+
+
 void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y,
                                    uint16_t w, uint16_t h, bool turnOff) {
   if (!fb || w == 0 || h == 0 || x + w > _w || y + h > _h) return;

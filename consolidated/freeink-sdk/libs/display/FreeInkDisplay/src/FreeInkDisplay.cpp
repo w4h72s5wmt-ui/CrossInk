@@ -781,6 +781,12 @@ void FreeInkDisplay::displayBufferAsyncNoShadow(RefreshMode mode) {
   displayAsyncImpl(mode, /*turnOffScreen=*/false, /*noShadow=*/true);
 }
 
+bool FreeInkDisplay::seedPreviousWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+  syncPendingAsync();
+  if (_inverted || _inversionDirty || !_driver || !frameBuffer) return false;
+  return _driver->seedPreviousWindow(_bus, frameBuffer, x, y, w, h);
+}
+
 void FreeInkDisplay::displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen) {
   cancelGrayscalePass();
 #if defined(SSD1677_PROBE_DEBUG) && SSD1677_PROBE_DEBUG
