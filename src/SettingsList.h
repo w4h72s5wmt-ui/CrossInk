@@ -1,5 +1,6 @@
 #pragma once
 
+#include <BoardConfig.h>
 #include <CrossInkHalFrontlight.h>
 #include <HalClock.h>
 #include <HalGPIO.h>
@@ -557,7 +558,7 @@ inline SettingInfo buildHomeButtonActionSetting(const StrId nameId, uint8_t Cros
 inline const std::vector<SettingInfo>& getBaseSettingsList() {
   static const std::vector<SettingInfo> baseList = [] {
     std::vector<SettingInfo> v;
-    v.reserve(77);
+    v.reserve(81);
     auto add = [&v](SettingInfo setting) { v.push_back(std::move(setting)); };
 
     // --- Display ---
@@ -569,6 +570,23 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
                           "sleepScreenCoverFilter", StrId::STR_CAT_DISPLAY));
     add(SettingInfo::Toggle(StrId::STR_QUICK_RESUME_TIMEOUT, &CrossPointSettings::quickResumeSleepScreen,
                             "quickResumeSleepScreen", StrId::STR_CAT_DISPLAY));
+    add(SettingInfo::Toggle(StrId::STR_SLEEP_CLOCK, &CrossPointSettings::sleepClockEnabled,
+                            "sleepClockEnabled", StrId::STR_CAT_DISPLAY));
+    add(SettingInfo::Enum(StrId::STR_SLEEP_CLOCK_REFRESH, &CrossPointSettings::sleepClockRefresh,
+                          {StrId::STR_SLEEP_CLOCK_1_MIN, StrId::STR_SLEEP_CLOCK_5_MIN},
+                          "sleepClockRefresh", StrId::STR_CAT_DISPLAY)
+            .withEnumRawValues({CrossPointSettings::SLEEP_CLOCK_EVERY_MINUTE,
+                                CrossPointSettings::SLEEP_CLOCK_EVERY_5_MINUTES}));
+    add(SettingInfo::Enum(StrId::STR_SLEEP_CLOCK_POSITION, &CrossPointSettings::sleepClockPosition,
+                          {StrId::STR_SLEEP_CLOCK_TOP, StrId::STR_SLEEP_CLOCK_BOTTOM},
+                          "sleepClockPosition", StrId::STR_CAT_DISPLAY)
+            .withEnumRawValues({CrossPointSettings::SLEEP_CLOCK_TOP,
+                                CrossPointSettings::SLEEP_CLOCK_BOTTOM}));
+    add(SettingInfo::Enum(StrId::STR_SLEEP_DATE_POSITION, &CrossPointSettings::sleepDatePosition,
+                          {StrId::STR_SLEEP_CLOCK_TOP, StrId::STR_SLEEP_CLOCK_BOTTOM},
+                          "sleepDatePosition", StrId::STR_CAT_DISPLAY)
+            .withEnumRawValues({CrossPointSettings::SLEEP_CLOCK_TOP,
+                                CrossPointSettings::SLEEP_CLOCK_BOTTOM}));
     add(SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
                           {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
                           StrId::STR_CAT_DISPLAY));
@@ -1343,7 +1361,7 @@ inline std::vector<SettingInfo> buildDisplayFrontlightSettingsList(const std::ve
 
 inline std::vector<SettingInfo> buildDisplaySleepSettingsList(const std::vector<SettingInfo>& allSettings) {
   std::vector<SettingInfo> sleepSettings;
-  sleepSettings.reserve(4);
+  sleepSettings.reserve(8);
 
   auto addSleepSetting = [&](StrId nameId, StrId displayNameId) {
     const auto it = std::find_if(allSettings.begin(), allSettings.end(),
@@ -1355,6 +1373,12 @@ inline std::vector<SettingInfo> buildDisplaySleepSettingsList(const std::vector<
   };
 
   addSleepSetting(StrId::STR_SLEEP_SCREEN, StrId::STR_SLEEP_SCREEN_WALLPAPER);
+  if (BoardConfig::isX4Pro() && halClock.isAvailable()) {
+    addSleepSetting(StrId::STR_SLEEP_CLOCK, StrId::STR_SLEEP_CLOCK);
+    addSleepSetting(StrId::STR_SLEEP_CLOCK_REFRESH, StrId::STR_SLEEP_CLOCK_REFRESH);
+    addSleepSetting(StrId::STR_SLEEP_CLOCK_POSITION, StrId::STR_SLEEP_CLOCK_POSITION);
+    addSleepSetting(StrId::STR_SLEEP_DATE_POSITION, StrId::STR_SLEEP_DATE_POSITION);
+  }
   addSleepSetting(StrId::STR_SLEEP_COVER_MODE, StrId::STR_SLEEP_COVER_MODE_SHORT);
   addSleepSetting(StrId::STR_SLEEP_COVER_FILTER, StrId::STR_SLEEP_COVER_FILTER_SHORT);
   addSleepSetting(StrId::STR_QUICK_RESUME_TIMEOUT, StrId::STR_QUICK_RESUME_TIMEOUT);

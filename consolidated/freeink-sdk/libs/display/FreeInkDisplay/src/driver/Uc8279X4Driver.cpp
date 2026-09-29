@@ -510,29 +510,10 @@ void Uc8279X4Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
 }
 
 
-void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y,
-                                   uint16_t w, uint16_t h, bool turnOff) {
-  if (!fb || w == 0 || h == 0 || x + w > _w || y + h > _h) return;
-  if ((x & 0x07) != 0 || (w & 0x07) != 0) return;
-
-  // A differential window requires a known OLD plane. First paint after boot,
-  // resync, or grayscale therefore stays on the proven ordinary path.
-  if (_needFullClear || !_oldPlaneValid || _redriveAfterGray) {
-    display(bus, fb, prev, RefreshMode::Fast, turnOff);
-    return;
-  }
-
-  crossink_missile_panel_kind = 1;
-  crossink_missile_panel_upload_us = 0;
-  crossink_missile_panel_setup_us = 0;
-  crossink_missile_panel_drf_us = 0;
-  crossink_missile_panel_resync_us = 0;
-  _grayBaseValid = false;
-  _absoluteGrayPlanes = false;
-  if (_grayBase != nullptr) {
-    memcpy(_grayBase, fb, _bufferSize);
-    _grayBaseValid = true;
-  }
+bool Uc8279X4Driver::seedPreviousWindow(EpdBus& bus, const uint8_t* fb, uint16_t x, uint16_t y,
+                                         uint16_t w, uint16_t h) {
+  if (!fb || w == 0 || h == 0 || x + w > _w || y + h > _h) return false;
+  if ((x & 0x07) != 0 || (w & 0x07) != 0) return false;
 
   uint16_t xStart = x;
   uint16_t xEnd = static_cast<uint16_t>(x + w - 1);
@@ -549,8 +530,80 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
   const uint16_t yStart = static_cast<uint16_t>(_cfg.gateOffset + yStartVisible);
   const uint16_t yEnd = static_cast<uint16_t>(_cfg.gateOffset + yEndVisible);
 
-  // UC81xx partial-data contract: enter partial mode and define PTL before the
-  // DTM payload so the controller consumes only w/8 * h bytes for each plane.
+  // PON must precede PTIN/PTL on this controller. Otherwise a short DTM1
+  // payload is consumed with full-plane addressing after deep sleep.
+  powerOnIfNeeded(bus, " 8279x4_window_seed_PON");
+  bus.cmd(CMD_PARTIAL_IN);
+  bus.cmd(CMD_PARTIAL_WINDOW);
+  bus.data(static_cast<uint8_t>(xStart >> 8));
+  bus.data(static_cast<uint8_t>(xStart & 0xF8));
+  bus.data(static_cast<uint8_t>(xEnd >> 8));
+  bus.data(static_cast<uint8_t>(xEnd | 0x07));
+  bus.data(static_cast<uint8_t>(yStart >> 8));
+  bus.data(static_cast<uint8_t>(yStart & 0xFF));
+  bus.data(static_cast<uint8_t>(yEnd >> 8));
+  bus.data(static_cast<uint8_t>(yEnd & 0xFF));
+  bus.data(0x01);
+  streamWindowPlane(bus, CMD_DTM1, fb, x, y, w, h);
+  bus.cmd(CMD_PARTIAL_OUT);
+
+  _grayBaseValid = false;
+  _absoluteGrayPlanes = false;
+  _oldPlaneValid = true;
+  _needFullClear = false;
+  _redriveAfterGray = false;
+  return true;
+}
+
+
+void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y,
+                                   uint16_t w, uint16_t h, bool turnOff) {
+  if (!fb || w == 0 || h == 0 || x + w > _w || y + h > _h) return;
+  if ((x & 0x07) != 0 || (w & 0x07) != 0) return;
+
+  if (_needFullClear || !_oldPlaneValid || _redriveAfterGray) {
+    display(bus, fb, prev, RefreshMode::Fast, turnOff);
+    return;
+  }
+
+  crossink_missile_panel_kind = 1;
+  crossink_missile_panel_upload_us = 0;
+  crossink_missile_panel_setup_us = 0;
+  crossink_missile_panel_drf_us = 0;
+  crossink_missile_panel_resync_us = 0;
+  _grayBaseValid = false;
+  _absoluteGrayPlanes = false;
+
+  uint16_t xStart = x;
+  uint16_t xEnd = static_cast<uint16_t>(x + w - 1);
+  uint16_t yStartVisible = y;
+  uint16_t yEndVisible = static_cast<uint16_t>(y + h - 1);
+#if FREEINK_UC8279X4_XMIRROR
+  xStart = static_cast<uint16_t>(_w - (x + w));
+  xEnd = static_cast<uint16_t>(_w - 1 - x);
+#endif
+#if FREEINK_UC8279X4_ROWREV
+  yStartVisible = static_cast<uint16_t>(_h - (y + h));
+  yEndVisible = static_cast<uint16_t>(_h - 1 - y);
+#endif
+  const uint16_t yStart = static_cast<uint16_t>(_cfg.gateOffset + yStartVisible);
+  const uint16_t yEnd = static_cast<uint16_t>(_cfg.gateOffset + yEndVisible);
+
+  const int64_t profileSetupStartUs = esp_timer_get_time();
+  bus.cmd(CMD_VCOM_DATA_INTERVAL);
+  bus.data(_cfg.cdiBwFast);
+  bus.cmd(CMD_CCSET);
+  bus.data(_cfg.ccset);
+  bus.cmd(CMD_TSSET);
+  bus.data(_cfg.tssetFast);
+  bus.cmd(CMD_PFS);
+  bus.data(_cfg.pfs);
+  bus.cmd(CMD_GATE_SCAN);
+  bus.data(_cfg.gateScan);
+
+  powerOnIfNeeded(bus, " 8279x4_window_DU_PON");
+
+  // Activate the exact window BEFORE any short DTM payload is written.
   bus.cmd(CMD_PARTIAL_IN);
   bus.cmd(CMD_PARTIAL_WINDOW);
   bus.data(static_cast<uint8_t>(xStart >> 8));
@@ -563,39 +616,15 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
   bus.data(static_cast<uint8_t>(yEnd & 0xFF));
   bus.data(0x01);
 
-  // Dual-buffer callers may supply an explicit OLD plane. Single-buffer X4 Pro
-  // leaves DTM1 resident in controller RAM from the previous update.
   const int64_t profileUploadStartUs = esp_timer_get_time();
   if (prev != nullptr) streamWindowPlane(bus, CMD_DTM1, prev, x, y, w, h);
   streamWindowPlane(bus, CMD_DTM2, fb, x, y, w, h);
   crossink_missile_panel_upload_us =
       static_cast<uint32_t>(esp_timer_get_time() - profileUploadStartUs);
-  const int64_t profileSetupStartUs = esp_timer_get_time();
-
-  uint8_t hybridLuts[5][PREBW_LUT_LEN];
-  buildMissileGameA2LitePreBw(hybridLuts);
 
   bus.cmd(CMD_PANEL_SETTING);
-  bus.data(_cfg.psr0);  // REG=1 external LUT
+  bus.data(static_cast<uint8_t>(_cfg.psr0 & 0xDF));
   bus.data(_cfg.psr1);
-  bus.cmd(CMD_PFS);
-  bus.data(_cfg.pfs);
-  bus.cmd(CMD_GATE_SCAN);
-  bus.data(_cfg.gateScan);
-  bus.cmd(CMD_VCOM_DATA_INTERVAL);
-  bus.data(_cfg.cdiBwFast);
-  bus.cmd(CMD_CCSET);
-  bus.data(_cfg.ccset);
-  bus.cmd(CMD_TSSET);
-  bus.data(_cfg.tssetFast);
-  for (uint8_t t = 0; t < 5; ++t) {
-    bus.cmd(kXtfPreBwMid[t][0]);
-    bus.data(hybridLuts[t], PREBW_LUT_LEN);
-  }
-
-  bus.cmd(CMD_PLL);
-  bus.data(0x0F);
-  powerOnIfNeeded(bus, " 8279x4_win_gameA2Lite_pll0f_PON");
   bus.cmd(CMD_DISPLAY_REFRESH);
   {
     const int8_t busyPin = bus.pins().busy;
@@ -604,25 +633,23 @@ void Uc8279X4Driver::displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t
   }
   crossink_missile_panel_setup_us =
       static_cast<uint32_t>(esp_timer_get_time() - profileSetupStartUs);
+
   const int64_t profileDrfStartUs = esp_timer_get_time();
-  bus.waitRefreshComplete(" 8279x4_window_gameA2Lite_pll0f_DRF");
+  bus.waitRefreshComplete(" 8279x4_window_DU_DRF");
   crossink_missile_panel_drf_us = static_cast<uint32_t>(esp_timer_get_time() - profileDrfStartUs);
-  bus.cmd(CMD_PLL);
-  bus.data(_cfg.pll);
 
   const int64_t profileResyncStartUs = esp_timer_get_time();
-  // Keep DTM1 synchronized only inside the region that actually changed. Pixels
-  // outside PTL were not refreshed and their OLD data remains authoritative.
   streamWindowPlane(bus, CMD_DTM1, fb, x, y, w, h);
   crossink_missile_panel_resync_us =
       static_cast<uint32_t>(esp_timer_get_time() - profileResyncStartUs);
   bus.cmd(CMD_PARTIAL_OUT);
+
   _oldPlaneValid = true;
   _needFullClear = false;
 
   if (turnOff) {
     bus.cmd(CMD_POWER_OFF);
-    bus.waitBusy(" 8279x4_window_POF");
+    bus.waitBusy(" 8279x4_window_DU_POF");
     _isScreenOn = false;
   }
 }

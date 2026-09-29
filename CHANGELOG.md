@@ -1,4 +1,5 @@
 ## [v1.5.1] - 2026-08-20
+- X4 Pro sleep screens can optionally place both time and date at the top or bottom with mirrored spacing; time keeps aligned 1-minute or nearest-5-minute partial updates, while a date change intentionally triggers one full HALF refresh per day.
 
 ### Added
 

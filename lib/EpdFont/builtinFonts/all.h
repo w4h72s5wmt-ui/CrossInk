@@ -34,6 +34,11 @@
 #include <builtinFonts/lexenddeca_16_bolditalic.h>
 #include <builtinFonts/lexenddeca_16_italic.h>
 #include <builtinFonts/lexenddeca_16_regular.h>
+#include <builtinFonts/lexenddeca_18_bold.h>
+#include <builtinFonts/lexenddeca_18_regular.h>
+#if defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO
+#include <builtinFonts/lexenddeca_20_bold.h>
+#endif
 
 // UI fonts - no emoji or PHM variants.
 #include <builtinFonts/inter_10_bold.h>

@@ -72,6 +72,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 
 #ifndef SIMULATOR
@@ -90,6 +91,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "SilentRestart.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/SleepClockOverlay.h"
 #include "activities/home/BookActions.h"
 #include "activities/reader/KOReaderSyncActivity.h"
 #include "activities/reader/ReadingStatsUtils.h"
@@ -199,6 +201,13 @@ EpdFont lexenddeca16ItalicFont(&lexenddeca_16_italic);
 EpdFont lexenddeca16BoldItalicFont(&lexenddeca_16_bolditalic);
 EpdFontFamily lexenddeca16FontFamily(&lexenddeca16RegularFont, &lexenddeca16BoldFont, &lexenddeca16ItalicFont,
                                      &lexenddeca16BoldItalicFont);
+EpdFont lexenddeca18RegularFont(&lexenddeca_18_regular);
+EpdFont lexenddeca18BoldFont(&lexenddeca_18_bold);
+EpdFontFamily lexenddeca18FontFamily(&lexenddeca18RegularFont, &lexenddeca18BoldFont);
+#if FREEINK_DEVICE_X4PRO
+EpdFont sleepDate20BoldFont(&lexenddeca_20_bold);
+EpdFontFamily sleepDate20FontFamily(&sleepDate20BoldFont);
+#endif
 EpdFont bitter10RegularFont(&bitter_10_regular);
 EpdFont bitter10BoldFont(&bitter_10_bold);
 EpdFont bitter10ItalicFont(&bitter_10_italic);
@@ -919,6 +928,92 @@ bool handleX4ProHomeKeyShortcuts() {
 }
 }  // namespace
 constexpr char SLEEP_FRAME_FILE[] = "/.crosspoint/sleep_frame.bin";
+constexpr char SLEEP_CLOCK_FRAME_FILE[] = "/.crosspoint/sleep_clock_frame.bin";
+constexpr uint32_t SLEEP_CLOCK_SCRUB_PERIOD_MINUTES = 60;
+
+static uint32_t sleepClockRefreshMinutes() {
+  return SETTINGS.sleepClockRefresh == CrossPointSettings::SLEEP_CLOCK_EVERY_MINUTE ? 1u : 5u;
+}
+
+static uint16_t sleepClockPartialsPerScrub() {
+  const uint32_t minutes = sleepClockRefreshMinutes();
+  return static_cast<uint16_t>(SLEEP_CLOCK_SCRUB_PERIOD_MINUTES / minutes - 1u);
+}
+
+static bool sleepClockPrototypeEnabled() {
+#ifndef SIMULATOR
+  return SleepClockOverlay::enabled();
+#else
+  return false;
+#endif
+}
+
+static void armSleepClockAlignedTimer() {
+#ifndef SIMULATOR
+  const uint32_t refreshMinutes = sleepClockRefreshMinutes();
+  const uint32_t refreshSeconds = refreshMinutes * 60u;
+  uint32_t wakeSeconds = refreshSeconds;
+  uint8_t hour = 0;
+  uint8_t minute = 0;
+  uint8_t second = 0;
+
+  if (halClock.getTime(hour, minute, second)) {
+    if (refreshMinutes == 5u) {
+      // Five-minute mode displays the nearest 5-minute value. The visible
+      // value therefore changes halfway between marks: :02:30, :07:30, ...
+      constexpr uint32_t SWITCH_SECOND = 2u * 60u + 30u;
+      const uint32_t secondsIntoBlock = static_cast<uint32_t>(minute % 5u) * 60u + second;
+      wakeSeconds = secondsIntoBlock < SWITCH_SECOND
+                        ? SWITCH_SECOND - secondsIntoBlock
+                        : refreshSeconds + SWITCH_SECOND - secondsIntoBlock;
+    } else {
+      // One-minute mode keeps normal wall-clock semantics and changes on :00.
+      wakeSeconds = second == 0 ? 60u : 60u - second;
+    }
+
+    LOG_INF("SLPCLK", "Next %lu-minute aligned wake in %lus (RTC %02u:%02u:%02u)",
+            static_cast<unsigned long>(refreshMinutes), static_cast<unsigned long>(wakeSeconds),
+            static_cast<unsigned>(hour), static_cast<unsigned>(minute), static_cast<unsigned>(second));
+  } else {
+    LOG_INF("SLPCLK", "RTC seconds unavailable; falling back to a %lu-minute interval",
+            static_cast<unsigned long>(refreshMinutes));
+  }
+
+  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(wakeSeconds) * 1000000ULL);
+#endif
+}
+
+static bool saveSleepClockFrameBuffer() {
+  HalFile file;
+  if (!Storage.openFileForWrite("SLPCLK", SLEEP_CLOCK_FRAME_FILE, file)) {
+    LOG_ERR("SLPCLK", "Failed to open wallpaper frame for write");
+    return false;
+  }
+  const size_t bufferSize = renderer.getBufferSize();
+  const size_t bytesWritten = file.write(renderer.getFrameBuffer(), bufferSize);
+  file.close();
+  if (bytesWritten != bufferSize) {
+    LOG_ERR("SLPCLK", "Wallpaper frame write incomplete: expected=%u actual=%u",
+            static_cast<unsigned>(bufferSize), static_cast<unsigned>(bytesWritten));
+    Storage.remove(SLEEP_CLOCK_FRAME_FILE);
+    return false;
+  }
+  return true;
+}
+
+static bool loadSleepClockFrameBuffer() {
+  HalFile file;
+  if (!Storage.openFileForRead("SLPCLK", SLEEP_CLOCK_FRAME_FILE, file)) return false;
+  const size_t bufferSize = display.getBufferSize();
+  if (file.fileSize() != bufferSize) {
+    file.close();
+    Storage.remove(SLEEP_CLOCK_FRAME_FILE);
+    return false;
+  }
+  const size_t bytesRead = file.read(display.getFrameBuffer(), bufferSize);
+  file.close();
+  return bytesRead == bufferSize;
+}
 
 static void saveSleepFrameBuffer() {
   HalFile file;
@@ -1032,6 +1127,14 @@ void enterDeepSleep(bool fromTimeout) {
   deepSleepInProgress = true;
   activityManager.goToSleep(fromTimeout);
 
+  const bool periodicSleepClock = SleepClockOverlay::wasRenderedThisSleep();
+  bool sleepClockFrameSaved = false;
+  if (periodicSleepClock) {
+    sleepClockFrameSaved = saveSleepClockFrameBuffer();
+  } else if (Storage.exists(SLEEP_CLOCK_FRAME_FILE)) {
+    Storage.remove(SLEEP_CLOCK_FRAME_FILE);
+  }
+
   if (isQuickResumeSleep) {
     saveSleepFrameBuffer();
   } else {
@@ -1059,6 +1162,10 @@ void enterDeepSleep(bool fromTimeout) {
   putTiltSensorToSleepForDeepSleep();
   display.deepSleep();
   mirrorWakeShortPressToNvs();
+  if (periodicSleepClock && sleepClockFrameSaved) {
+    LOG_INF("SLPCLK", "Arming aligned sleep-clock wake");
+    armSleepClockAlignedTimer();
+  }
   LOG_DBG("MAIN", "Entering deep sleep");
 
   powerManager.startDeepSleep(gpio);
@@ -1105,6 +1212,10 @@ void setupDisplayAndFonts(const bool seamless, const bool loadReaderResources, c
   renderer.insertFont(LEXENDDECA_12_FONT_ID, lexenddeca12FontFamily);
   renderer.insertFont(LEXENDDECA_14_FONT_ID, lexenddeca14FontFamily);
   renderer.insertFont(LEXENDDECA_16_FONT_ID, lexenddeca16FontFamily);
+  renderer.insertFont(LEXENDDECA_18_FONT_ID, lexenddeca18FontFamily);
+#if FREEINK_DEVICE_X4PRO
+  renderer.insertFont(LEXENDDECA_20_FONT_ID, sleepDate20FontFamily);
+#endif
   renderer.insertFont(BITTER_10_FONT_ID, bitter10FontFamily);
   renderer.insertFont(BITTER_12_FONT_ID, bitter12FontFamily);
   renderer.insertFont(BITTER_14_FONT_ID, bitter14FontFamily);
@@ -1272,6 +1383,104 @@ void setup() {
   Storage.installDateTimeCallback(&SETTINGS.clockUtcOffsetQ);
   APP_STATE.loadFromFile();
   mirrorWakeShortPressToNvs();
+
+#ifndef SIMULATOR
+  const bool sleepClockTimerWake =
+      rawWakeupCause == ESP_SLEEP_WAKEUP_TIMER && sleepClockPrototypeEnabled();
+  if (sleepClockTimerWake) {
+    LOG_INF("SLPCLK", "Timer wake: refreshing sleep clock");
+    setupDisplayAndFonts(/*seamless=*/false, /*loadReaderResources=*/false, /*useReaderRenderStack=*/false);
+    renderer.setOrientation(GfxRenderer::Portrait);
+
+    SleepClockOverlay::ClockTextState previousState;
+    SleepClockOverlay::ClockTextState currentState;
+    uint16_t partialCount = 0;
+    const bool hasPreviousState = SleepClockOverlay::getLastRenderedState(previousState, partialCount);
+    const bool hasCurrentState = SleepClockOverlay::formatCurrentState(currentState);
+
+    if (loadSleepClockFrameBuffer() && hasCurrentState) {
+      bool refreshed = false;
+      bool partialAttempted = false;
+      const uint16_t partialsPerScrub = sleepClockPartialsPerScrub();
+      const bool dateChanged = hasPreviousState && !SleepClockOverlay::sameDate(previousState, currentState);
+      const bool fullScrub = !hasPreviousState || dateChanged || partialCount >= partialsPerScrub;
+
+      if (!fullScrub) {
+        constexpr bool includeDate = false;
+        int logicalTop = SleepClockOverlay::updateLogicalTop(renderer, includeDate);
+        int logicalBottom = SleepClockOverlay::updateLogicalBottom(renderer, includeDate);
+        if (logicalTop < 0) logicalTop = 0;
+        if (logicalBottom > renderer.getScreenHeight()) logicalBottom = renderer.getScreenHeight();
+
+        const int logicalHeight = logicalBottom - logicalTop;
+        const int logicalWidth = renderer.getScreenWidth();
+        uint16_t windowX = static_cast<uint16_t>(logicalTop & ~0x07);
+        uint16_t windowEnd = static_cast<uint16_t>((logicalBottom + 7) & ~0x07);
+        if (windowEnd > display.getDisplayWidth()) windowEnd = display.getDisplayWidth();
+        const uint16_t windowW = static_cast<uint16_t>(windowEnd - windowX);
+        const uint16_t windowH = display.getDisplayHeight();
+
+        const size_t cleanRegionSize =
+            renderer.getRegionByteSize(0, logicalTop, logicalWidth, logicalHeight);
+        uint8_t* cleanRegion =
+            cleanRegionSize > 0 ? static_cast<uint8_t*>(std::malloc(cleanRegionSize)) : nullptr;
+
+        if (cleanRegion != nullptr &&
+            renderer.copyRegionToBuffer(0, logicalTop, logicalWidth, logicalHeight, cleanRegion, cleanRegionSize)) {
+          partialAttempted = true;
+
+          // Single-buffer X4 Pro path:
+          //   clean framebuffer -> save the small clock band
+          //   draw OLD -> seed only that OLD window into UC8279 DTM1 (no DRF)
+          //   restore clean band -> draw NEW -> run the actual window DRF.
+          if (SleepClockOverlay::drawState(renderer, previousState) && windowW > 0 &&
+              display.seedPreviousWindow(windowX, 0, windowW, windowH) &&
+              renderer.copyBufferToRegion(0, logicalTop, logicalWidth, logicalHeight, cleanRegion, cleanRegionSize) &&
+              SleepClockOverlay::drawState(renderer, currentState)) {
+            const unsigned long refreshStartedAt = millis();
+            display.displayWindow(windowX, 0, windowW, windowH, /*turnOffScreen=*/true);
+            const unsigned long refreshMs = millis() - refreshStartedAt;
+            SleepClockOverlay::rememberRenderedState(currentState, static_cast<uint16_t>(partialCount + 1));
+            LOG_INF("SLPCLK", "Partial refresh %ux%u in %lums (%u/%u before HALF scrub)", windowW, windowH,
+                    refreshMs, static_cast<unsigned>(partialCount + 1),
+                    static_cast<unsigned>(partialsPerScrub));
+            refreshed = true;
+          }
+        }
+        std::free(cleanRegion);
+      }
+
+      if (!refreshed) {
+        if ((!partialAttempted || loadSleepClockFrameBuffer()) &&
+            SleepClockOverlay::drawState(renderer, currentState)) {
+          const unsigned long refreshStartedAt = millis();
+          renderer.displayBuffer(HalDisplay::HALF_REFRESH, /*turnOffScreen=*/true);
+          const unsigned long refreshMs = millis() - refreshStartedAt;
+          SleepClockOverlay::rememberRenderedState(currentState, 0);
+          LOG_INF("SLPCLK", "%s HALF refresh in %lums",
+                  dateChanged ? "Date-change" : "Scrub", refreshMs);
+          refreshed = true;
+        }
+      }
+
+      if (refreshed) {
+        Storage.shutdown();
+        putTiltSensorToSleepForDeepSleep();
+        display.deepSleep();
+        armSleepClockAlignedTimer();
+        LOG_INF("SLPCLK", "Clock refreshed; returning to deep sleep");
+        powerManager.startDeepSleep(gpio);
+        return;
+      }
+    }
+
+    LOG_ERR("SLPCLK", "Clock refresh state unavailable; restarting normal boot");
+    Storage.remove(SLEEP_CLOCK_FRAME_FILE);
+    ESP.restart();
+    return;
+  }
+#endif
+
   // Needs SETTINGS for the clock's UTC offset, so it cannot run any earlier.
   BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Wake);
   const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
