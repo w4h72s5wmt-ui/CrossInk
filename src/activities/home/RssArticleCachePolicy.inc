@@ -1,0 +1,339 @@
+// RSS-local fetch/cache policy. Included in namespace RssArticleCache.
+// Extracted article bodies and sanitized public-feed fallbacks are persisted
+// separately from lightweight history metadata. Full bodies are still retried
+// whenever only a fallback exists.
+namespace {
+bool isFigaroPolicyUrl(const char* articleUrl) {
+  if (!articleUrl || !articleUrl[0]) return false;
+  return findInsensitive(articleUrl, std::strlen(articleUrl), "lefigaro.fr") != std::string::npos;
+}
+
+// The Figaro no-response breaker protects one feed from repeatedly waiting on
+// the same provider failure. Scope it to the configured source, not the whole
+// RSS refresh: a timeout in Le Figaro must not poison Le Figaro Horlogerie.
+void prepareFigaroSourceSession(const char* articleUrl, const char* sourceName) {
+  if (!isFigaroPolicyUrl(articleUrl) || !sourceName || !sourceName[0]) return;
+  static uint64_t activeSourceKey = 0;
+  const uint64_t sourceKey = fnv1a64(sourceName);
+  if (sourceKey == activeSourceKey) return;
+  RssFigaroAuth::resetSession();
+  activeSourceKey = sourceKey;
+}
+
+// Figaro injects gift/save/error UI inside the editorial <article>. On some
+// page variants all of that UI is flattened onto one long extracted line, so
+// the normal short-line noise filter cannot remove it. Require multiple strong
+// UI markers near the beginning, then cut only through the last known UI tail
+// and preserve the editorial suffix byte-for-byte.
+size_t stripFigaroUiPreamble(char* text, size_t length, const char* articleUrl) {
+  if (!text || length == 0 || !isFigaroPolicyUrl(articleUrl)) return length;
+
+  const size_t scanLimit = std::min(length, static_cast<size_t>(3200));
+  static constexpr const char* MARKERS[] = {
+      "Offrir l'article",
+      "Vous pourrez à nouveau offrir",
+      "Vous pourrez a nouveau offrir",
+      "articles à offrir ce mois",
+      "articles a offrir ce mois",
+      "Le contenu n'a pas pu être chargé",
+      "Le contenu n'a pas pu etre charge",
+      "Sauvegarder un article",
+      "Nouvelle fonctionnalité",
+      "Nouvelle fonctionnalite",
+      "sauvegarder des articles pour les lire plus tard",
+  };
+
+  size_t first = std::string::npos;
+  size_t hits = 0;
+  for (const char* marker : MARKERS) {
+    const size_t found = findInsensitive(text, scanLimit, marker);
+    if (found == std::string::npos) continue;
+    first = std::min(first, found);
+    ++hits;
+  }
+  if (hits < 2 || first == std::string::npos || first > 1800) return length;
+
+  size_t cut = first;
+  const auto extendThrough = [&](const char* marker) {
+    const size_t found = findInsensitive(text, scanLimit, marker, first);
+    if (found != std::string::npos) cut = std::max(cut, found + std::strlen(marker));
+  };
+
+  // Prefer the end of the save/login modal when present. The shorter tails are
+  // fallbacks for authenticated or partially rendered page variants.
+  extendThrough("Créer un compte Se connecter");
+  extendThrough("Creer un compte Se connecter");
+  extendThrough("Pour sauvegarder un article vous devez être connecté, vous pourrez ainsi les consulter sur tous vos appareils.");
+  extendThrough("Pour sauvegarder un article vous devez etre connecte, vous pourrez ainsi les consulter sur tous vos appareils.");
+  extendThrough("Avec votre compte, vous pouvez désormais sauvegarder des articles pour les lire plus tard sur tous vos appareils.");
+  extendThrough("Avec votre compte, vous pouvez desormais sauvegarder des articles pour les lire plus tard sur tous vos appareils.");
+  extendThrough("Veuillez rafraîchir la page.");
+  extendThrough("Veuillez rafraichir la page.");
+
+  if (cut <= first || cut >= length) return cut >= length ? 0 : length;
+  while (cut < length && std::isspace(static_cast<unsigned char>(text[cut]))) ++cut;
+  if (cut >= length) return 0;
+
+  const size_t remaining = length - cut;
+  std::memmove(text, text + cut, remaining);
+  text[remaining] = '\0';
+  return remaining;
+}
+
+bool isFigaroShareSeparator(const char value) {
+  const unsigned char c = static_cast<unsigned char>(value);
+  return std::isspace(c) || value == '-' || value == ':' || value == '|' || value == '>' || value == '*';
+}
+
+// Figaro can flatten its share bar directly into the editorial text, e.g.
+// "...-Lien copié- Mail- X- MessengerBenjamin...". The block is not always a
+// prefix, so scan the complete extracted body. Once the ordered strong labels
+// are confirmed in a tight range, replace only that UI span with one space and
+// preserve both editorial sides byte-for-byte. Prefix/suffix-only occurrences
+// are removed without leaving a leading/trailing blank.
+size_t stripFigaroShareControls(char* text, size_t length, const char* articleUrl) {
+  if (!text || length == 0 || !isFigaroPolicyUrl(articleUrl)) return length;
+
+  size_t searchFrom = 0;
+  while (searchFrom < length) {
+    const size_t copiedAccent = findInsensitive(text, length, "Lien copié", searchFrom);
+    const size_t copiedPlain = findInsensitive(text, length, "Lien copie", searchFrom);
+    size_t copied = copiedAccent;
+    if (copied == std::string::npos ||
+        (copiedPlain != std::string::npos && copiedPlain < copied)) {
+      copied = copiedPlain;
+    }
+    if (copied == std::string::npos) break;
+
+    const size_t scanEnd = std::min(length, copied + static_cast<size_t>(240));
+    const size_t mail = findInsensitive(text, scanEnd, "Mail", copied + 4);
+    const size_t messenger = mail == std::string::npos
+                                 ? std::string::npos
+                                 : findInsensitive(text, scanEnd, "Messenger", mail + 4);
+    if (mail == std::string::npos || mail <= copied || mail > copied + 80 ||
+        messenger == std::string::npos || messenger <= mail || messenger > mail + 96) {
+      searchFrom = copied + 4;
+      continue;
+    }
+
+    size_t eraseStart = copied;
+    while (eraseStart > 0 && isFigaroShareSeparator(text[eraseStart - 1])) --eraseStart;
+
+    size_t eraseEnd = messenger + std::strlen("Messenger");
+    while (eraseEnd < length && isFigaroShareSeparator(text[eraseEnd])) ++eraseEnd;
+
+    const bool hasEditorialPrefix = eraseStart > 0;
+    const bool hasEditorialSuffix = eraseEnd < length;
+    const size_t suffixLength = length - eraseEnd;
+    if (hasEditorialPrefix && hasEditorialSuffix) {
+      text[eraseStart] = RSS_REMOVAL_BOUNDARY;
+      std::memmove(text + eraseStart + 1, text + eraseEnd, suffixLength);
+      length = eraseStart + 1 + suffixLength;
+      text[length] = '\0';
+      searchFrom = eraseStart + 1;
+    } else {
+      std::memmove(text + eraseStart, text + eraseEnd, suffixLength);
+      length = eraseStart + suffixLength;
+      text[length] = '\0';
+      searchFrom = eraseStart;
+    }
+  }
+  return normalizeRemovalBoundaries(text, length);
+}
+
+bool buildFallbackText(const RssItem& item, const char* sourceName, const char* dropRules,
+                       const char* dropStartRules, const char* stopRules, std::string& outText) {
+  outText.clear();
+  if (RssFigaroAuth::isConfiguredFor(item.link)) return false;
+  const size_t sourceLength = std::strlen(item.summary);
+  if (sourceLength == 0) return false;
+  auto storage = allocateBuffer(sourceLength + 1);
+  if (!storage) return false;
+  char* text = reinterpret_cast<char*>(storage.get());
+  std::memcpy(text, item.summary, sourceLength + 1);
+  size_t length = sanitizeFallbackMarkup(text, sourceLength);
+  length = removeFallbackUrls(text, length);
+  length = fallbackRuleCutoff(text, length, stopRules);
+  text[length] = '\0';
+  length = cleanExtractedText(text, length, item.title, nullptr, sourceName, item.link,
+                              dropRules, dropStartRules, stopRules);
+  length = stripFigaroShareControls(text, length, item.link);
+  outText.assign(text, length);
+  return !outText.empty();
+}
+}  // namespace
+
+CacheResult ensureCached(const RssItem& item, const char* sourceName, const char* dropRules,
+                         const char* dropStartRules, const char* stopRules,
+                         const CancelCallback& shouldCancel) {
+  RssFetchDiagnostics::Record diagnostic;
+  diagnostic.startedMs = RssFetchDiagnostics::now();
+  const auto report = [&](const char* phase, const int result) {
+    diagnostic.phase = phase;
+    diagnostic.result = result;
+    RssFetchDiagnostics::write(item.link, diagnostic);
+  };
+  if (shouldCancel && shouldCancel()) return CacheResult::CANCELLED;
+  prepareFigaroSourceSession(item.link, sourceName);
+  const bool useFigaroAuth = RssFigaroAuth::isConfiguredFor(item.link);
+  const std::string path = bodyPath(item);
+  const BodyCacheKind existingCache = bodyCacheKind(path);
+  if (existingCache == BodyCacheKind::FULL) {
+    report("cache-hit", HttpDownloader::OK);
+    return CacheResult::READY;
+  }
+  if (existingCache == BodyCacheKind::NONE && Storage.exists(path.c_str())) Storage.remove(path.c_str());
+
+  const auto unavailable = [&]() {
+    if (useFigaroAuth) {
+      LOG_ERR("RSS", "Figaro AUTH failed; no public fallback cached: %s", item.link);
+      return CacheResult::FAILED;
+    }
+    std::string fallbackText;
+    if (buildFallbackText(item, sourceName, dropRules, dropStartRules, stopRules, fallbackText) &&
+        writeTextFile(path, FALLBACK_MAGIC, fallbackText.data(), fallbackText.size())) {
+      LOG_DBG("RSS", "Persisted feed-summary fallback: %s", item.link);
+      return CacheResult::FALLBACK_READY;
+    }
+    if (bodyCacheKind(path) == BodyCacheKind::FALLBACK) return CacheResult::FALLBACK_READY;
+    LOG_ERR("RSS", "Body/fallback unavailable; retry on manual refresh: %s", item.link);
+    return CacheResult::FAILED;
+  };
+  if (!item.link[0]) {
+    report("no-url", HttpDownloader::HTTP_ERROR);
+    return unavailable();
+  }
+
+  auto htmlStorage = allocateBuffer(MAX_HTML_BYTES + 1);
+  auto textStorage = allocateBuffer(MAX_TEXT_BYTES + 1);
+  if (!htmlStorage || !textStorage) {
+    LOG_ERR("RSS", "OOM allocating article extraction buffers");
+    report("buffer-allocation", HttpDownloader::HTTP_ERROR);
+    return unavailable();
+  }
+  char* html = reinterpret_cast<char*>(htmlStorage.get());
+  char* text = reinterpret_cast<char*>(textStorage.get());
+  static constexpr HttpDownloader::Transport TRANSPORTS[] = {
+      HttpDownloader::Transport::WOLFSSL, HttpDownloader::Transport::ESP_HTTP,
+  };
+  const size_t attemptCount = useFigaroAuth ? 1U : 2U;
+  for (size_t attempt = 0; attempt < attemptCount; ++attempt) {
+    const char* transportName = useFigaroAuth ? "Figaro auth" : (attempt == 0 ? "wolfSSL" : "ESP_HTTP");
+    diagnostic = RssFetchDiagnostics::Record{};
+    diagnostic.startedMs = RssFetchDiagnostics::now();
+    diagnostic.transport = useFigaroAuth ? "auth-cache" : (attempt == 0 ? "wolfSSL" : "ESP_HTTP");
+    size_t htmlLength = 0;
+    bool htmlTruncated = false;
+    const auto receiveChunk = [&](const uint8_t* data, const size_t len) {
+      diagnostic.received += len;
+      if (len > MAX_HTML_BYTES - htmlLength) { htmlTruncated = true; return false; }
+      if (len > 0) {
+        if (!data) return false;
+        std::memcpy(html + htmlLength, data, len);
+        htmlLength += len;
+      }
+      return true;
+    };
+    HttpDownloader::DownloadError result;
+    if (useFigaroAuth) {
+      result = RssFigaroAuth::streamUrl(item.link, receiveChunk, shouldCancel);
+    } else {
+      HttpDownloader::DownloadOptions options;
+      options.bufferSize = HTTP_BUFFER_SIZE;
+      options.transport = TRANSPORTS[attempt];
+      options.shouldCancel = shouldCancel;
+      result = HttpDownloader::streamUrl(item.link, receiveChunk, nullptr, "", "", std::move(options));
+    }
+    diagnostic.stored = htmlLength;
+    diagnostic.truncated = htmlTruncated;
+    if (result == HttpDownloader::ABORTED || (shouldCancel && shouldCancel())) {
+      report("cancelled", HttpDownloader::ABORTED);
+      return CacheResult::CANCELLED;
+    }
+    if (result != HttpDownloader::OK || htmlLength == 0 || htmlTruncated) {
+      LOG_ERR("RSS", "Fetch failed (%s, result=%d, bytes=%zu, truncated=%d): %s",
+              transportName, static_cast<int>(result), htmlLength, htmlTruncated, item.link);
+      report(htmlTruncated ? "html-capacity" : "fetch", result);
+      continue;
+    }
+    html[htmlLength] = '\0';
+    size_t textLength = 0;
+    const bool extracted = extractReadableText(html, htmlLength, text, textLength);
+    diagnostic.extracted = textLength;
+    if (!extracted || textLength >= MAX_TEXT_BYTES) {
+      LOG_ERR("RSS", "Extraction failed/at capacity (%s, html=%zu, text=%zu): %s",
+              transportName, htmlLength, textLength, item.link);
+      report(textLength >= MAX_TEXT_BYTES ? "text-capacity" : "extraction", HttpDownloader::HTTP_ERROR);
+      continue;
+    }
+    const size_t extractedLength = textLength;
+    // The reader does not display the feed summary alongside a cached body.
+    // Keep its first paragraph; real duplicated lines are still deduplicated.
+    textLength = cleanExtractedText(text, textLength, item.title, nullptr, sourceName, item.link,
+                                    dropRules, dropStartRules, stopRules);
+    textLength = stripFigaroUiPreamble(text, textLength, item.link);
+    textLength = stripFigaroShareControls(text, textLength, item.link);
+    diagnostic.cleaned = textLength;
+    LOG_DBG("RSS", "Extraction (%s): html=%zu text=%zu cleaned=%zu", transportName, htmlLength,
+            extractedLength, textLength);
+    if (textLength < MIN_EXTRACTED_TEXT) {
+      LOG_ERR("RSS", "Cleaner removed too much text (%s, before=%zu, after=%zu): %s",
+              transportName, extractedLength, textLength, item.link);
+      report("cleaner", HttpDownloader::HTTP_ERROR);
+      continue;
+    }
+    if (shouldCancel && shouldCancel()) {
+      report("cancelled", HttpDownloader::ABORTED);
+      return CacheResult::CANCELLED;
+    }
+    if (!writeTextFile(path, BODY_MAGIC, text, textLength)) {
+      LOG_ERR("RSS", "Could not persist article body: %s", item.link);
+      report("body-write", HttpDownloader::FILE_ERROR);
+      return unavailable();
+    }
+    report("body-ready", HttpDownloader::OK);
+    return CacheResult::READY;
+  }
+  return unavailable();
+}
+
+CacheResult load(const ArticleIdentity& identity, std::string& outText) {
+  outText.clear();
+  const std::string path = bodyPath(identity);
+  const BodyCacheKind kind = bodyCacheKind(path);
+  if (kind == BodyCacheKind::NONE) {
+    if (Storage.exists(path.c_str())) Storage.remove(path.c_str());
+    return CacheResult::FAILED;
+  }
+
+  FsFile file;
+  if (!Storage.openFileForRead("RSS", path, file)) return CacheResult::FAILED;
+  char marker[BODY_MAGIC_BYTES] = {};
+  const size_t size = static_cast<size_t>(file.size());
+  const bool validSize = size > BODY_MAGIC_BYTES && size <= BODY_MAGIC_BYTES + MAX_TEXT_BYTES;
+  const bool validMarker = validSize &&
+                           file.read(marker, BODY_MAGIC_BYTES) == static_cast<int>(BODY_MAGIC_BYTES);
+  if (!validMarker) {
+    file.close();
+    Storage.remove(path.c_str());
+    return CacheResult::FAILED;
+  }
+
+  const size_t expected = size - BODY_MAGIC_BYTES;
+  char buffer[768];
+  while (outText.size() < expected) {
+    const size_t want = std::min(expected - outText.size(), sizeof(buffer));
+    const int count = file.read(buffer, want);
+    if (count <= 0) break;
+    outText.append(buffer, static_cast<size_t>(count));
+  }
+  file.close();
+  if (outText.size() != expected) {
+    outText.clear();
+    Storage.remove(path.c_str());
+    return CacheResult::FAILED;
+  }
+  return kind == BodyCacheKind::FULL ? CacheResult::READY : CacheResult::FALLBACK_READY;
+}
+
+CacheResult load(const RssItem& item, std::string& outText) { return load(identityOf(item), outText); }
