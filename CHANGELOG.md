@@ -1,4 +1,5 @@
 ## [v1.5.1] - 2026-08-20
+- X4 Pro sleep screens can optionally show the lock-screen clock independently of wallpaper mode, choose top or bottom time placement with equal visual vertical margins around the fixed date, and use aligned 1-minute refreshes or nearest-5-minute display switching at each 2m30s midpoint.
 
 ### Added
 

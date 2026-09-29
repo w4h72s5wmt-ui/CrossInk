@@ -44,6 +44,10 @@ class HalClock {
   // Returns false if RTC is not available.
   bool getTime(uint8_t& hour, uint8_t& minute) const;
 
+  // Get raw RTC hour/minute/second. This bypasses the minute cache so callers
+  // scheduling aligned wakeups can target an exact wall-clock boundary.
+  bool getTime(uint8_t& hour, uint8_t& minute, uint8_t& second) const;
+
   // Format time into a caller-provided buffer.
   // 24h mode produces "HH:MM" (needs >=6 bytes); 12h mode produces "H:MM AM"/"HH:MM PM" (needs >=9 bytes).
   // utcOffsetQuarterHoursBiased: biased quarter-hour offset (48 = UTC+0, 0 = UTC-12, 104 = UTC+14).

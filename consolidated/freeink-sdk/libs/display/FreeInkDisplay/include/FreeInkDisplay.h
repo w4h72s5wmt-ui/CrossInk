@@ -247,6 +247,11 @@ class FreeInkDisplay {
   // True when the runtime-selected panel is the Xteink X3 (X4 returns false).
   bool isX3Mode() const { return _panelSel == PanelSel::X3; }
 
+  // Seed the active driver's OLD plane from the current framebuffer for one
+  // physical window, without starting a panel waveform. This is what makes a
+  // differential window possible immediately after a deep-sleep reset.
+  bool seedPreviousWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
+
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
   void displaySparseWindow(const uint8_t* tileMask, uint16_t tileCols, uint16_t tileRows, uint16_t tileW, uint16_t tileH,

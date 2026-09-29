@@ -401,6 +401,18 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     QUICK_RESUME_SLEEP_SCREEN_COUNT
   };
 
+  enum SLEEP_CLOCK_REFRESH : uint8_t {
+    SLEEP_CLOCK_EVERY_MINUTE = 0,
+    SLEEP_CLOCK_EVERY_5_MINUTES = 1,
+    SLEEP_CLOCK_REFRESH_COUNT
+  };
+
+  enum SLEEP_CLOCK_POSITION : uint8_t {
+    SLEEP_CLOCK_TOP = 0,
+    SLEEP_CLOCK_BOTTOM = 1,
+    SLEEP_CLOCK_POSITION_COUNT
+  };
+
   // UI scale for list-style screens: sizes list fonts and row heights
   // together so touch targets grow uniformly.
   enum UI_SCALE { UI_SCALE_SMALL = 0, UI_SCALE_LARGE = 1, UI_SCALE_COUNT };
@@ -415,6 +427,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t sleepScreenCoverMode = FIT;
   // Sleep screen cover filter
   uint8_t sleepScreenCoverFilter = NO_FILTER;
+  // X4 Pro lock-screen clock overlay, independent from the selected sleep wallpaper.
+  uint8_t sleepClockEnabled = 0;
+  uint8_t sleepClockRefresh = SLEEP_CLOCK_EVERY_5_MINUTES;
+  uint8_t sleepClockPosition = SLEEP_CLOCK_TOP;
   // Status bar settings (statusBar retained for migration only)
   uint8_t statusBar = FULL;
   uint8_t statusBarChapterPageCount = 1;

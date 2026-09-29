@@ -39,6 +39,10 @@ class HalDisplay {
                             bool fromProgmem = false) const;
 
   void displayBuffer(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
+  // Seed the UC8279 OLD plane for one physical window without triggering a
+  // refresh. Used by the X4 Pro deep-sleep clock before displayWindow().
+  bool seedPreviousWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
+
   // Experimental UC8279 window path: physical panel coordinates, byte-aligned X.
   void displayWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool turnOffScreen = false);
   void displaySparseWindow(const uint8_t* tileMask, uint16_t tileCols, uint16_t tileRows, uint16_t tileW, uint16_t tileH,

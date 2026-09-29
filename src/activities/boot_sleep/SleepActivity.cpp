@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <new>
 #include <string_view>
 
@@ -28,6 +29,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "RecentBooksStore.h"
+#include "SleepClockOverlay.h"
 #include "SleepCoverAssets.h"
 #include "SleepImageIndex.h"
 #include "activities/reader/ReaderUtils.h"
@@ -561,6 +563,55 @@ void SleepActivity::onEnter() {
   }
 }
 
+void SleepActivity::displaySleepBuffer(const HalDisplay::RefreshMode mode, const bool turnOffScreen) const {
+  // The periodic refresh implementation stores a portrait framebuffer and maps
+  // the logical clock band to the X4 Pro's physical partial window. Quick
+  // Resume may retain a landscape reader page; leave that special case
+  // untouched rather than saving an incompatible periodic baseline.
+  if (!SleepClockOverlay::enabled() || renderer.getOrientation() != GfxRenderer::Orientation::Portrait) {
+    renderer.displayBuffer(mode, turnOffScreen);
+    return;
+  }
+
+  SleepClockOverlay::ClockTextState state;
+  if (!SleepClockOverlay::formatCurrentState(state)) {
+    renderer.displayBuffer(mode, turnOffScreen);
+    return;
+  }
+
+  const bool includeDate = state.hasDate && state.date[0] != '\0';
+  const int logicalTop = std::max(0, SleepClockOverlay::updateLogicalTop(renderer, includeDate));
+  const int logicalBottom =
+      std::min(renderer.getScreenHeight(), SleepClockOverlay::updateLogicalBottom(renderer));
+  const int logicalHeight = logicalBottom - logicalTop;
+  const int logicalWidth = renderer.getScreenWidth();
+  const size_t cleanRegionSize =
+      logicalHeight > 0 ? renderer.getRegionByteSize(0, logicalTop, logicalWidth, logicalHeight) : 0;
+  uint8_t* cleanRegion =
+      cleanRegionSize > 0 ? static_cast<uint8_t*>(std::malloc(cleanRegionSize)) : nullptr;
+
+  if (cleanRegion == nullptr ||
+      !renderer.copyRegionToBuffer(0, logicalTop, logicalWidth, logicalHeight, cleanRegion, cleanRegionSize) ||
+      !SleepClockOverlay::drawState(renderer, state)) {
+    std::free(cleanRegion);
+    renderer.displayBuffer(mode, turnOffScreen);
+    return;
+  }
+
+  SleepClockOverlay::rememberRenderedState(state, 0);
+  renderer.displayBuffer(mode, turnOffScreen);
+
+  if (renderer.copyBufferToRegion(0, logicalTop, logicalWidth, logicalHeight, cleanRegion, cleanRegionSize)) {
+    // The panel keeps the clock, while RAM is restored to the clean sleep
+    // background. main.cpp can now persist that framebuffer for future
+    // differential OLD/NEW clock windows.
+    SleepClockOverlay::markRenderedThisSleep();
+  } else {
+    LOG_ERR("SLPCLK", "Failed to restore clean clock backdrop; periodic refresh disabled");
+  }
+  std::free(cleanRegion);
+}
+
 void SleepActivity::renderCustomSleepScreen() const {
   const auto tryRenderSelection = [this](const SleepImageSelection& selection) {
     FsFile file;
@@ -642,7 +693,7 @@ void SleepActivity::renderDefaultSleepScreen() const {
   renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 118, visibleBuildInfo.c_str(), lightSleepScreen);
 #endif
 
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 }
 
 void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
@@ -681,7 +732,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
 
   renderer.clearScreen();
 
-  const bool hasGreyscale = bitmap.hasGreyscale() &&
+  const bool hasGreyscale = !SleepClockOverlay::enabled() && bitmap.hasGreyscale() &&
                             SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
 
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY);
@@ -697,7 +748,7 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
     // the differential nudge then lands unevenly (blotchy noise in gray areas).
     renderer.displayGrayscaleBase(HalDisplay::HALF_REFRESH);
   } else {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+    displaySleepBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
   }
 
   if (hasGreyscale) {
@@ -783,7 +834,7 @@ void SleepActivity::renderReadingStatsSleepScreen() const {
   if (!sleepCoverFilterInvertsGeneratedScreen()) {
     renderer.invertScreen();
   }
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 }
 
 void SleepActivity::renderMinimalSleepScreen() const {
@@ -802,7 +853,7 @@ void SleepActivity::renderMinimalSleepScreen() const {
   const float progressPercent = RecentBookProgress::loadPercent(book);
   MinimalTheme theme;
   theme.drawSleepScreen(renderer, book, &bookStats, progressPercent, sleepCoverFilterInvertsGeneratedScreen());
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 }
 
 void SleepActivity::renderMinimalStatsSleepScreen() const {
@@ -823,7 +874,7 @@ void SleepActivity::renderMinimalStatsSleepScreen() const {
   MinimalTheme theme;
   theme.drawStatsSleepScreen(renderer, book, &bookStats, &globalStats, progressPercent,
                              sleepCoverFilterInvertsGeneratedScreen());
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 }
 
 void SleepActivity::renderDashboardSleepScreen() const {
@@ -849,7 +900,7 @@ void SleepActivity::renderDashboardSleepScreen() const {
   DashboardTheme theme;
   theme.drawSleepScreen(renderer, book, &bookStats, &globalStats, progressPercent, chapterTitle.c_str(),
                         sleepCoverFilterInvertsGeneratedScreen());
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 }
 
 void SleepActivity::renderLastScreenSleepScreen() const {
@@ -864,13 +915,13 @@ void SleepActivity::renderLastScreenSleepScreen() const {
     // waveform can add the moon without a full-screen flash.
     renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
   } else {
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    displaySleepBuffer(HalDisplay::HALF_REFRESH, false);
   }
 }
 
 void SleepActivity::renderBlankSleepScreen() const {
   renderer.clearScreen();
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 }
 
 void SleepActivity::renderOverlaySleepScreen() const {
@@ -1106,9 +1157,10 @@ void SleepActivity::renderOverlaySleepScreen() const {
   // The grayscale re-render has no mask for the overlay image. If an overlay was
   // drawn, keep the composited BW frame intact instead of painting page glyphs
   // over the sleep image.
-  const bool shouldRunGrayscalePass = shouldUseReaderPageBackground && backgroundSupportsGrayscale && !overlayDrawn &&
+  const bool shouldRunGrayscalePass = !SleepClockOverlay::enabled() && shouldUseReaderPageBackground &&
+                                      backgroundSupportsGrayscale && !overlayDrawn &&
                                       (backgroundWasRebuilt || (overlayBackgroundBufferStored && !path.empty()));
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, !shouldRunGrayscalePass && TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, !shouldRunGrayscalePass && TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 
   if (!shouldRunGrayscalePass) {
     return;

@@ -75,6 +75,7 @@ class Uc8279X4Driver : public PanelDriver {
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   bool displayStart(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
   void displayFinish(EpdBus& bus, const uint8_t* fb) override;
+  bool seedPreviousWindow(EpdBus& bus, const uint8_t* fb, uint16_t x, uint16_t y, uint16_t w, uint16_t h) override;
   void displayWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, uint16_t x, uint16_t y,
                      uint16_t w, uint16_t h, bool turnOff) override;
   void displaySparseWindow(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, const uint8_t* tileMask,
