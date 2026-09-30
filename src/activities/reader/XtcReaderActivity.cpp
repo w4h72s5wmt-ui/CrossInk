@@ -273,17 +273,37 @@ void drawXtcMidResNormal(const uint8_t* pageBuffer, const uint16_t pageWidth, co
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
-  for (int y = 0; y < screenHeight; ++y) {
-    const int sy = (y * 3) >> 1;
-    for (int x = 0; x < screenWidth; ++x) {
-      const int sx = (x * 3) >> 1;
-      const int blackness =
-          (static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy)) +
-           static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx + 1, sy)) +
-           static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy + 1)) +
-           static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx + 1, sy + 1))) *
-          64;
-      if (xtcDitherBlack(blackness, x, y)) renderer.drawPixel(x, y, true);
+
+  auto sample = [&](const int x, const int y) {
+    return xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, x, y) ? 255 : 0;
+  };
+
+  // Exact 3->2 area reduction. Every 3x3 source block becomes 2x2 screen
+  // pixels using separable [2,1] / [1,2] coverage weights. This preserves thin
+  // detail better than the former sliding 2x2 average and uses only 9 source
+  // samples for 4 destination pixels.
+  for (int dy = 0, sy = 0; dy < screenHeight; dy += 2, sy += 3) {
+    for (int dx = 0, sx = 0; dx < screenWidth; dx += 2, sx += 3) {
+      const int a = sample(sx, sy);
+      const int b = sample(sx + 1, sy);
+      const int c0 = sample(sx + 2, sy);
+      const int d = sample(sx, sy + 1);
+      const int e0 = sample(sx + 1, sy + 1);
+      const int f0 = sample(sx + 2, sy + 1);
+      const int g = sample(sx, sy + 2);
+      const int h = sample(sx + 1, sy + 2);
+      const int i = sample(sx + 2, sy + 2);
+
+      const int q00 = (4 * a + 2 * b + 2 * d + e0 + 4) / 9;
+      const int q01 = (2 * b + 4 * c0 + e0 + 2 * f0 + 4) / 9;
+      const int q10 = (2 * d + e0 + 4 * g + 2 * h + 4) / 9;
+      const int q11 = (e0 + 2 * f0 + 2 * h + 4 * i + 4) / 9;
+
+      if (xtcDitherBlack(q00, dx, dy)) renderer.drawPixel(dx, dy, true);
+      if (dx + 1 < screenWidth && xtcDitherBlack(q01, dx + 1, dy)) renderer.drawPixel(dx + 1, dy, true);
+      if (dy + 1 < screenHeight && xtcDitherBlack(q10, dx, dy + 1)) renderer.drawPixel(dx, dy + 1, true);
+      if (dx + 1 < screenWidth && dy + 1 < screenHeight && xtcDitherBlack(q11, dx + 1, dy + 1))
+        renderer.drawPixel(dx + 1, dy + 1, true);
     }
   }
 }
@@ -293,11 +313,44 @@ void drawXtcMidResZoom(const uint8_t* pageBuffer, const uint16_t pageWidth, cons
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
-  for (int y = 0; y < screenHeight; ++y) {
-    const int sy = viewport.y + ((y * 3 + 1) >> 2);
-    for (int x = 0; x < screenWidth; ++x) {
-      const int sx = viewport.x + ((x * 3 + 1) >> 2);
-      if (xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy)) renderer.drawPixel(x, y, true);
+
+  auto sample = [&](const int x, const int y) {
+    return xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, x, y) ? 255 : 0;
+  };
+
+  // Fixed-ratio 3->4 interpolation. A 4x4 source neighbourhood produces a
+  // 4x4 destination block at source phases 0, 3/4, 1/2 and 1/4. This uses
+  // roughly one source sample per output pixel, yet genuinely interpolates
+  // the extra 720x1200 information instead of nearest-neighbour duplication.
+  for (int dy = 0, sy = viewport.y; dy < screenHeight; dy += 4, sy += 3) {
+    for (int dx = 0, sx = viewport.x; dx < screenWidth; dx += 4, sx += 3) {
+      int p[4][4];
+      for (int py = 0; py < 4; ++py) {
+        for (int px = 0; px < 4; ++px) p[py][px] = sample(sx + px, sy + py);
+      }
+
+      int h[4][4];
+      for (int py = 0; py < 4; ++py) {
+        h[py][0] = p[py][0];
+        h[py][1] = (p[py][0] + 3 * p[py][1] + 2) >> 2;
+        h[py][2] = (p[py][1] + p[py][2] + 1) >> 1;
+        h[py][3] = (3 * p[py][2] + p[py][3] + 2) >> 2;
+      }
+
+      for (int px = 0; px < 4 && dx + px < screenWidth; ++px) {
+        const int q0 = h[0][px];
+        const int q1 = (h[0][px] + 3 * h[1][px] + 2) >> 2;
+        const int q2 = (h[1][px] + h[2][px] + 1) >> 1;
+        const int q3 = (3 * h[2][px] + h[3][px] + 2) >> 2;
+
+        if (xtcDitherBlack(q0, dx + px, dy)) renderer.drawPixel(dx + px, dy, true);
+        if (dy + 1 < screenHeight && xtcDitherBlack(q1, dx + px, dy + 1))
+          renderer.drawPixel(dx + px, dy + 1, true);
+        if (dy + 2 < screenHeight && xtcDitherBlack(q2, dx + px, dy + 2))
+          renderer.drawPixel(dx + px, dy + 2, true);
+        if (dy + 3 < screenHeight && xtcDitherBlack(q3, dx + px, dy + 3))
+          renderer.drawPixel(dx + px, dy + 3, true);
+      }
     }
   }
 }
@@ -306,18 +359,33 @@ void drawXtchMidResNormal(const uint8_t* pageBuffer, const uint16_t pageWidth, c
                           GfxRenderer& renderer) {
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
-  for (int y = 0; y < screenHeight; ++y) {
-    const int sy = (y * 3) >> 1;
-    for (int x = 0; x < screenWidth; ++x) {
-      const int sx = (x * 3) >> 1;
-      const int blackness =
-          (xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx, sy)) +
-           xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx + 1, sy)) +
-           xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx, sy + 1)) +
-           xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx + 1, sy + 1)) +
-           2) /
-          4;
-      if (xtcDitherBlack(blackness, x, y)) renderer.drawPixel(x, y, true);
+
+  auto sample = [&](const int x, const int y) {
+    return static_cast<int>(xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, x, y)));
+  };
+
+  for (int dy = 0, sy = 0; dy < screenHeight; dy += 2, sy += 3) {
+    for (int dx = 0, sx = 0; dx < screenWidth; dx += 2, sx += 3) {
+      const int a = sample(sx, sy);
+      const int b = sample(sx + 1, sy);
+      const int c0 = sample(sx + 2, sy);
+      const int d = sample(sx, sy + 1);
+      const int e0 = sample(sx + 1, sy + 1);
+      const int f0 = sample(sx + 2, sy + 1);
+      const int g = sample(sx, sy + 2);
+      const int h = sample(sx + 1, sy + 2);
+      const int i = sample(sx + 2, sy + 2);
+
+      const int q00 = (4 * a + 2 * b + 2 * d + e0 + 4) / 9;
+      const int q01 = (2 * b + 4 * c0 + e0 + 2 * f0 + 4) / 9;
+      const int q10 = (2 * d + e0 + 4 * g + 2 * h + 4) / 9;
+      const int q11 = (e0 + 2 * f0 + 2 * h + 4 * i + 4) / 9;
+
+      if (xtcDitherBlack(q00, dx, dy)) renderer.drawPixel(dx, dy, true);
+      if (dx + 1 < screenWidth && xtcDitherBlack(q01, dx + 1, dy)) renderer.drawPixel(dx + 1, dy, true);
+      if (dy + 1 < screenHeight && xtcDitherBlack(q10, dx, dy + 1)) renderer.drawPixel(dx, dy + 1, true);
+      if (dx + 1 < screenWidth && dy + 1 < screenHeight && xtcDitherBlack(q11, dx + 1, dy + 1))
+        renderer.drawPixel(dx + 1, dy + 1, true);
     }
   }
 }
@@ -326,12 +394,40 @@ void drawXtchMidResZoom(const uint8_t* pageBuffer, const uint16_t pageWidth, con
                         const XtcZoomViewport& viewport, GfxRenderer& renderer) {
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
-  for (int y = 0; y < screenHeight; ++y) {
-    const int sy = viewport.y + ((y * 3 + 1) >> 2);
-    for (int x = 0; x < screenWidth; ++x) {
-      const int sx = viewport.x + ((x * 3 + 1) >> 2);
-      const int blackness = xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx, sy));
-      if (xtcDitherBlack(blackness, x, y)) renderer.drawPixel(x, y, true);
+
+  auto sample = [&](const int x, const int y) {
+    return static_cast<int>(xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, x, y)));
+  };
+
+  for (int dy = 0, sy = viewport.y; dy < screenHeight; dy += 4, sy += 3) {
+    for (int dx = 0, sx = viewport.x; dx < screenWidth; dx += 4, sx += 3) {
+      int p[4][4];
+      for (int py = 0; py < 4; ++py) {
+        for (int px = 0; px < 4; ++px) p[py][px] = sample(sx + px, sy + py);
+      }
+
+      int h[4][4];
+      for (int py = 0; py < 4; ++py) {
+        h[py][0] = p[py][0];
+        h[py][1] = (p[py][0] + 3 * p[py][1] + 2) >> 2;
+        h[py][2] = (p[py][1] + p[py][2] + 1) >> 1;
+        h[py][3] = (3 * p[py][2] + p[py][3] + 2) >> 2;
+      }
+
+      for (int px = 0; px < 4 && dx + px < screenWidth; ++px) {
+        const int q0 = h[0][px];
+        const int q1 = (h[0][px] + 3 * h[1][px] + 2) >> 2;
+        const int q2 = (h[1][px] + h[2][px] + 1) >> 1;
+        const int q3 = (3 * h[2][px] + h[3][px] + 2) >> 2;
+
+        if (xtcDitherBlack(q0, dx + px, dy)) renderer.drawPixel(dx + px, dy, true);
+        if (dy + 1 < screenHeight && xtcDitherBlack(q1, dx + px, dy + 1))
+          renderer.drawPixel(dx + px, dy + 1, true);
+        if (dy + 2 < screenHeight && xtcDitherBlack(q2, dx + px, dy + 2))
+          renderer.drawPixel(dx + px, dy + 2, true);
+        if (dy + 3 < screenHeight && xtcDitherBlack(q3, dx + px, dy + 3))
+          renderer.drawPixel(dx + px, dy + 3, true);
+      }
     }
   }
 }
