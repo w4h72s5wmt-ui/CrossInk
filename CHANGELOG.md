@@ -1,3 +1,10 @@
+## [Unreleased]
+
+### Fixed
+
+- X4 Pro's sleep clock updates periodically again with Page Overlay, including PNG sleep images. PNG overlays use black and white while the clock is enabled.
+- Restored SHA-384/SHA-512 certificate support required for secure Figaro RSS connections after the CrossInk 1.6 migration.
+
 ## [v1.6.0] - 2026-09-21
 
 ### Added

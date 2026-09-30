@@ -1144,7 +1144,9 @@ void SleepActivity::renderOverlaySleepScreen() const {
       return OverlayDrawResult::Failed;
     }
 
-    const bool absolute = renderer.supportsAbsoluteGrayscale();
+    // The clock needs the BW path below to retain a clean backdrop and mark
+    // this sleep frame for periodic updates before main.cpp arms the timer.
+    const bool absolute = !SleepClockOverlay::enabled() && renderer.supportsAbsoluteGrayscale();
     if (!absolute) return OverlayDrawResult::Drawn;
     if (!(renderer.supportsDirectGrayscale() ? renderer.displayDirectGrayscaleBase()
                                              : renderer.displayAbsoluteGrayscaleBase())) {
@@ -1261,7 +1263,7 @@ void SleepActivity::renderOverlaySleepScreen() const {
   const bool shouldRunGrayscalePass = !SleepClockOverlay::enabled() && shouldUseReaderPageBackground &&
                                       backgroundSupportsGrayscale && !overlayDrawn &&
                                       (backgroundWasRebuilt || (overlayBackgroundBufferStored && !path.empty()));
-  renderer.displayBuffer(HalDisplay::HALF_REFRESH, !shouldRunGrayscalePass && TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
+  displaySleepBuffer(HalDisplay::HALF_REFRESH, !shouldRunGrayscalePass && TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
 
   if (!shouldRunGrayscalePass) {
     return;

@@ -14,6 +14,23 @@ OVERRIDES = f"""
 #endif
 #undef FP_MAX_BITS
 #define FP_MAX_BITS 8192
+
+/* The X4 Pro RSS Figaro client validates a DigiCert G3 ECC/SHA-384 chain.
+ * Arduino-wolfSSL 5.7.2 does not enable SHA-384 in its compact settings.
+ * SHA-384 shares the SHA-512 core in wolfSSL, so both feature macros are
+ * required. Keep the unused SHA-512/224 and SHA-512/256 variants disabled. */
+#ifndef WOLFSSL_SHA512
+#define WOLFSSL_SHA512
+#endif
+#ifndef WOLFSSL_SHA384
+#define WOLFSSL_SHA384
+#endif
+#ifndef WOLFSSL_NOSHA512_224
+#define WOLFSSL_NOSHA512_224
+#endif
+#ifndef WOLFSSL_NOSHA512_256
+#define WOLFSSL_NOSHA512_256
+#endif
 """
 
 
