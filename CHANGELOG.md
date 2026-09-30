@@ -3,7 +3,7 @@
 
 ### Added
 
-- XTC readers on touch devices can toggle a session-only 2x pinch zoom using monochrome Scale2x edge reconstruction while keeping zoom transitions on the fast differential e-ink refresh path.
+- XTC readers on touch devices can toggle a session-only 2x zoom with a short tap; edge-aware monochrome reconstruction improves enlarged text and line art while zoom transitions stay on the fast differential e-ink refresh path.
 - Added a standalone Notes screen for creating and editing UTF-8 `.txt` notes stored in `/Notes`.
 - Keyboard layouts can now be enabled in Settings and switched from the keyboard's language key.
 - Xteink X4 Classic support, including its six buttons, SD card, USB Drive, display profile, and board-specific firmware builds.
