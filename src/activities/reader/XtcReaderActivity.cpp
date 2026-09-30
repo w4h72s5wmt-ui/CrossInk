@@ -131,82 +131,55 @@ bool xtcPixelBlack(const uint8_t* pageBuffer, const size_t srcRowBytes, const ui
 // 1-bit source quality path. A 5x5 neighbourhood plus cubic quarter-pixel
 // sampling and directional corner bias preserves diagonals better than the
 // previous source-pixel -> 2x2 duplication while still producing a 1-bit frame.
-void drawXtcXbr2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
-                  const XtcZoomViewport& viewport, GfxRenderer& renderer) {
-  static constexpr int16_t CUBIC_NEG_QUARTER[4] = {-3, 29, 111, -9};
-  static constexpr int16_t CUBIC_POS_QUARTER[4] = {-9, 111, 29, -3};
+void drawXtcFastEdge2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                        const XtcZoomViewport& viewport, GfxRenderer& renderer) {
   static constexpr uint8_t BAYER_4X4[16] = {
       0, 8, 2, 10,
       12, 4, 14, 6,
       3, 11, 1, 9,
       15, 7, 13, 5,
   };
-  constexpr int CUBIC_SCALE = 128 * 128;
-  constexpr int CORNER_BIAS = CUBIC_SCALE / 8;
 
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
-  auto clampCoverage = [&](const int value) { return std::max(0, std::min(value, CUBIC_SCALE)); };
+  auto sample = [&](int x, int y) -> int {
+    x = std::clamp(x, 0, static_cast<int>(pageWidth) - 1);
+    y = std::clamp(y, 0, static_cast<int>(pageHeight) - 1);
+    const uint8_t value =
+        pageBuffer[static_cast<size_t>(y) * srcRowBytes + static_cast<size_t>(x) / 8];
+    return ((value >> (7 - (x & 7))) & 1) == 0 ? 255 : 0;
+  };
 
   auto drawCoverage = [&](const int dx, const int dy, const int coverage) {
     if (dx < 0 || dy < 0 || dx >= screenWidth || dy >= screenHeight) return;
     const int bayer = static_cast<int>(BAYER_4X4[((dy & 3) << 2) | (dx & 3)]);
-    const int threshold = (CUBIC_SCALE / 2) + ((2 * bayer - 15) * 32);
+    const int threshold = 113 + bayer * 2;
     if (coverage >= threshold) renderer.drawPixel(dx, dy, true);
   };
 
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
     for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
-      // 25 bytes on the render-task stack; no heap allocation in the hot loop.
-      bool p[5][5];
-      for (int py = 0; py < 5; ++py) {
-        for (int px = 0; px < 5; ++px) {
-          p[py][px] = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight,
-                                    static_cast<int>(sx) + px - 2, static_cast<int>(sy) + py - 2);
-        }
-      }
+      // Five source samples replace the former 25-sample cubic/xBR kernel.
+      // The centre gets 10/16 weight and the two directional neighbours 3/16
+      // each, retaining edge shape while keeping the CPU path close to a page render.
+      const int e = sample(sx, sy);
+      const int n = sample(sx, static_cast<int>(sy) - 1);
+      const int s = sample(sx, static_cast<int>(sy) + 1);
+      const int w = sample(static_cast<int>(sx) - 1, sy);
+      const int r = sample(static_cast<int>(sx) + 1, sy);
 
-      auto cubicCoverage = [&](const bool positiveX, const bool positiveY) {
-        const int16_t* wx = positiveX ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int16_t* wy = positiveY ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int xBase = positiveX ? 1 : 0;
-        const int yBase = positiveY ? 1 : 0;
+      int q0 = (10 * e + 3 * n + 3 * w + 8) >> 4;
+      int q1 = (10 * e + 3 * n + 3 * r + 8) >> 4;
+      int q2 = (10 * e + 3 * s + 3 * w + 8) >> 4;
+      int q3 = (10 * e + 3 * s + 3 * r + 8) >> 4;
 
-        int row[4] = {};
-        for (int yy = 0; yy < 4; ++yy) {
-          for (int xx = 0; xx < 4; ++xx) {
-            if (p[yBase + yy][xBase + xx]) row[yy] += wx[xx];
-          }
-        }
-
-        int coverage = 0;
-        for (int yy = 0; yy < 4; ++yy) coverage += row[yy] * wy[yy];
-        return clampCoverage(coverage);
-      };
-
-      int q0 = cubicCoverage(false, false);
-      int q1 = cubicCoverage(true, false);
-      int q2 = cubicCoverage(false, true);
-      int q3 = cubicCoverage(true, true);
-
-      const bool a = p[1][1];
-      const bool b = p[1][2];
-      const bool d = p[2][1];
-      const bool e = p[2][2];
-      const bool f = p[2][3];
-      const bool h = p[3][2];
-
-      auto applyCornerBias = [&](int& coverage, const bool strongCorner, const bool cornerBlack) {
-        if (!strongCorner || coverage <= CUBIC_SCALE / 8 || coverage >= (CUBIC_SCALE * 7) / 8) return;
-        coverage = clampCoverage(coverage + (cornerBlack ? CORNER_BIAS : -CORNER_BIAS));
-      };
-
-      applyCornerBias(q0, d == b && d != h && b != f && a != e, b);
-      applyCornerBias(q1, b == f && b != d && f != h, b);
-      applyCornerBias(q2, d == h && d != b && h != f, d);
-      applyCornerBias(q3, h == f && d != h && b != f, h);
+      // Preserve obvious diagonal corners without the expensive 5x5 classifier.
+      if (n == w && n != s && w != r) q0 = (3 * q0 + n) >> 2;
+      if (n == r && n != s && r != w) q1 = (3 * q1 + n) >> 2;
+      if (s == w && s != n && w != r) q2 = (3 * q2 + s) >> 2;
+      if (s == r && s != n && r != w) q3 = (3 * q3 + s) >> 2;
 
       const int dx = static_cast<int>(sx - viewport.x) * 2;
       const int dy = static_cast<int>(sy - viewport.y) * 2;
@@ -275,60 +248,44 @@ void drawXtchFast1x(const uint8_t* pageBuffer, const uint16_t pageWidth, const u
 // 2-bit source quality path. Interpolate the original four source levels first,
 // clamp cubic overshoot at edges, then quantize the enlarged frame to 1-bit.
 // This preserves the extra XTCH information without invoking grayscale waves.
-void drawXtchCubic2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
-                     const XtcZoomViewport& viewport, GfxRenderer& renderer) {
-  static constexpr int16_t CUBIC_NEG_QUARTER[4] = {-3, 29, 111, -9};
-  static constexpr int16_t CUBIC_POS_QUARTER[4] = {-9, 111, 29, -3};
-  constexpr int CUBIC_SCALE = 128 * 128;
-
+void drawXtchFastEdge2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                         const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  const size_t planeSize = (static_cast<size_t>(pageWidth) * pageHeight + 7) / 8;
+  const size_t colBytes = (pageHeight + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
+  auto sample = [&](int x, int y) -> int {
+    x = std::clamp(x, 0, static_cast<int>(pageWidth) - 1);
+    y = std::clamp(y, 0, static_cast<int>(pageHeight) - 1);
+    const size_t colIndex = static_cast<size_t>(pageWidth - 1 - x);
+    const size_t byteOffset = colIndex * colBytes + static_cast<size_t>(y) / 8;
+    const uint8_t bit = static_cast<uint8_t>(7 - (y & 7));
+    const uint8_t bit1 = (pageBuffer[byteOffset] >> bit) & 1;
+    const uint8_t bit2 = (pageBuffer[planeSize + byteOffset] >> bit) & 1;
+    return xtchBlackness(static_cast<uint8_t>((bit1 << 1) | bit2));
+  };
+
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
     for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
-      // 25 bytes, bounded and local: no per-pixel heap allocation.
-      uint8_t p[5][5];
-      for (int py = 0; py < 5; ++py) {
-        for (int px = 0; px < 5; ++px) {
-          p[py][px] = xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight,
-                                                   static_cast<int>(sx) + px - 2,
-                                                   static_cast<int>(sy) + py - 2));
-        }
-      }
+      // Five 2-bit source samples per source pixel. This is intentionally much
+      // lighter than the former 25-sample cubic kernel while still interpolating
+      // the original four gray levels before the final 1-bit quantization.
+      const int e = sample(sx, sy);
+      const int n = sample(sx, static_cast<int>(sy) - 1);
+      const int s = sample(sx, static_cast<int>(sy) + 1);
+      const int w = sample(static_cast<int>(sx) - 1, sy);
+      const int r = sample(static_cast<int>(sx) + 1, sy);
 
-      auto cubicSample = [&](const bool positiveX, const bool positiveY) {
-        const int16_t* wx = positiveX ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int16_t* wy = positiveY ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int xBase = positiveX ? 1 : 0;
-        const int yBase = positiveY ? 1 : 0;
+      int q0 = (10 * e + 3 * n + 3 * w + 8) >> 4;
+      int q1 = (10 * e + 3 * n + 3 * r + 8) >> 4;
+      int q2 = (10 * e + 3 * s + 3 * w + 8) >> 4;
+      int q3 = (10 * e + 3 * s + 3 * r + 8) >> 4;
 
-        int row[4] = {};
-        for (int yy = 0; yy < 4; ++yy) {
-          for (int xx = 0; xx < 4; ++xx) {
-            row[yy] += static_cast<int>(p[yBase + yy][xBase + xx]) * wx[xx];
-          }
-        }
-
-        int value = 0;
-        for (int yy = 0; yy < 4; ++yy) value += row[yy] * wy[yy];
-        value = (value + CUBIC_SCALE / 2) / CUBIC_SCALE;
-        return std::clamp(value, 0, 255);
-      };
-
-      int q0 = cubicSample(false, false);
-      int q1 = cubicSample(true, false);
-      int q2 = cubicSample(false, true);
-      int q3 = cubicSample(true, true);
-
-      auto edgeClamp = [](int value, const uint8_t a, const uint8_t b, const uint8_t c, const uint8_t d) {
-        const int lo = std::min(std::min<int>(a, b), std::min<int>(c, d));
-        const int hi = std::max(std::max<int>(a, b), std::max<int>(c, d));
-        return std::clamp(value, lo, hi);
-      };
-      q0 = edgeClamp(q0, p[1][1], p[1][2], p[2][1], p[2][2]);
-      q1 = edgeClamp(q1, p[1][2], p[1][3], p[2][2], p[2][3]);
-      q2 = edgeClamp(q2, p[2][1], p[2][2], p[3][1], p[3][2]);
-      q3 = edgeClamp(q3, p[2][2], p[2][3], p[3][2], p[3][3]);
+      if (n == w && n != s && w != r) q0 = (3 * q0 + n) >> 2;
+      if (n == r && n != s && r != w) q1 = (3 * q1 + n) >> 2;
+      if (s == w && s != n && w != r) q2 = (3 * q2 + s) >> 2;
+      if (s == r && s != n && r != w) q3 = (3 * q3 + s) >> 2;
 
       const int dx = static_cast<int>(sx - viewport.x) * 2;
       const int dy = static_cast<int>(sy - viewport.y) * 2;
@@ -1553,7 +1510,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
 
       renderer.clearScreen();
       if (zoom.active) {
-        drawXtchCubic2x(xtchPageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
+        drawXtchFastEdge2x(xtchPageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
       } else {
         drawXtchFast1x(xtchPageBuffer.get(), pageWidth, pageHeight, renderer);
       }
@@ -1666,7 +1623,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   renderer.clearScreen();
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   if (zoom.active) {
-    drawXtcXbr2x(pageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
+    drawXtcFastEdge2x(pageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
   } else {
     for (uint16_t srcY = 0; srcY < pageHeight; ++srcY) {
       const size_t srcRowStart = srcY * srcRowBytes;
