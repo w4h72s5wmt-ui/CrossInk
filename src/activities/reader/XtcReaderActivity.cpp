@@ -199,6 +199,136 @@ void drawXtcXbr2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uin
   }
 }
 
+uint8_t xtchPixelValue(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight, int x, int y) {
+  x = std::clamp(x, 0, static_cast<int>(pageWidth) - 1);
+  y = std::clamp(y, 0, static_cast<int>(pageHeight) - 1);
+
+  const size_t planeSize = (static_cast<size_t>(pageWidth) * pageHeight + 7) / 8;
+  const size_t colBytes = (pageHeight + 7) / 8;
+  const size_t colIndex = static_cast<size_t>(pageWidth - 1 - x);
+  const size_t byteOffset = colIndex * colBytes + static_cast<size_t>(y) / 8;
+  const uint8_t bit = static_cast<uint8_t>(7 - (y % 8));
+  const uint8_t bit1 = (pageBuffer[byteOffset] >> bit) & 1;
+  const uint8_t bit2 = (pageBuffer[planeSize + byteOffset] >> bit) & 1;
+  return static_cast<uint8_t>((bit1 << 1) | bit2);
+}
+
+uint8_t xtchBlackness(const uint8_t value) {
+  // XTH values are ordered by the file format, not by luminance:
+  // 0=white, 1=dark gray, 2=light gray, 3=black.
+  // Match the renderer's established 10/16 and 5/16 gray coverage levels.
+  switch (value) {
+    case 1:
+      return 160;
+    case 2:
+      return 80;
+    case 3:
+      return 255;
+    default:
+      return 0;
+  }
+}
+
+bool xtchDitherBlack(const int blackness, const int x, const int y) {
+  static constexpr uint8_t BAYER_4X4[16] = {
+      0, 8, 2, 10,
+      12, 4, 14, 6,
+      3, 11, 1, 9,
+      15, 7, 13, 5,
+  };
+  if (blackness <= 0) return false;
+  if (blackness >= 255) return true;
+  const int threshold = static_cast<int>(BAYER_4X4[((y & 3) << 2) | (x & 3)]) * 16 + 8;
+  return blackness >= threshold;
+}
+
+void drawXtchFast1x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                    GfxRenderer& renderer) {
+  const int maxX = std::min<int>(pageWidth, renderer.getScreenWidth());
+  const int maxY = std::min<int>(pageHeight, renderer.getScreenHeight());
+  for (int y = 0; y < maxY; ++y) {
+    for (int x = 0; x < maxX; ++x) {
+      const int blackness = xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, x, y));
+      if (xtchDitherBlack(blackness, x, y)) renderer.drawPixel(x, y, true);
+    }
+  }
+}
+
+// Higher-quality XTCH zoom: interpolate the original four gray levels first,
+// then quantize the enlarged result to the 1-bit framebuffer. This keeps the
+// extra source information through the scaling step without invoking the
+// panel's slower multi-pass grayscale waveform.
+void drawXtchCubic2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                     const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  static constexpr int16_t CUBIC_NEG_QUARTER[4] = {-3, 29, 111, -9};
+  static constexpr int16_t CUBIC_POS_QUARTER[4] = {-9, 111, 29, -3};
+  constexpr int CUBIC_SCALE = 128 * 128;
+
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+
+  for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
+    for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
+      // 25 bytes, bounded and local: no per-pixel heap allocation.
+      uint8_t p[5][5];
+      for (int py = 0; py < 5; ++py) {
+        for (int px = 0; px < 5; ++px) {
+          p[py][px] = xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight,
+                                                   static_cast<int>(sx) + px - 2,
+                                                   static_cast<int>(sy) + py - 2));
+        }
+      }
+
+      auto cubicSample = [&](const bool positiveX, const bool positiveY) {
+        const int16_t* wx = positiveX ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
+        const int16_t* wy = positiveY ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
+        const int xBase = positiveX ? 1 : 0;
+        const int yBase = positiveY ? 1 : 0;
+
+        int row[4] = {};
+        for (int yy = 0; yy < 4; ++yy) {
+          for (int xx = 0; xx < 4; ++xx) {
+            row[yy] += static_cast<int>(p[yBase + yy][xBase + xx]) * wx[xx];
+          }
+        }
+
+        int value = 0;
+        for (int yy = 0; yy < 4; ++yy) value += row[yy] * wy[yy];
+        value = (value + CUBIC_SCALE / 2) / CUBIC_SCALE;
+        return std::clamp(value, 0, 255);
+      };
+
+      int q0 = cubicSample(false, false);
+      int q1 = cubicSample(true, false);
+      int q2 = cubicSample(false, true);
+      int q3 = cubicSample(true, true);
+
+      // Clamp Catmull-Rom overshoot to the four source samples surrounding each
+      // quarter pixel. This keeps text/manga edges crisp and avoids light/dark
+      // halos around high-contrast strokes.
+      auto edgeClamp = [](int value, const uint8_t a, const uint8_t b, const uint8_t c, const uint8_t d) {
+        const int lo = std::min(std::min<int>(a, b), std::min<int>(c, d));
+        const int hi = std::max(std::max<int>(a, b), std::max<int>(c, d));
+        return std::clamp(value, lo, hi);
+      };
+      q0 = edgeClamp(q0, p[1][1], p[1][2], p[2][1], p[2][2]);
+      q1 = edgeClamp(q1, p[1][2], p[1][3], p[2][2], p[2][3]);
+      q2 = edgeClamp(q2, p[2][1], p[2][2], p[3][1], p[3][2]);
+      q3 = edgeClamp(q3, p[2][2], p[2][3], p[3][2], p[3][3]);
+
+      const int dx = static_cast<int>(sx - viewport.x) * 2;
+      const int dy = static_cast<int>(sy - viewport.y) * 2;
+      if (dx < screenWidth && dy < screenHeight && xtchDitherBlack(q0, dx, dy)) renderer.drawPixel(dx, dy, true);
+      if (dx + 1 < screenWidth && dy < screenHeight && xtchDitherBlack(q1, dx + 1, dy))
+        renderer.drawPixel(dx + 1, dy, true);
+      if (dx < screenWidth && dy + 1 < screenHeight && xtchDitherBlack(q2, dx, dy + 1))
+        renderer.drawPixel(dx, dy + 1, true);
+      if (dx + 1 < screenWidth && dy + 1 < screenHeight && xtchDitherBlack(q3, dx + 1, dy + 1))
+        renderer.drawPixel(dx + 1, dy + 1, true);
+    }
+  }
+}
+
 bool streamXtchRenderPass(const Xtc& xtc, const uint32_t pageIndex, const uint16_t pageWidth, const uint16_t pageHeight,
                           GfxRenderer& renderer, const XtchRenderPass pass) {
   const size_t planeSize = (static_cast<size_t>(pageWidth) * pageHeight + 7) / 8;
@@ -255,6 +385,22 @@ void XtcReaderActivity::onEnter() {
 
   xtc->setupCacheDir();
 
+  // X4 Pro/other PSRAM targets can retain one decoded XTCH source page. At
+  // 480x800 this is 96 KB: too large for the task stack and intentionally
+  // allocated once for the activity lifetime to avoid render-loop heap churn.
+  if (xtc->getBitDepth() == 2 && psramHeapAvailable()) {
+    xtchPageBufferSize = ((static_cast<size_t>(xtc->getPageWidth()) * xtc->getPageHeight() + 7) / 8) * 2;
+    xtchPageBuffer = makePsramByteBufferNoThrow(xtchPageBufferSize);
+    if (!xtchPageBuffer) {
+      LOG_ERR("XTR", "Failed to allocate XTCH PSRAM source buffer (%lu bytes); using grayscale fallback",
+              static_cast<unsigned long>(xtchPageBufferSize));
+      xtchPageBufferSize = 0;
+    } else {
+      LOG_DBG("XTR", "XTCH fast 1-bit path enabled with %lu-byte PSRAM source buffer",
+              static_cast<unsigned long>(xtchPageBufferSize));
+    }
+  }
+
   // Activate reader-specific front button mapping (if configured).
   mappedInput.setReaderMode(true);
 
@@ -301,6 +447,8 @@ void XtcReaderActivity::onExit() {
     xtc->generateThumbBmp(LyraCarouselTheme::kSideCoverW, LyraCarouselTheme::kSideCoverH);
   }
 
+  xtchPageBuffer.reset();
+  xtchPageBufferSize = 0;
   xtc.reset();
 }
 
@@ -355,18 +503,18 @@ void XtcReaderActivity::loop() {
     return;
   }
 
-  // Match the build-100 interaction: one short tap toggles a single 2x zoom
-  // level. The first tap also becomes the viewport centre; tapping again
-  // returns to the native page. XTCH remains untouched in this experiment.
-  if (touch.tapped && xtc->getBitDepth() == 1 && currentPage < xtc->getPageCount()) {
+  // One short tap toggles a single 2x zoom level. XTC 1-bit always
+  // supports it; XTCH 2-bit supports it when the PSRAM source buffer exists.
+  const bool zoomSupported = xtc->getBitDepth() == 1 || (xtc->getBitDepth() == 2 && static_cast<bool>(xtchPageBuffer));
+  if (touch.tapped && zoomSupported && currentPage < xtc->getPageCount()) {
     if (zoomActive) {
       zoomActive = false;
-      LOG_DBG("XTR", "XTC Xbr2x zoom off");
+      LOG_DBG("XTR", "XTC zoom off");
     } else {
       zoomCenterX = touch.x;
       zoomCenterY = touch.y;
       zoomActive = true;
-      LOG_DBG("XTR", "XTC Xbr2x zoom on around %d,%d", zoomCenterX, zoomCenterY);
+      LOG_DBG("XTR", "XTC %u-bit zoom on around %d,%d", xtc->getBitDepth(), zoomCenterX, zoomCenterY);
     }
     zoomRefreshPending = true;
     requestUpdate();
@@ -1323,6 +1471,46 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   const uint8_t bitDepth = xtc->getBitDepth();
 
   if (bitDepth == 2) {
+    // On PSRAM-equipped targets (notably X4 Pro), retain the original 2-bit
+    // page as source data but quantize the final framebuffer to 1-bit. Normal
+    // page turns and zoom transitions can therefore use the same fast waveform.
+    if (xtchPageBuffer && xtchPageBufferSize > 0) {
+      const size_t expectedSize = ((static_cast<size_t>(pageWidth) * pageHeight + 7) / 8) * 2;
+      if (expectedSize > xtchPageBufferSize ||
+          xtc->loadPage(pageToRender, xtchPageBuffer.get(), xtchPageBufferSize) != expectedSize) {
+        LOG_ERR("XTR", "Failed to load XTCH fast page %lu: need=%lu have=%lu error=%s", pageToRender,
+                static_cast<unsigned long>(expectedSize), static_cast<unsigned long>(xtchPageBufferSize),
+                xtc::errorToString(xtc->getLastError()));
+        renderer.clearScreen();
+        renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
+        renderer.displayBuffer();
+        return;
+      }
+
+      renderer.clearScreen();
+      if (zoomActive) {
+        const XtcZoomViewport viewport =
+            makeXtcZoomViewport(pageWidth, pageHeight, renderer, zoomCenterX, zoomCenterY);
+        drawXtchCubic2x(xtchPageBuffer.get(), pageWidth, pageHeight, viewport, renderer);
+      } else {
+        drawXtchFast1x(xtchPageBuffer.get(), pageWidth, pageHeight, renderer);
+      }
+
+      if (SETTINGS.xtcStatusBarMode == CrossPointSettings::XTC_STATUS_BAR_MODE::XTC_STATUS_BAR_TOP) {
+        renderStatusBarOverlay(StatusBarOverlayPosition::Top, pageToRender);
+      } else {
+        renderStatusBarOverlay(StatusBarOverlayPosition::Bottom, pageToRender);
+      }
+
+      if (zoomRefreshPending) {
+        renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+        zoomRefreshPending = false;
+      } else {
+        ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+      }
+      return;
+    }
+
     auto showStreamError = [&]() {
       renderer.clearScreen();
       const char* message =
