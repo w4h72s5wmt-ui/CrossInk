@@ -1,9 +1,9 @@
-name: Build99 XTC Tap Edge2x Fast Refresh X4 Pro
+name: Build99 XTC Tap Xbr2x Fast Refresh X4 Pro
 
 on:
   push:
     branches:
-      - feat/xtc-tap-edge2x-fast-refresh
+      - feat/xtc-tap-xbr2x-fast-refresh
   workflow_dispatch:
 
 jobs:
@@ -47,13 +47,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: build99-xtc-tap-edge2x-fast-${{ github.run_number }}
+          name: build99-xtc-tap-xbr2x-fast-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
 
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: build99-xtc-tap-edge2x-fast-${{ github.run_number }}-log
+          name: build99-xtc-tap-xbr2x-fast-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: error
