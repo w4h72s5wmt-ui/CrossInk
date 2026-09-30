@@ -2,7 +2,7 @@
 
 ### Added
 
-- XTC/XTCH readers on X4 Pro auto-detect 480x800, 720x1200 and 960x1600 pages. Native pages use lightweight EPX zoom, 720x1200 pages use a balanced 1.5x source path with 2:1-style filtering in normal view and a cheap 3-to-4 zoom map, while 960x1600 pages show a native 480x800 crop when zoomed; all zoom transitions keep the fast e-ink path.
+- XTC/XTCH readers on X4 Pro auto-detect 480x800, 720x1200 and 960x1600 pages. Native pages use lightweight EPX zoom, 720x1200 pages use exact fixed-ratio area reduction in normal view and fixed 3-to-4 interpolation when zoomed, while 960x1600 pages show a native 480x800 crop when zoomed; all zoom transitions keep the fast e-ink path.
 
 ### Fixed
 
