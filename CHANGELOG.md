@@ -3,7 +3,7 @@
 
 ### Added
 
-- XTC readers on touch devices can toggle a session-only 2x zoom with a short tap; 5x5 cubic reconstruction with directional corner refinement improves enlarged text and line art while zoom transitions stay on the fast differential e-ink refresh path.
+- XTC readers on touch devices can toggle a session-only 2x zoom with a short tap; 1-bit XTC keeps xBR-style reconstruction, while 2-bit XTCH on PSRAM devices uses its four source levels for dithered fast reading and cubic 2x zoom without invoking the slower grayscale refresh path.
 - Added a standalone Notes screen for creating and editing UTF-8 `.txt` notes stored in `/Notes`.
 - Keyboard layouts can now be enabled in Settings and switched from the keyboard's language key.
 - Xteink X4 Classic support, including its six buttons, SD card, USB Drive, display profile, and board-specific firmware builds.
