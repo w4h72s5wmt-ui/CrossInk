@@ -1,9 +1,9 @@
-name: X4 Pro Build99 on CrossInk 1.6 Clean
+name: X4 Pro v1.6 Dual-Bit Fast Zoom
 
 on:
   push:
     branches:
-      - x4-pro-build99-v160-clean
+      - feat/v160-xtc-dualbit-fast-zoom
   workflow_dispatch:
 
 jobs:
@@ -40,13 +40,13 @@ jobs:
       - name: Upload X4 Pro firmware
         uses: actions/upload-artifact@v4
         with:
-          name: crossink-v160-build99-${{ github.run_number }}
+          name: crossink-v160-dualbit-zoom-${{ github.run_number }}
           path: .pio/build/x4-pro/firmware.bin
           if-no-files-found: error
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crossink-v160-build99-${{ github.run_number }}-log
+          name: crossink-v160-dualbit-zoom-${{ github.run_number }}-log
           path: build-x4-pro.log
           if-no-files-found: ignore
