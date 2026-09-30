@@ -18,6 +18,9 @@
 #include "GlobalReadingStats.h"
 #include "ReaderProgressSaveDebouncer.h"
 #include "activities/Activity.h"
+#if CROSSINK_APP_CAP_TOUCH
+#include "activities/reader/ReaderPinchGesture.h"
+#endif
 #include "components/OptionPopup.h"
 
 class XtcReaderActivity final : public Activity {
@@ -38,8 +41,16 @@ class XtcReaderActivity final : public Activity {
   // Queue the turn so it follows the same guarded XTC page-turn path.
   bool shortcutPageTurnPending = false;
   bool shortcutPreviousPagePending = false;
-  // Session-only display toggle; fixed-layout XTC pages are never regenerated.
+  // Session-only display state; fixed-layout XTC pages are never regenerated.
   bool statusBarVisible = true;
+  // XTC 1-bit zoom is intentionally binary: native 1x or a 2x viewport.
+  bool zoomActive = false;
+  bool zoomRefreshPending = false;
+  int zoomCenterX = 0;
+  int zoomCenterY = 0;
+#if CROSSINK_APP_CAP_TOUCH
+  ReaderPinchGesture pinchZoomGesture;
+#endif
   bool longPressMenuHandled = false;
   bool sideButtonLongPressHandled = false;
   bool frontButtonLongPressHandled = false;
