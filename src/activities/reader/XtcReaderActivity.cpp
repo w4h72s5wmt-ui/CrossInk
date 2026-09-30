@@ -1757,7 +1757,6 @@ bool XtcReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
     return false;
   }
 
-  // Load saved page number
   uint32_t savedPage = 0;
   FsFile f;
   if (Storage.openFileForRead("SLP", xtc.getCachePath() + "/progress.bin", f)) {
@@ -1772,56 +1771,52 @@ bool XtcReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
   const uint16_t pageWidth = xtc.getPageWidth();
   const uint16_t pageHeight = xtc.getPageHeight();
   const uint8_t bitDepth = xtc.getBitDepth();
+  const bool hiRes2x = isXtcHiRes2x(pageWidth, pageHeight, renderer);
+  const size_t pageBufferSize = xtcBitmapSize(bitDepth, pageWidth, pageHeight);
 
-  // Only use the 1-bit BW path; grayscale is not needed as a background under the overlay
-  const size_t pageBufferSize = (bitDepth == 2) ? ((static_cast<size_t>(pageWidth) * pageHeight + 7) / 8) * 2
-                                                : ((pageWidth + 7) / 8) * pageHeight;
-
-  uint8_t* pageBuffer = static_cast<uint8_t*>(malloc(pageBufferSize));
+  // Sleep snapshots may need up to ~384 KB for a 960x1600 XTCH page. Prefer
+  // PSRAM when available; otherwise fail cleanly rather than risking the stack
+  // or silently cropping the high-resolution source.
+  HeapByteBuffer pageBuffer =
+      psramHeapAvailable() && pageBufferSize > renderer.getBufferSize()
+          ? makePsramByteBufferNoThrow(pageBufferSize)
+          : makeHeapByteBufferNoThrow(pageBufferSize);
   if (!pageBuffer) {
-    LOG_ERR("SLP", "XTC: failed to allocate page buffer");
+    LOG_ERR("SLP", "XTC: failed to allocate page buffer (%lu bytes)", static_cast<unsigned long>(pageBufferSize));
     return false;
   }
 
-  if (xtc.loadPage(savedPage, pageBuffer, pageBufferSize) == 0) {
-    LOG_ERR("SLP", "XTC: failed to load page %lu", savedPage);
-    free(pageBuffer);
+  const size_t bytesRead = xtc.loadPage(savedPage, pageBuffer.get(), pageBufferSize);
+  if (bytesRead != pageBufferSize) {
+    LOG_ERR("SLP", "XTC: failed to load page %lu: expected=%lu got=%lu", savedPage,
+            static_cast<unsigned long>(pageBufferSize), static_cast<unsigned long>(bytesRead));
     return false;
   }
 
   renderer.clearScreen();
 
-  if (bitDepth == 2) {
-    // 2-bit XTH: draw all non-white pixels as black (BW pass only)
-    const size_t planeSize = (static_cast<size_t>(pageWidth) * pageHeight + 7) / 8;
-    const uint8_t* plane1 = pageBuffer;
-    const uint8_t* plane2 = pageBuffer + planeSize;
-    const size_t colBytes = (pageHeight + 7) / 8;
-    for (uint16_t y = 0; y < pageHeight; y++) {
-      for (uint16_t x = 0; x < pageWidth; x++) {
-        const size_t colIndex = pageWidth - 1 - x;
-        const size_t byteInCol = y / 8;
-        const size_t bitInByte = 7 - (y % 8);
-        const size_t byteOffset = colIndex * colBytes + byteInCol;
-        const uint8_t bit1 = (plane1[byteOffset] >> bitInByte) & 1;
-        const uint8_t bit2 = (plane2[byteOffset] >> bitInByte) & 1;
-        if ((bit1 << 1) | bit2) {
-          renderer.drawPixel(x, y, true);
-        }
-      }
+  if (hiRes2x) {
+    if (bitDepth == 2) {
+      drawXtchHiResNormal(pageBuffer.get(), pageWidth, pageHeight, renderer);
+    } else {
+      drawXtcHiResNormal(pageBuffer.get(), pageWidth, pageHeight, renderer);
     }
-  } else {
-    // 1-bit XTG: draw black pixels
-    const size_t srcRowBytes = (pageWidth + 7) / 8;
-    for (uint16_t srcY = 0; srcY < pageHeight; srcY++) {
-      for (uint16_t srcX = 0; srcX < pageWidth; srcX++) {
-        const bool isBlack = !((pageBuffer[srcY * srcRowBytes + srcX / 8] >> (7 - srcX % 8)) & 1);
-        if (isBlack) renderer.drawPixel(srcX, srcY, true);
-      }
-    }
+    return true;
   }
 
-  free(pageBuffer);
+  if (bitDepth == 2) {
+    // Match the reader's fast 1-bit representation for a sleep-overlay base.
+    drawXtchFast1x(pageBuffer.get(), pageWidth, pageHeight, renderer);
+    return true;
+  }
+
+  const size_t srcRowBytes = (pageWidth + 7) / 8;
+  for (uint16_t y = 0; y < pageHeight; ++y) {
+    const size_t row = static_cast<size_t>(y) * srcRowBytes;
+    for (uint16_t x = 0; x < pageWidth; ++x) {
+      if (!((pageBuffer[row + x / 8] >> (7 - (x & 7))) & 1)) renderer.drawPixel(x, y, true);
+    }
+  }
   return true;
 }
 
