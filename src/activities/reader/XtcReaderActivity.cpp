@@ -151,14 +151,40 @@ bool xtcPixelBlack(const uint8_t* pageBuffer, const size_t srcRowBytes, const ui
 
 // Legacy 480x800 1-bit zoom: classic EPX/Scale2x. Five boolean samples and
 // equality tests only; no weighted coverage or dithering in the hot loop.
-void drawXtcEpx2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
-                  const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+void drawXtcEdgeAa2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                     const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  // Exact visual result of the previous weighted Fast Edge2x filter, but with
+  // all five-neighbour arithmetic precomputed into 32 patterns. Each uint32_t
+  // packs q0..q3 edge coverages in its four bytes.
+  static constexpr uint32_t EDGE_AA_LUT[32] = {
+      0x00000000, 0x30003000, 0x00300030, 0x30303030,
+      0x30300000, 0x87303000, 0x30870030, 0x60603030,
+      0x00003030, 0x30008730, 0x00303087, 0x30306060,
+      0x30303030, 0x60306030, 0x30603060, 0x60606060,
+      0x9F9F9F9F, 0xCF9FCF9F, 0x9FCF9FCF, 0xCFCFCFCF,
+      0xCFCF9F9F, 0xFFCFCF77, 0xCFFF77CF, 0xFFFFCFCF,
+      0x9F9FCFCF, 0xCF77FFCF, 0x77CFCFFF, 0xCFCFFFFF,
+      0xCFCFCFCF, 0xFFCFFFCF, 0xCFFFCFFF, 0xFFFFFFFF,
+  };
+  static constexpr uint8_t BAYER_4X4[16] = {
+      0, 8, 2, 10,
+      12, 4, 14, 6,
+      3, 11, 1, 9,
+      15, 7, 13, 5,
+  };
+
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
   auto rowPixelBlack = [](const uint8_t* row, const int x) {
     return ((row[x >> 3] >> (7 - (x & 7))) & 1) == 0;
+  };
+
+  auto drawCoverage = [&](const int dx, const int dy, const uint8_t coverage) {
+    if (dx < 0 || dy < 0 || dx >= screenWidth || dy >= screenHeight) return;
+    const int threshold = 113 + static_cast<int>(BAYER_4X4[((dy & 3) << 2) | (dx & 3)]) * 2;
+    if (coverage >= threshold) renderer.drawPixel(dx, dy, true);
   };
 
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
@@ -178,23 +204,16 @@ void drawXtcEpx2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uin
       const bool n = rowPixelBlack(rowN, x);
       const bool s = rowPixelBlack(rowS, x);
 
-      bool q0 = e;
-      bool q1 = e;
-      bool q2 = e;
-      bool q3 = e;
-      if (n != s && w != r) {
-        q0 = w == n ? w : e;
-        q1 = n == r ? r : e;
-        q2 = w == s ? w : e;
-        q3 = s == r ? r : e;
-      }
+      const uint8_t pattern = static_cast<uint8_t>((e ? 16 : 0) | (n ? 8 : 0) | (s ? 4 : 0) |
+                                                   (w ? 2 : 0) | (r ? 1 : 0));
+      const uint32_t packed = EDGE_AA_LUT[pattern];
 
       const int dx = (x - static_cast<int>(viewport.x)) * 2;
       const int dy = (y - static_cast<int>(viewport.y)) * 2;
-      if (q0 && dx < screenWidth && dy < screenHeight) renderer.drawPixel(dx, dy, true);
-      if (q1 && dx + 1 < screenWidth && dy < screenHeight) renderer.drawPixel(dx + 1, dy, true);
-      if (q2 && dx < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx, dy + 1, true);
-      if (q3 && dx + 1 < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx + 1, dy + 1, true);
+      drawCoverage(dx, dy, static_cast<uint8_t>(packed));
+      drawCoverage(dx + 1, dy, static_cast<uint8_t>(packed >> 8));
+      drawCoverage(dx, dy + 1, static_cast<uint8_t>(packed >> 16));
+      drawCoverage(dx + 1, dy + 1, static_cast<uint8_t>(packed >> 24));
 
       w = e;
       e = r;
@@ -1800,7 +1819,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   renderer.clearScreen();
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   if (zoom.active) {
-    drawXtcEpx2x(pageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
+    drawXtcEdgeAa2x(pageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
   } else {
     for (uint16_t y = 0; y < pageHeight; ++y) {
       const size_t row = static_cast<size_t>(y) * srcRowBytes;
