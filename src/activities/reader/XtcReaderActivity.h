@@ -41,12 +41,12 @@ class XtcReaderActivity final : public Activity {
   bool shortcutPreviousPagePending = false;
   // Session-only display state; fixed-layout XTC pages are never regenerated.
   bool statusBarVisible = true;
-  // XTC/XTCH zoom is intentionally binary: native 1x or a 2x viewport.
-  // On PSRAM devices, XTCH keeps one 2-bit source page (~96 KB at 480x800)
-  // so both normal reading and zoom can be converted to fast 1-bit output.
-  HeapByteBuffer xtchPageBuffer;
-  size_t xtchPageBufferSize = 0;
-  uint32_t xtchBufferedPage = UINT32_MAX;
+  // XTC/XTCH zoom is binary: native 1x or a 2x viewport. PSRAM devices
+  // retain one source page when needed: 2-bit XTCH at native resolution, or
+  // either format at 2x source resolution (960x1600 on the X4 Pro).
+  HeapByteBuffer sourcePageBuffer;
+  size_t sourcePageBufferSize = 0;
+  uint32_t sourceBufferedPage = UINT32_MAX;
   bool zoomActive = false;
   bool zoomRefreshPending = false;
   int zoomCenterX = 0;
