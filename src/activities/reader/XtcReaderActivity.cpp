@@ -67,6 +67,13 @@ struct XtcZoomViewport {
   uint16_t height = 0;
 };
 
+bool isXtcMidRes15x(const uint16_t pageWidth, const uint16_t pageHeight, const GfxRenderer& renderer) {
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+  return screenWidth > 0 && screenHeight > 0 && static_cast<int>(pageWidth) * 2 == screenWidth * 3 &&
+         static_cast<int>(pageHeight) * 2 == screenHeight * 3;
+}
+
 bool isXtcHiRes2x(const uint16_t pageWidth, const uint16_t pageHeight, const GfxRenderer& renderer) {
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
@@ -88,21 +95,22 @@ XtcZoomViewport makeXtcZoomViewport(const bool active, const uint16_t pageWidth,
   const int screenHeight = renderer.getScreenHeight();
   if (screenWidth <= 1 || screenHeight <= 1) return {};
 
-  const bool hiRes2x = isXtcHiRes2x(pageWidth, pageHeight, renderer);
-  const uint16_t visibleWidth = std::max<uint16_t>(
-      1, std::min<uint16_t>(pageWidth, static_cast<uint16_t>(hiRes2x ? screenWidth : screenWidth / 2)));
-  const uint16_t visibleHeight = std::max<uint16_t>(
-      1, std::min<uint16_t>(pageHeight, static_cast<uint16_t>(hiRes2x ? screenHeight : screenHeight / 2)));
-
-  const int sourceTapX = hiRes2x ? tapX * 2 : tapX;
-  const int sourceTapY = hiRes2x ? tapY * 2 : tapY;
-  const int centerX = std::clamp(sourceTapX, 0, static_cast<int>(pageWidth) - 1);
-  const int centerY = std::clamp(sourceTapY, 0, static_cast<int>(pageHeight) - 1);
+  // A visual 2x zoom always shows half of the source page in each dimension.
+  // Mapping the tap through the source/screen ratio makes the same gesture work
+  // for 480x800, 720x1200 and 960x1600 files.
+  const uint16_t visibleWidth = std::max<uint16_t>(1, pageWidth / 2);
+  const uint16_t visibleHeight = std::max<uint16_t>(1, pageHeight / 2);
+  const int sourceTapX =
+      std::clamp((tapX * static_cast<int>(pageWidth) + screenWidth / 2) / screenWidth, 0,
+                 static_cast<int>(pageWidth) - 1);
+  const int sourceTapY =
+      std::clamp((tapY * static_cast<int>(pageHeight) + screenHeight / 2) / screenHeight, 0,
+                 static_cast<int>(pageHeight) - 1);
 
   const int sourceX =
-      std::clamp(centerX - static_cast<int>(visibleWidth) / 2, 0, static_cast<int>(pageWidth - visibleWidth));
+      std::clamp(sourceTapX - static_cast<int>(visibleWidth) / 2, 0, static_cast<int>(pageWidth - visibleWidth));
   const int sourceY =
-      std::clamp(centerY - static_cast<int>(visibleHeight) / 2, 0, static_cast<int>(pageHeight - visibleHeight));
+      std::clamp(sourceTapY - static_cast<int>(visibleHeight) / 2, 0, static_cast<int>(pageHeight - visibleHeight));
 
   return {true, static_cast<uint16_t>(sourceX), static_cast<uint16_t>(sourceY), visibleWidth, visibleHeight};
 }
@@ -149,13 +157,26 @@ void drawXtcEpx2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uin
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
+  auto rowPixelBlack = [](const uint8_t* row, const int x) {
+    return ((row[x >> 3] >> (7 - (x & 7))) & 1) == 0;
+  };
+
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
-    for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
-      const bool e = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy);
-      const bool n = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) - 1);
-      const bool s = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) + 1);
-      const bool w = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1, sy);
-      const bool r = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1, sy);
+    const int y = sy;
+    const uint8_t* rowN = pageBuffer + static_cast<size_t>(std::max(0, y - 1)) * srcRowBytes;
+    const uint8_t* rowC = pageBuffer + static_cast<size_t>(y) * srcRowBytes;
+    const uint8_t* rowS =
+        pageBuffer + static_cast<size_t>(std::min(static_cast<int>(pageHeight) - 1, y + 1)) * srcRowBytes;
+
+    int x = viewport.x;
+    bool w = rowPixelBlack(rowC, std::max(0, x - 1));
+    bool e = rowPixelBlack(rowC, x);
+
+    for (; x < static_cast<int>(viewport.x + viewport.width); ++x) {
+      const int xr = std::min(static_cast<int>(pageWidth) - 1, x + 1);
+      const bool r = rowPixelBlack(rowC, xr);
+      const bool n = rowPixelBlack(rowN, x);
+      const bool s = rowPixelBlack(rowS, x);
 
       bool q0 = e;
       bool q1 = e;
@@ -168,12 +189,15 @@ void drawXtcEpx2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uin
         q3 = s == r ? r : e;
       }
 
-      const int dx = static_cast<int>(sx - viewport.x) * 2;
-      const int dy = static_cast<int>(sy - viewport.y) * 2;
+      const int dx = (x - static_cast<int>(viewport.x)) * 2;
+      const int dy = (y - static_cast<int>(viewport.y)) * 2;
       if (q0 && dx < screenWidth && dy < screenHeight) renderer.drawPixel(dx, dy, true);
       if (q1 && dx + 1 < screenWidth && dy < screenHeight) renderer.drawPixel(dx + 1, dy, true);
       if (q2 && dx < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx, dy + 1, true);
       if (q3 && dx + 1 < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx + 1, dy + 1, true);
+
+      w = e;
+      e = r;
     }
   }
 }
@@ -260,6 +284,82 @@ void drawXtchLite2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const u
         renderer.drawPixel(dx, dy + 1, true);
       if (dx + 1 < screenWidth && dy + 1 < screenHeight && xtcDitherBlack(q3, dx + 1, dy + 1))
         renderer.drawPixel(dx + 1, dy + 1, true);
+    }
+  }
+}
+
+void drawXtcMidResNormal(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                         GfxRenderer& renderer) {
+  const size_t srcRowBytes = (pageWidth + 7) / 8;
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+
+  for (int y = 0; y < screenHeight; ++y) {
+    const int sy = (y * 3) >> 1;
+    for (int x = 0; x < screenWidth; ++x) {
+      const int sx = (x * 3) >> 1;
+      const int blackness =
+          (static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy)) +
+           static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx + 1, sy)) +
+           static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy + 1)) +
+           static_cast<int>(xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx + 1, sy + 1))) *
+          64;
+      if (xtcDitherBlack(blackness, x, y)) renderer.drawPixel(x, y, true);
+    }
+  }
+}
+
+void drawXtcMidResZoom(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                       const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  const size_t srcRowBytes = (pageWidth + 7) / 8;
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+
+  // 360x600 -> 480x800. Center-aligned nearest mapping duplicates one source
+  // pixel out of every three and needs only one source sample per destination.
+  for (int y = 0; y < screenHeight; ++y) {
+    const int sy = viewport.y + ((y * 3 + 1) >> 2);
+    for (int x = 0; x < screenWidth; ++x) {
+      const int sx = viewport.x + ((x * 3 + 1) >> 2);
+      if (xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy)) {
+        renderer.drawPixel(x, y, true);
+      }
+    }
+  }
+}
+
+void drawXtchMidResNormal(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                          GfxRenderer& renderer) {
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+
+  for (int y = 0; y < screenHeight; ++y) {
+    const int sy = (y * 3) >> 1;
+    for (int x = 0; x < screenWidth; ++x) {
+      const int sx = (x * 3) >> 1;
+      const int blackness =
+          (xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx, sy)) +
+           xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx + 1, sy)) +
+           xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx, sy + 1)) +
+           xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx + 1, sy + 1)) +
+           2) /
+          4;
+      if (xtcDitherBlack(blackness, x, y)) renderer.drawPixel(x, y, true);
+    }
+  }
+}
+
+void drawXtchMidResZoom(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                        const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+
+  for (int y = 0; y < screenHeight; ++y) {
+    const int sy = viewport.y + ((y * 3 + 1) >> 2);
+    for (int x = 0; x < screenWidth; ++x) {
+      const int sx = viewport.x + ((x * 3 + 1) >> 2);
+      const int blackness = xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight, sx, sy));
+      if (xtcDitherBlack(blackness, x, y)) renderer.drawPixel(x, y, true);
     }
   }
 }
@@ -394,8 +494,9 @@ void XtcReaderActivity::onEnter() {
 
   xtc->setupCacheDir();
 
+  const bool midRes15x = isXtcMidRes15x(xtc->getPageWidth(), xtc->getPageHeight(), renderer);
   const bool hiRes2x = isXtcHiRes2x(xtc->getPageWidth(), xtc->getPageHeight(), renderer);
-  const bool needsSourceCache = xtc->getBitDepth() == 2 || hiRes2x;
+  const bool needsSourceCache = xtc->getBitDepth() == 2 || midRes15x || hiRes2x;
   if (needsSourceCache && psramHeapAvailable()) {
     // Runtime page size can reach ~384 KB for 960x1600 XTCH, so stack/internal
     // heap storage is inappropriate. Allocate once in PSRAM and reuse by page.
@@ -592,12 +693,13 @@ void XtcReaderActivity::loop() {
     return;
   }
 
-  const bool hiResZoomSource =
+  const bool scaledZoomSource =
+      isXtcMidRes15x(xtc->getPageWidth(), xtc->getPageHeight(), renderer) ||
       isXtcHiRes2x(xtc->getPageWidth(), xtc->getPageHeight(), renderer);
   const bool zoomSupported =
-      hiResZoomSource ? static_cast<bool>(sourcePageBuffer)
-                      : (xtc->getBitDepth() == 1 ||
-                         (xtc->getBitDepth() == 2 && static_cast<bool>(sourcePageBuffer)));
+      scaledZoomSource ? static_cast<bool>(sourcePageBuffer)
+                       : (xtc->getBitDepth() == 1 ||
+                          (xtc->getBitDepth() == 2 && static_cast<bool>(sourcePageBuffer)));
   if (touch.tapped && zoomSupported && currentPage < xtc->getPageCount()) {
     if (zoomActive && zoomPage == currentPage) {
       zoomActive = false;
@@ -1514,7 +1616,9 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   const uint16_t pageWidth = xtc->getPageWidth();
   const uint16_t pageHeight = xtc->getPageHeight();
   const uint8_t bitDepth = xtc->getBitDepth();
+  const bool midRes15x = isXtcMidRes15x(pageWidth, pageHeight, renderer);
   const bool hiRes2x = isXtcHiRes2x(pageWidth, pageHeight, renderer);
+  const bool scaledSource = midRes15x || hiRes2x;
   const XtcZoomViewport zoom =
       makeXtcZoomViewport(zoomActive && zoomPage == pageToRender, pageWidth, pageHeight, renderer, zoomTapX, zoomTapY);
 
@@ -1538,7 +1642,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   // Any 2-bit page, and either format at 960x1600, uses the reusable PSRAM
   // source cache. Hi-res normal mode downsamples 2:1; hi-res zoom is a native
   // 480x800 crop with no upscale/interpolation at all.
-  if ((bitDepth == 2 || hiRes2x) && sourcePageBuffer && sourcePageBufferSize > 0) {
+  if ((bitDepth == 2 || scaledSource) && sourcePageBuffer && sourcePageBufferSize > 0) {
     const size_t expectedSize = xtcBitmapSize(bitDepth, pageWidth, pageHeight);
     if (expectedSize > sourcePageBufferSize) {
       LOG_ERR("XTR", "XTC source page exceeds cache: need=%lu have=%lu", static_cast<unsigned long>(expectedSize),
@@ -1568,16 +1672,30 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
         } else {
           drawXtchHiResNormal(sourcePageBuffer.get(), pageWidth, pageHeight, renderer);
         }
+      } else if (midRes15x) {
+        if (zoom.active) {
+          drawXtchMidResZoom(sourcePageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
+        } else {
+          drawXtchMidResNormal(sourcePageBuffer.get(), pageWidth, pageHeight, renderer);
+        }
       } else if (zoom.active) {
         drawXtchLite2x(sourcePageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
       } else {
         drawXtchFast1x(sourcePageBuffer.get(), pageWidth, pageHeight, renderer);
       }
     } else {
-      if (zoom.active) {
-        drawXtcHiResZoom(sourcePageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
-      } else {
-        drawXtcHiResNormal(sourcePageBuffer.get(), pageWidth, pageHeight, renderer);
+      if (hiRes2x) {
+        if (zoom.active) {
+          drawXtcHiResZoom(sourcePageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
+        } else {
+          drawXtcHiResNormal(sourcePageBuffer.get(), pageWidth, pageHeight, renderer);
+        }
+      } else if (midRes15x) {
+        if (zoom.active) {
+          drawXtcMidResZoom(sourcePageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
+        } else {
+          drawXtcMidResNormal(sourcePageBuffer.get(), pageWidth, pageHeight, renderer);
+        }
       }
     }
 
@@ -1590,10 +1708,10 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
     return;
   }
 
-  if (hiRes2x) {
-    // A 960x1600 source intentionally requires PSRAM on the current X4 Pro
-    // implementation. Do not silently crop it to the upper-left 480x800.
-    LOG_ERR("XTR", "Hi-res XTC page requires PSRAM source cache (%ux%u %u-bit)", pageWidth, pageHeight, bitDepth);
+  if (scaledSource) {
+    // 720x1200 and 960x1600 sources intentionally require PSRAM on the current
+    // X4 Pro implementation. Do not silently crop them to the upper-left.
+    LOG_ERR("XTR", "Scaled XTC page requires PSRAM source cache (%ux%u %u-bit)", pageWidth, pageHeight, bitDepth);
     showLoadError(true);
     return;
   }
@@ -1771,6 +1889,7 @@ bool XtcReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
   const uint16_t pageWidth = xtc.getPageWidth();
   const uint16_t pageHeight = xtc.getPageHeight();
   const uint8_t bitDepth = xtc.getBitDepth();
+  const bool midRes15x = isXtcMidRes15x(pageWidth, pageHeight, renderer);
   const bool hiRes2x = isXtcHiRes2x(pageWidth, pageHeight, renderer);
   const size_t pageBufferSize = xtcBitmapSize(bitDepth, pageWidth, pageHeight);
 
@@ -1800,6 +1919,14 @@ bool XtcReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
       drawXtchHiResNormal(pageBuffer.get(), pageWidth, pageHeight, renderer);
     } else {
       drawXtcHiResNormal(pageBuffer.get(), pageWidth, pageHeight, renderer);
+    }
+    return true;
+  }
+  if (midRes15x) {
+    if (bitDepth == 2) {
+      drawXtchMidResNormal(pageBuffer.get(), pageWidth, pageHeight, renderer);
+    } else {
+      drawXtcMidResNormal(pageBuffer.get(), pageWidth, pageHeight, renderer);
     }
     return true;
   }
