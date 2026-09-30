@@ -96,81 +96,105 @@ bool xtcPixelBlack(const uint8_t* pageBuffer, const size_t srcRowBytes, const ui
            1);
 }
 
-// The source XTC page has already been reduced to 1-bit, so no zoom algorithm
-// can recreate detail that was discarded at conversion time. This filter keeps
-// the panel strictly black/white while reconstructing a smoother 2x edge from a
-// 3x3 neighbourhood. A mild ordered threshold only affects edge coverage; solid
-// black and solid white areas stay untouched and require no grayscale waveform.
-void drawXtcEdge2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
-                   const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+// XTC pages are already 1-bit, so this cannot recreate source detail that
+// was discarded during conversion. Compared with the simpler Edge2x path, this
+// hybrid uses a 5x5 neighbourhood and Catmull-Rom quarter-pixel samples, then
+// applies an xBR-style directional corner bias. The result stays strictly 1-bit
+// so the panel can continue using the fast differential waveform.
+void drawXtcXbr2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                  const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  // Catmull-Rom weights scaled by 128. A negative-quarter sample uses t=0.75
+  // over source offsets [-2,-1,0,+1]; a positive-quarter sample uses t=0.25
+  // over [-1,0,+1,+2].
+  static constexpr int16_t CUBIC_NEG_QUARTER[4] = {-3, 29, 111, -9};
+  static constexpr int16_t CUBIC_POS_QUARTER[4] = {-9, 111, 29, -3};
   static constexpr uint8_t BAYER_4X4[16] = {
       0, 8, 2, 10,
       12, 4, 14, 6,
       3, 11, 1, 9,
       15, 7, 13, 5,
   };
+  constexpr int CUBIC_SCALE = 128 * 128;
+  constexpr int CORNER_BIAS = CUBIC_SCALE / 8;
 
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
-  auto drawCoverage = [&](const int dx, const int dy, const int coverage, const bool isolatedBlack) {
-    if (dx < 0 || dy < 0 || dx >= screenWidth || dy >= screenHeight) return;
-    if (isolatedBlack) {
-      renderer.drawPixel(dx, dy, true);
-      return;
-    }
+  auto clampCoverage = [](const int value) { return std::clamp(value, 0, CUBIC_SCALE); };
 
-    // coverage is 0..16. Keep the ordered threshold deliberately narrow
-    // (7..10) so only edge pixels are dithered; interiors remain stable.
-    const uint8_t bayer = BAYER_4X4[((dy & 3) << 2) | (dx & 3)];
-    const int threshold = 7 + ((static_cast<int>(bayer) * 4) >> 4);
+  auto drawCoverage = [&](const int dx, const int dy, const int coverage) {
+    if (dx < 0 || dy < 0 || dx >= screenWidth || dy >= screenHeight) return;
+
+    // Keep dithering subtle: only move the 50% threshold by roughly +/-3%.
+    // This visually softens a reconstructed diagonal without turning solid
+    // regions into a checkerboard or requiring grayscale panel updates.
+    const int bayer = static_cast<int>(BAYER_4X4[((dy & 3) << 2) | (dx & 3)]);
+    const int threshold = (CUBIC_SCALE / 2) + ((2 * bayer - 15) * 32);
     if (coverage >= threshold) renderer.drawPixel(dx, dy, true);
   };
 
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
     for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
-      const int a = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1,
-                                  static_cast<int>(sy) - 1)
-                        ? 1
-                        : 0;
-      const int b =
-          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) - 1) ? 1 : 0;
-      const int c = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1,
-                                  static_cast<int>(sy) - 1)
-                        ? 1
-                        : 0;
-      const int d =
-          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1, sy) ? 1 : 0;
-      const int e = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy) ? 1 : 0;
-      const int f =
-          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1, sy) ? 1 : 0;
-      const int g = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1,
-                                  static_cast<int>(sy) + 1)
-                        ? 1
-                        : 0;
-      const int h =
-          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) + 1) ? 1 : 0;
-      const int i = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1,
-                                  static_cast<int>(sy) + 1)
-                        ? 1
-                        : 0;
+      // 25 bytes on the render-task stack; no heap allocation or persistent RAM.
+      bool p[5][5];
+      for (int py = 0; py < 5; ++py) {
+        for (int px = 0; px < 5; ++px) {
+          p[py][px] = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight,
+                                    static_cast<int>(sx) + px - 2, static_cast<int>(sy) + py - 2);
+        }
+      }
 
-      const bool isolatedBlack = e != 0 && (a + b + c + d + f + g + h + i) == 0;
+      auto cubicCoverage = [&](const bool positiveX, const bool positiveY) {
+        const int16_t* wx = positiveX ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
+        const int16_t* wy = positiveY ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
+        const int xBase = positiveX ? 1 : 0;
+        const int yBase = positiveY ? 1 : 0;
 
-      // Bilinear-style quarter-pixel coverage. The centre has weight 9, the
-      // two direct neighbours weight 3 each, and the diagonal weight 1.
-      const int q0 = 9 * e + 3 * b + 3 * d + a;
-      const int q1 = 9 * e + 3 * b + 3 * f + c;
-      const int q2 = 9 * e + 3 * h + 3 * d + g;
-      const int q3 = 9 * e + 3 * h + 3 * f + i;
+        int row[4] = {};
+        for (int yy = 0; yy < 4; ++yy) {
+          for (int xx = 0; xx < 4; ++xx) {
+            if (p[yBase + yy][xBase + xx]) row[yy] += wx[xx];
+          }
+        }
+
+        int coverage = 0;
+        for (int yy = 0; yy < 4; ++yy) coverage += row[yy] * wy[yy];
+        return clampCoverage(coverage);
+      };
+
+      int q0 = cubicCoverage(false, false);
+      int q1 = cubicCoverage(true, false);
+      int q2 = cubicCoverage(false, true);
+      int q3 = cubicCoverage(true, true);
+
+      // xBR-style corner classification. When the two orthogonal neighbours
+      // agree and the opposite sides disagree, there is strong evidence that
+      // a diagonal/corner crosses this quadrant. Bias the cubic result toward
+      // that neighbour instead of blurring across the edge.
+      const bool a = p[1][1];
+      const bool b = p[1][2];
+      const bool d = p[2][1];
+      const bool e = p[2][2];
+      const bool f = p[2][3];
+      const bool h = p[3][2];
+
+      auto applyCornerBias = [&](int& coverage, const bool strongCorner, const bool cornerBlack) {
+        if (!strongCorner || coverage <= CUBIC_SCALE / 8 || coverage >= (CUBIC_SCALE * 7) / 8) return;
+        coverage = clampCoverage(coverage + (cornerBlack ? CORNER_BIAS : -CORNER_BIAS));
+      };
+
+      applyCornerBias(q0, d == b && d != h && b != f && a != e, b);
+      applyCornerBias(q1, b == f && b != d && f != h, b);
+      applyCornerBias(q2, d == h && d != b && h != f, d);
+      applyCornerBias(q3, h == f && d != h && b != f, h);
 
       const int dx = static_cast<int>(sx - viewport.x) * 2;
       const int dy = static_cast<int>(sy - viewport.y) * 2;
-      drawCoverage(dx, dy, q0, isolatedBlack);
-      drawCoverage(dx + 1, dy, q1, isolatedBlack);
-      drawCoverage(dx, dy + 1, q2, isolatedBlack);
-      drawCoverage(dx + 1, dy + 1, q3, isolatedBlack);
+      drawCoverage(dx, dy, q0);
+      drawCoverage(dx + 1, dy, q1);
+      drawCoverage(dx, dy + 1, q2);
+      drawCoverage(dx + 1, dy + 1, q3);
     }
   }
 }
@@ -337,12 +361,12 @@ void XtcReaderActivity::loop() {
   if (touch.tapped && xtc->getBitDepth() == 1 && currentPage < xtc->getPageCount()) {
     if (zoomActive) {
       zoomActive = false;
-      LOG_DBG("XTR", "XTC Edge2x zoom off");
+      LOG_DBG("XTR", "XTC Xbr2x zoom off");
     } else {
       zoomCenterX = touch.x;
       zoomCenterY = touch.y;
       zoomActive = true;
-      LOG_DBG("XTR", "XTC Edge2x zoom on around %d,%d", zoomCenterX, zoomCenterY);
+      LOG_DBG("XTR", "XTC Xbr2x zoom on around %d,%d", zoomCenterX, zoomCenterY);
     }
     zoomRefreshPending = true;
     requestUpdate();
@@ -1392,12 +1416,12 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   renderer.clearScreen();
 
   // XTC stays 1-bit. At 1x keep the proven build-99 path byte-for-byte;
-  // at 2x render only a half-size source viewport through edge reconstruction.
+  // at 2x render only a half-size source viewport through cubic/xBR reconstruction.
   const size_t srcRowBytes = (pageWidth + 7) / 8;  // 60 bytes for 480 width
   if (zoomActive) {
     const XtcZoomViewport viewport =
         makeXtcZoomViewport(pageWidth, pageHeight, renderer, zoomCenterX, zoomCenterY);
-    drawXtcEdge2x(pageBuffer, pageWidth, pageHeight, viewport, renderer);
+    drawXtcXbr2x(pageBuffer, pageWidth, pageHeight, viewport, renderer);
   } else {
     for (uint16_t srcY = 0; srcY < pageHeight; srcY++) {
       const size_t srcRowStart = srcY * srcRowBytes;
