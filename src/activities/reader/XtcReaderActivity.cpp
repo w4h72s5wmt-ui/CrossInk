@@ -59,6 +59,82 @@ void drawToast(const GfxRenderer& renderer, const char* msg) {
 
 enum class XtchRenderPass { Base, Lsb, Msb };
 
+struct XtcZoomViewport {
+  uint16_t x = 0;
+  uint16_t y = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+};
+
+XtcZoomViewport makeXtcZoomViewport(const uint16_t pageWidth, const uint16_t pageHeight, const GfxRenderer& renderer,
+                                    const int centerX, const int centerY) {
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+  if (pageWidth == 0 || pageHeight == 0 || screenWidth <= 1 || screenHeight <= 1) return {};
+
+  const uint16_t visibleWidth =
+      std::max<uint16_t>(1, std::min<uint16_t>(pageWidth, static_cast<uint16_t>(screenWidth / 2)));
+  const uint16_t visibleHeight =
+      std::max<uint16_t>(1, std::min<uint16_t>(pageHeight, static_cast<uint16_t>(screenHeight / 2)));
+
+  const int clampedCenterX = std::clamp(centerX, 0, static_cast<int>(pageWidth) - 1);
+  const int clampedCenterY = std::clamp(centerY, 0, static_cast<int>(pageHeight) - 1);
+  const int maxX = static_cast<int>(pageWidth - visibleWidth);
+  const int maxY = static_cast<int>(pageHeight - visibleHeight);
+  const int sourceX = std::clamp(clampedCenterX - static_cast<int>(visibleWidth) / 2, 0, maxX);
+  const int sourceY = std::clamp(clampedCenterY - static_cast<int>(visibleHeight) / 2, 0, maxY);
+
+  return {static_cast<uint16_t>(sourceX), static_cast<uint16_t>(sourceY), visibleWidth, visibleHeight};
+}
+
+bool xtcPixelBlack(const uint8_t* pageBuffer, const size_t srcRowBytes, const uint16_t pageWidth,
+                   const uint16_t pageHeight, int x, int y) {
+  x = std::clamp(x, 0, static_cast<int>(pageWidth) - 1);
+  y = std::clamp(y, 0, static_cast<int>(pageHeight) - 1);
+  return !((pageBuffer[static_cast<size_t>(y) * srcRowBytes + static_cast<size_t>(x) / 8] >>
+            (7 - (static_cast<size_t>(x) % 8))) &
+           1);
+}
+
+// Scale2x/EPX keeps the source strictly monochrome but uses the four direct
+// neighbours to soften staircase diagonals and curved glyph edges. Unlike the
+// build-100 nearest-neighbour experiment, a source pixel is not blindly turned
+// into a solid 2x2 square.
+void drawXtcScale2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                    const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  const size_t srcRowBytes = (pageWidth + 7) / 8;
+  const int screenWidth = renderer.getScreenWidth();
+  const int screenHeight = renderer.getScreenHeight();
+
+  for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
+    for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
+      const bool e = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy);
+      const bool b = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) - 1);
+      const bool d = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1, sy);
+      const bool f = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1, sy);
+      const bool h = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) + 1);
+
+      bool q0 = e;
+      bool q1 = e;
+      bool q2 = e;
+      bool q3 = e;
+      if (b != h && d != f) {
+        q0 = d == b ? d : e;
+        q1 = b == f ? f : e;
+        q2 = d == h ? d : e;
+        q3 = h == f ? f : e;
+      }
+
+      const int dx = static_cast<int>(sx - viewport.x) * 2;
+      const int dy = static_cast<int>(sy - viewport.y) * 2;
+      if (q0 && dx < screenWidth && dy < screenHeight) renderer.drawPixel(dx, dy, true);
+      if (q1 && dx + 1 < screenWidth && dy < screenHeight) renderer.drawPixel(dx + 1, dy, true);
+      if (q2 && dx < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx, dy + 1, true);
+      if (q3 && dx + 1 < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx + 1, dy + 1, true);
+    }
+  }
+}
+
 bool streamXtchRenderPass(const Xtc& xtc, const uint32_t pageIndex, const uint16_t pageWidth, const uint16_t pageHeight,
                           GfxRenderer& renderer, const XtchRenderPass pass) {
   const size_t planeSize = (static_cast<size_t>(pageWidth) * pageHeight + 7) / 8;
@@ -200,6 +276,41 @@ void XtcReaderActivity::loop() {
   shortcutPageTurnPending = false;
   const bool shortcutPreviousPage = shortcutPreviousPagePending;
   shortcutPreviousPagePending = false;
+
+#if CROSSINK_APP_CAP_TOUCH
+  // XTC is already a pre-rendered bitmap, so pinch changes the viewport rather
+  // than relaying out text. XTCH stays untouched in this first experiment.
+  if (xtc->getBitDepth() == 1 && currentPage < xtc->getPageCount() && SETTINGS.touchReaderControls &&
+      mappedInput.supportsMultiTouch()) {
+    int x1 = 0;
+    int y1 = 0;
+    int x2 = 0;
+    int y2 = 0;
+    if (mappedInput.getTwoFingerTouch(x1, y1, x2, y2)) {
+      const auto action = pinchZoomGesture.update(x1, y1, x2, y2);
+      if (action == ReaderPinchGesture::Action::Increase && !zoomActive) {
+        mappedInput.suppressCurrentTouchContact();
+        zoomCenterX = (x1 + x2) / 2;
+        zoomCenterY = (y1 + y2) / 2;
+        zoomActive = true;
+        zoomRefreshPending = true;
+        LOG_DBG("XTR", "XTC Scale2x zoom on around %d,%d", zoomCenterX, zoomCenterY);
+        requestUpdate();
+      } else if (action == ReaderPinchGesture::Action::Decrease && zoomActive) {
+        mappedInput.suppressCurrentTouchContact();
+        zoomActive = false;
+        zoomRefreshPending = true;
+        LOG_DBG("XTR", "XTC Scale2x zoom off");
+        requestUpdate();
+      }
+      // A live two-contact sequence belongs to zoom, never to page turning.
+      return;
+    }
+    pinchZoomGesture.reset();
+  } else {
+    pinchZoomGesture.reset();
+  }
+#endif
 
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
   const int statusBarHeight = UITheme::getInstance().getStatusBarHeight();
@@ -1257,24 +1368,21 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   // Clear screen first
   renderer.clearScreen();
 
-  // Copy page bitmap using GfxRenderer's drawPixel
-  // XTC/XTCH pages are pre-rendered with status bar included, so render full page
-  const uint16_t maxSrcY = pageHeight;
-
-  // 1-bit mode: 8 pixels per byte, MSB first
+  // XTC stays 1-bit. At 1x keep the proven build-99 path byte-for-byte;
+  // at 2x render only a half-size source viewport through Scale2x/EPX.
   const size_t srcRowBytes = (pageWidth + 7) / 8;  // 60 bytes for 480 width
-
-  for (uint16_t srcY = 0; srcY < maxSrcY; srcY++) {
-    const size_t srcRowStart = srcY * srcRowBytes;
-
-    for (uint16_t srcX = 0; srcX < pageWidth; srcX++) {
-      // Read source pixel (MSB first, bit 7 = leftmost pixel)
-      const size_t srcByte = srcRowStart + srcX / 8;
-      const size_t srcBit = 7 - (srcX % 8);
-      const bool isBlack = !((pageBuffer[srcByte] >> srcBit) & 1);  // XTC: 0 = black, 1 = white
-
-      if (isBlack) {
-        renderer.drawPixel(srcX, srcY, true);
+  if (zoomActive) {
+    const XtcZoomViewport viewport =
+        makeXtcZoomViewport(pageWidth, pageHeight, renderer, zoomCenterX, zoomCenterY);
+    drawXtcScale2x(pageBuffer, pageWidth, pageHeight, viewport, renderer);
+  } else {
+    for (uint16_t srcY = 0; srcY < pageHeight; srcY++) {
+      const size_t srcRowStart = srcY * srcRowBytes;
+      for (uint16_t srcX = 0; srcX < pageWidth; srcX++) {
+        const size_t srcByte = srcRowStart + srcX / 8;
+        const size_t srcBit = 7 - (srcX % 8);
+        const bool isBlack = !((pageBuffer[srcByte] >> srcBit) & 1);  // XTC: 0 = black, 1 = white
+        if (isBlack) renderer.drawPixel(srcX, srcY, true);
       }
     }
   }
@@ -1288,8 +1396,17 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
     renderStatusBarOverlay(StatusBarOverlayPosition::Bottom, pageToRender);
   }
 
-  // Display with appropriate refresh
-  ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+  // Zoom transitions deliberately use the exact same fast differential
+  // waveform as ordinary page turns. Do not force the clean/HALF waveform:
+  // build 100 did that via pagesUntilFullRefresh=0, causing the visible
+  // black/white flash. Zoom also does not consume the normal page-refresh
+  // cadence; the next actual page turn keeps the build-99 countdown.
+  if (zoomRefreshPending) {
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    zoomRefreshPending = false;
+  } else {
+    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+  }
 }
 
 bool XtcReaderActivity::saveProgress(const uint32_t page) {
