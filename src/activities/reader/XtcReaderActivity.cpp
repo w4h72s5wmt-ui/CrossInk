@@ -121,7 +121,7 @@ void drawXtcXbr2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uin
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
-  auto clampCoverage = [](const int value) { return std::clamp(value, 0, CUBIC_SCALE); };
+  auto clampCoverage = [&](const int value) { return std::max(0, std::min(value, CUBIC_SCALE)); };
 
   auto drawCoverage = [&](const int dx, const int dy, const int coverage) {
     if (dx < 0 || dy < 0 || dx >= screenWidth || dy >= screenHeight) return;
