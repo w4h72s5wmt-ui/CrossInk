@@ -18,9 +18,6 @@
 #include "GlobalReadingStats.h"
 #include "ReaderProgressSaveDebouncer.h"
 #include "activities/Activity.h"
-#if CROSSINK_APP_CAP_TOUCH
-#include "activities/reader/ReaderPinchGesture.h"
-#endif
 #include "components/OptionPopup.h"
 
 class XtcReaderActivity final : public Activity {
@@ -48,9 +45,6 @@ class XtcReaderActivity final : public Activity {
   bool zoomRefreshPending = false;
   int zoomCenterX = 0;
   int zoomCenterY = 0;
-#if CROSSINK_APP_CAP_TOUCH
-  ReaderPinchGesture pinchZoomGesture;
-#endif
   bool longPressMenuHandled = false;
   bool sideButtonLongPressHandled = false;
   bool frontButtonLongPressHandled = false;
