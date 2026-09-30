@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <Memory.h>
 #include <Xtc.h>
 
 #include <memory>
@@ -40,7 +41,14 @@ class XtcReaderActivity final : public Activity {
   bool shortcutPreviousPagePending = false;
   // Session-only display toggles; fixed-layout XTC pages are never regenerated.
   bool statusBarVisible = true;
+  // XTC/XTCH zoom is binary: native 1x or a 2x viewport. On PSRAM devices,
+  // XTCH retains one decoded 2-bit source page (~96 KB at 480x800) so normal
+  // reading and zoom can both be quantized to the fast 1-bit display path.
+  HeapByteBuffer xtchPageBuffer;
+  size_t xtchPageBufferSize = 0;
+  uint32_t xtchBufferedPage = UINT32_MAX;
   bool zoomActive = false;
+  bool zoomRefreshPending = false;
   uint32_t zoomPage = 0;
   int zoomTapX = 0;
   int zoomTapY = 0;
