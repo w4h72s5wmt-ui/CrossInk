@@ -101,93 +101,51 @@ bool xtcPixelBlack(const uint8_t* pageBuffer, const size_t srcRowBytes, const ui
 // hybrid uses a 5x5 neighbourhood and Catmull-Rom quarter-pixel samples, then
 // applies an xBR-style directional corner bias. The result stays strictly 1-bit
 // so the panel can continue using the fast differential waveform.
-void drawXtcXbr2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
-                  const XtcZoomViewport& viewport, GfxRenderer& renderer) {
-  // Catmull-Rom weights scaled by 128. A negative-quarter sample uses t=0.75
-  // over source offsets [-2,-1,0,+1]; a positive-quarter sample uses t=0.25
-  // over [-1,0,+1,+2].
-  static constexpr int16_t CUBIC_NEG_QUARTER[4] = {-3, 29, 111, -9};
-  static constexpr int16_t CUBIC_POS_QUARTER[4] = {-9, 111, 29, -3};
+void drawXtcFastEdge2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                        const XtcZoomViewport& viewport, GfxRenderer& renderer) {
   static constexpr uint8_t BAYER_4X4[16] = {
       0, 8, 2, 10,
       12, 4, 14, 6,
       3, 11, 1, 9,
       15, 7, 13, 5,
   };
-  constexpr int CUBIC_SCALE = 128 * 128;
-  constexpr int CORNER_BIAS = CUBIC_SCALE / 8;
 
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
-  auto clampCoverage = [&](const int value) { return std::max(0, std::min(value, CUBIC_SCALE)); };
+  auto sample = [&](int x, int y) -> int {
+    x = std::clamp(x, 0, static_cast<int>(pageWidth) - 1);
+    y = std::clamp(y, 0, static_cast<int>(pageHeight) - 1);
+    const uint8_t value =
+        pageBuffer[static_cast<size_t>(y) * srcRowBytes + static_cast<size_t>(x) / 8];
+    return ((value >> (7 - (x & 7))) & 1) == 0 ? 255 : 0;
+  };
 
   auto drawCoverage = [&](const int dx, const int dy, const int coverage) {
     if (dx < 0 || dy < 0 || dx >= screenWidth || dy >= screenHeight) return;
-
-    // Keep dithering subtle: only move the 50% threshold by roughly +/-3%.
-    // This visually softens a reconstructed diagonal without turning solid
-    // regions into a checkerboard or requiring grayscale panel updates.
     const int bayer = static_cast<int>(BAYER_4X4[((dy & 3) << 2) | (dx & 3)]);
-    const int threshold = (CUBIC_SCALE / 2) + ((2 * bayer - 15) * 32);
+    const int threshold = 113 + bayer * 2;
     if (coverage >= threshold) renderer.drawPixel(dx, dy, true);
   };
 
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
     for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
-      // 25 bytes on the render-task stack; no heap allocation or persistent RAM.
-      bool p[5][5];
-      for (int py = 0; py < 5; ++py) {
-        for (int px = 0; px < 5; ++px) {
-          p[py][px] = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight,
-                                    static_cast<int>(sx) + px - 2, static_cast<int>(sy) + py - 2);
-        }
-      }
+      const int e = sample(sx, sy);
+      const int n = sample(sx, static_cast<int>(sy) - 1);
+      const int s = sample(sx, static_cast<int>(sy) + 1);
+      const int w = sample(static_cast<int>(sx) - 1, sy);
+      const int r = sample(static_cast<int>(sx) + 1, sy);
 
-      auto cubicCoverage = [&](const bool positiveX, const bool positiveY) {
-        const int16_t* wx = positiveX ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int16_t* wy = positiveY ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int xBase = positiveX ? 1 : 0;
-        const int yBase = positiveY ? 1 : 0;
+      int q0 = (10 * e + 3 * n + 3 * w + 8) >> 4;
+      int q1 = (10 * e + 3 * n + 3 * r + 8) >> 4;
+      int q2 = (10 * e + 3 * s + 3 * w + 8) >> 4;
+      int q3 = (10 * e + 3 * s + 3 * r + 8) >> 4;
 
-        int row[4] = {};
-        for (int yy = 0; yy < 4; ++yy) {
-          for (int xx = 0; xx < 4; ++xx) {
-            if (p[yBase + yy][xBase + xx]) row[yy] += wx[xx];
-          }
-        }
-
-        int coverage = 0;
-        for (int yy = 0; yy < 4; ++yy) coverage += row[yy] * wy[yy];
-        return clampCoverage(coverage);
-      };
-
-      int q0 = cubicCoverage(false, false);
-      int q1 = cubicCoverage(true, false);
-      int q2 = cubicCoverage(false, true);
-      int q3 = cubicCoverage(true, true);
-
-      // xBR-style corner classification. When the two orthogonal neighbours
-      // agree and the opposite sides disagree, there is strong evidence that
-      // a diagonal/corner crosses this quadrant. Bias the cubic result toward
-      // that neighbour instead of blurring across the edge.
-      const bool a = p[1][1];
-      const bool b = p[1][2];
-      const bool d = p[2][1];
-      const bool e = p[2][2];
-      const bool f = p[2][3];
-      const bool h = p[3][2];
-
-      auto applyCornerBias = [&](int& coverage, const bool strongCorner, const bool cornerBlack) {
-        if (!strongCorner || coverage <= CUBIC_SCALE / 8 || coverage >= (CUBIC_SCALE * 7) / 8) return;
-        coverage = clampCoverage(coverage + (cornerBlack ? CORNER_BIAS : -CORNER_BIAS));
-      };
-
-      applyCornerBias(q0, d == b && d != h && b != f && a != e, b);
-      applyCornerBias(q1, b == f && b != d && f != h, b);
-      applyCornerBias(q2, d == h && d != b && h != f, d);
-      applyCornerBias(q3, h == f && d != h && b != f, h);
+      if (n == w && n != s && w != r) q0 = (3 * q0 + n) >> 2;
+      if (n == r && n != s && r != w) q1 = (3 * q1 + n) >> 2;
+      if (s == w && s != n && w != r) q2 = (3 * q2 + s) >> 2;
+      if (s == r && s != n && r != w) q3 = (3 * q3 + s) >> 2;
 
       const int dx = static_cast<int>(sx - viewport.x) * 2;
       const int dy = static_cast<int>(sy - viewport.y) * 2;
@@ -258,63 +216,41 @@ void drawXtchFast1x(const uint8_t* pageBuffer, const uint16_t pageWidth, const u
 // then quantize the enlarged result to the 1-bit framebuffer. This keeps the
 // extra source information through the scaling step without invoking the
 // panel's slower multi-pass grayscale waveform.
-void drawXtchCubic2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
-                     const XtcZoomViewport& viewport, GfxRenderer& renderer) {
-  static constexpr int16_t CUBIC_NEG_QUARTER[4] = {-3, 29, 111, -9};
-  static constexpr int16_t CUBIC_POS_QUARTER[4] = {-9, 111, 29, -3};
-  constexpr int CUBIC_SCALE = 128 * 128;
-
+void drawXtchFastEdge2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                         const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  const size_t planeSize = (static_cast<size_t>(pageWidth) * pageHeight + 7) / 8;
+  const size_t colBytes = (pageHeight + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
+  auto sample = [&](int x, int y) -> int {
+    x = std::clamp(x, 0, static_cast<int>(pageWidth) - 1);
+    y = std::clamp(y, 0, static_cast<int>(pageHeight) - 1);
+    const size_t colIndex = static_cast<size_t>(pageWidth - 1 - x);
+    const size_t byteOffset = colIndex * colBytes + static_cast<size_t>(y) / 8;
+    const uint8_t bit = static_cast<uint8_t>(7 - (y & 7));
+    const uint8_t bit1 = (pageBuffer[byteOffset] >> bit) & 1;
+    const uint8_t bit2 = (pageBuffer[planeSize + byteOffset] >> bit) & 1;
+    return xtchBlackness(static_cast<uint8_t>((bit1 << 1) | bit2));
+  };
+
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
     for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
-      // 25 bytes, bounded and local: no per-pixel heap allocation.
-      uint8_t p[5][5];
-      for (int py = 0; py < 5; ++py) {
-        for (int px = 0; px < 5; ++px) {
-          p[py][px] = xtchBlackness(xtchPixelValue(pageBuffer, pageWidth, pageHeight,
-                                                   static_cast<int>(sx) + px - 2,
-                                                   static_cast<int>(sy) + py - 2));
-        }
-      }
+      const int e = sample(sx, sy);
+      const int n = sample(sx, static_cast<int>(sy) - 1);
+      const int s = sample(sx, static_cast<int>(sy) + 1);
+      const int w = sample(static_cast<int>(sx) - 1, sy);
+      const int r = sample(static_cast<int>(sx) + 1, sy);
 
-      auto cubicSample = [&](const bool positiveX, const bool positiveY) {
-        const int16_t* wx = positiveX ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int16_t* wy = positiveY ? CUBIC_POS_QUARTER : CUBIC_NEG_QUARTER;
-        const int xBase = positiveX ? 1 : 0;
-        const int yBase = positiveY ? 1 : 0;
+      int q0 = (10 * e + 3 * n + 3 * w + 8) >> 4;
+      int q1 = (10 * e + 3 * n + 3 * r + 8) >> 4;
+      int q2 = (10 * e + 3 * s + 3 * w + 8) >> 4;
+      int q3 = (10 * e + 3 * s + 3 * r + 8) >> 4;
 
-        int row[4] = {};
-        for (int yy = 0; yy < 4; ++yy) {
-          for (int xx = 0; xx < 4; ++xx) {
-            row[yy] += static_cast<int>(p[yBase + yy][xBase + xx]) * wx[xx];
-          }
-        }
-
-        int value = 0;
-        for (int yy = 0; yy < 4; ++yy) value += row[yy] * wy[yy];
-        value = (value + CUBIC_SCALE / 2) / CUBIC_SCALE;
-        return std::clamp(value, 0, 255);
-      };
-
-      int q0 = cubicSample(false, false);
-      int q1 = cubicSample(true, false);
-      int q2 = cubicSample(false, true);
-      int q3 = cubicSample(true, true);
-
-      // Clamp Catmull-Rom overshoot to the four source samples surrounding each
-      // quarter pixel. This keeps text/manga edges crisp and avoids light/dark
-      // halos around high-contrast strokes.
-      auto edgeClamp = [](int value, const uint8_t a, const uint8_t b, const uint8_t c, const uint8_t d) {
-        const int lo = std::min(std::min<int>(a, b), std::min<int>(c, d));
-        const int hi = std::max(std::max<int>(a, b), std::max<int>(c, d));
-        return std::clamp(value, lo, hi);
-      };
-      q0 = edgeClamp(q0, p[1][1], p[1][2], p[2][1], p[2][2]);
-      q1 = edgeClamp(q1, p[1][2], p[1][3], p[2][2], p[2][3]);
-      q2 = edgeClamp(q2, p[2][1], p[2][2], p[3][1], p[3][2]);
-      q3 = edgeClamp(q3, p[2][2], p[2][3], p[3][2], p[3][3]);
+      if (n == w && n != s && w != r) q0 = (3 * q0 + n) >> 2;
+      if (n == r && n != s && r != w) q1 = (3 * q1 + n) >> 2;
+      if (s == w && s != n && w != r) q2 = (3 * q2 + s) >> 2;
+      if (s == r && s != n && r != w) q3 = (3 * q3 + s) >> 2;
 
       const int dx = static_cast<int>(sx - viewport.x) * 2;
       const int dy = static_cast<int>(sy - viewport.y) * 2;
@@ -396,6 +332,7 @@ void XtcReaderActivity::onEnter() {
               static_cast<unsigned long>(xtchPageBufferSize));
       xtchPageBufferSize = 0;
     } else {
+      xtchBufferedPage = UINT32_MAX;
       LOG_DBG("XTR", "XTCH fast 1-bit path enabled with %lu-byte PSRAM source buffer",
               static_cast<unsigned long>(xtchPageBufferSize));
     }
@@ -449,6 +386,7 @@ void XtcReaderActivity::onExit() {
 
   xtchPageBuffer.reset();
   xtchPageBufferSize = 0;
+  xtchBufferedPage = UINT32_MAX;
   xtc.reset();
 }
 
@@ -1476,22 +1414,34 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
     // page turns and zoom transitions can therefore use the same fast waveform.
     if (xtchPageBuffer && xtchPageBufferSize > 0) {
       const size_t expectedSize = ((static_cast<size_t>(pageWidth) * pageHeight + 7) / 8) * 2;
-      if (expectedSize > xtchPageBufferSize ||
-          xtc->loadPage(pageToRender, xtchPageBuffer.get(), xtchPageBufferSize) != expectedSize) {
-        LOG_ERR("XTR", "Failed to load XTCH fast page %lu: need=%lu have=%lu error=%s", pageToRender,
-                static_cast<unsigned long>(expectedSize), static_cast<unsigned long>(xtchPageBufferSize),
-                xtc::errorToString(xtc->getLastError()));
+      if (expectedSize > xtchPageBufferSize) {
+        LOG_ERR("XTR", "XTCH fast page exceeds source buffer: need=%lu have=%lu",
+                static_cast<unsigned long>(expectedSize), static_cast<unsigned long>(xtchPageBufferSize));
         renderer.clearScreen();
-        renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
+        renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_MEMORY_ERROR), true, EpdFontFamily::BOLD);
         renderer.displayBuffer();
         return;
+      }
+      if (xtchBufferedPage != pageToRender) {
+        const size_t bytesRead = xtc->loadPage(pageToRender, xtchPageBuffer.get(), xtchPageBufferSize);
+        if (bytesRead != expectedSize) {
+          xtchBufferedPage = UINT32_MAX;
+          LOG_ERR("XTR", "Failed to load XTCH fast page %lu: expected=%lu got=%lu error=%s", pageToRender,
+                  static_cast<unsigned long>(expectedSize), static_cast<unsigned long>(bytesRead),
+                  xtc::errorToString(xtc->getLastError()));
+          renderer.clearScreen();
+          renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
+          renderer.displayBuffer();
+          return;
+        }
+        xtchBufferedPage = pageToRender;
       }
 
       renderer.clearScreen();
       if (zoomActive) {
         const XtcZoomViewport viewport =
             makeXtcZoomViewport(pageWidth, pageHeight, renderer, zoomCenterX, zoomCenterY);
-        drawXtchCubic2x(xtchPageBuffer.get(), pageWidth, pageHeight, viewport, renderer);
+        drawXtchFastEdge2x(xtchPageBuffer.get(), pageWidth, pageHeight, viewport, renderer);
       } else {
         drawXtchFast1x(xtchPageBuffer.get(), pageWidth, pageHeight, renderer);
       }
@@ -1609,7 +1559,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   if (zoomActive) {
     const XtcZoomViewport viewport =
         makeXtcZoomViewport(pageWidth, pageHeight, renderer, zoomCenterX, zoomCenterY);
-    drawXtcXbr2x(pageBuffer, pageWidth, pageHeight, viewport, renderer);
+    drawXtcFastEdge2x(pageBuffer, pageWidth, pageHeight, viewport, renderer);
   } else {
     for (uint16_t srcY = 0; srcY < pageHeight; srcY++) {
       const size_t srcRowStart = srcY * srcRowBytes;
