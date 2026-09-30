@@ -96,41 +96,81 @@ bool xtcPixelBlack(const uint8_t* pageBuffer, const size_t srcRowBytes, const ui
            1);
 }
 
-// Scale2x/EPX keeps the source strictly monochrome but uses the four direct
-// neighbours to soften staircase diagonals and curved glyph edges. Unlike the
-// build-100 nearest-neighbour experiment, a source pixel is not blindly turned
-// into a solid 2x2 square.
-void drawXtcScale2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
-                    const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+// The source XTC page has already been reduced to 1-bit, so no zoom algorithm
+// can recreate detail that was discarded at conversion time. This filter keeps
+// the panel strictly black/white while reconstructing a smoother 2x edge from a
+// 3x3 neighbourhood. A mild ordered threshold only affects edge coverage; solid
+// black and solid white areas stay untouched and require no grayscale waveform.
+void drawXtcEdge2x(const uint8_t* pageBuffer, const uint16_t pageWidth, const uint16_t pageHeight,
+                   const XtcZoomViewport& viewport, GfxRenderer& renderer) {
+  static constexpr uint8_t BAYER_4X4[16] = {
+      0, 8, 2, 10,
+      12, 4, 14, 6,
+      3, 11, 1, 9,
+      15, 7, 13, 5,
+  };
+
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   const int screenWidth = renderer.getScreenWidth();
   const int screenHeight = renderer.getScreenHeight();
 
+  auto drawCoverage = [&](const int dx, const int dy, const int coverage, const bool isolatedBlack) {
+    if (dx < 0 || dy < 0 || dx >= screenWidth || dy >= screenHeight) return;
+    if (isolatedBlack) {
+      renderer.drawPixel(dx, dy, true);
+      return;
+    }
+
+    // coverage is 0..16. Keep the ordered threshold deliberately narrow
+    // (7..10) so only edge pixels are dithered; interiors remain stable.
+    const uint8_t bayer = BAYER_4X4[((dy & 3) << 2) | (dx & 3)];
+    const int threshold = 7 + ((static_cast<int>(bayer) * 4) >> 4);
+    if (coverage >= threshold) renderer.drawPixel(dx, dy, true);
+  };
+
   for (uint16_t sy = viewport.y; sy < viewport.y + viewport.height; ++sy) {
     for (uint16_t sx = viewport.x; sx < viewport.x + viewport.width; ++sx) {
-      const bool e = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy);
-      const bool b = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) - 1);
-      const bool d = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1, sy);
-      const bool f = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1, sy);
-      const bool h = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) + 1);
+      const int a = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1,
+                                  static_cast<int>(sy) - 1)
+                        ? 1
+                        : 0;
+      const int b =
+          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) - 1) ? 1 : 0;
+      const int c = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1,
+                                  static_cast<int>(sy) - 1)
+                        ? 1
+                        : 0;
+      const int d =
+          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1, sy) ? 1 : 0;
+      const int e = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, sy) ? 1 : 0;
+      const int f =
+          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1, sy) ? 1 : 0;
+      const int g = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) - 1,
+                                  static_cast<int>(sy) + 1)
+                        ? 1
+                        : 0;
+      const int h =
+          xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, sx, static_cast<int>(sy) + 1) ? 1 : 0;
+      const int i = xtcPixelBlack(pageBuffer, srcRowBytes, pageWidth, pageHeight, static_cast<int>(sx) + 1,
+                                  static_cast<int>(sy) + 1)
+                        ? 1
+                        : 0;
 
-      bool q0 = e;
-      bool q1 = e;
-      bool q2 = e;
-      bool q3 = e;
-      if (b != h && d != f) {
-        q0 = d == b ? d : e;
-        q1 = b == f ? f : e;
-        q2 = d == h ? d : e;
-        q3 = h == f ? f : e;
-      }
+      const bool isolatedBlack = e != 0 && (a + b + c + d + f + g + h + i) == 0;
+
+      // Bilinear-style quarter-pixel coverage. The centre has weight 9, the
+      // two direct neighbours weight 3 each, and the diagonal weight 1.
+      const int q0 = 9 * e + 3 * b + 3 * d + a;
+      const int q1 = 9 * e + 3 * b + 3 * f + c;
+      const int q2 = 9 * e + 3 * h + 3 * d + g;
+      const int q3 = 9 * e + 3 * h + 3 * f + i;
 
       const int dx = static_cast<int>(sx - viewport.x) * 2;
       const int dy = static_cast<int>(sy - viewport.y) * 2;
-      if (q0 && dx < screenWidth && dy < screenHeight) renderer.drawPixel(dx, dy, true);
-      if (q1 && dx + 1 < screenWidth && dy < screenHeight) renderer.drawPixel(dx + 1, dy, true);
-      if (q2 && dx < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx, dy + 1, true);
-      if (q3 && dx + 1 < screenWidth && dy + 1 < screenHeight) renderer.drawPixel(dx + 1, dy + 1, true);
+      drawCoverage(dx, dy, q0, isolatedBlack);
+      drawCoverage(dx + 1, dy, q1, isolatedBlack);
+      drawCoverage(dx, dy + 1, q2, isolatedBlack);
+      drawCoverage(dx + 1, dy + 1, q3, isolatedBlack);
     }
   }
 }
@@ -277,41 +317,6 @@ void XtcReaderActivity::loop() {
   const bool shortcutPreviousPage = shortcutPreviousPagePending;
   shortcutPreviousPagePending = false;
 
-#if CROSSINK_APP_CAP_TOUCH
-  // XTC is already a pre-rendered bitmap, so pinch changes the viewport rather
-  // than relaying out text. XTCH stays untouched in this first experiment.
-  if (xtc->getBitDepth() == 1 && currentPage < xtc->getPageCount() && SETTINGS.touchReaderControls &&
-      mappedInput.supportsMultiTouch()) {
-    int x1 = 0;
-    int y1 = 0;
-    int x2 = 0;
-    int y2 = 0;
-    if (mappedInput.getTwoFingerTouch(x1, y1, x2, y2)) {
-      const auto action = pinchZoomGesture.update(x1, y1, x2, y2);
-      if (action == ReaderPinchGesture::Action::Increase && !zoomActive) {
-        mappedInput.suppressCurrentTouchContact();
-        zoomCenterX = (x1 + x2) / 2;
-        zoomCenterY = (y1 + y2) / 2;
-        zoomActive = true;
-        zoomRefreshPending = true;
-        LOG_DBG("XTR", "XTC Scale2x zoom on around %d,%d", zoomCenterX, zoomCenterY);
-        requestUpdate();
-      } else if (action == ReaderPinchGesture::Action::Decrease && zoomActive) {
-        mappedInput.suppressCurrentTouchContact();
-        zoomActive = false;
-        zoomRefreshPending = true;
-        LOG_DBG("XTR", "XTC Scale2x zoom off");
-        requestUpdate();
-      }
-      // A live two-contact sequence belongs to zoom, never to page turning.
-      return;
-    }
-    pinchZoomGesture.reset();
-  } else {
-    pinchZoomGesture.reset();
-  }
-#endif
-
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
   const int statusBarHeight = UITheme::getInstance().getStatusBarHeight();
   const auto statusBarMode = static_cast<CrossPointSettings::XTC_STATUS_BAR_MODE>(SETTINGS.xtcStatusBarMode);
@@ -322,6 +327,24 @@ void XtcReaderActivity::loop() {
                         ReaderUtils::isBottomStatusBarTap(renderer, touch.y, statusBarHeight)));
   if (tappedStatusBar) {
     statusBarVisible = !statusBarVisible;
+    requestUpdate();
+    return;
+  }
+
+  // Match the build-100 interaction: one short tap toggles a single 2x zoom
+  // level. The first tap also becomes the viewport centre; tapping again
+  // returns to the native page. XTCH remains untouched in this experiment.
+  if (touch.tapped && xtc->getBitDepth() == 1 && currentPage < xtc->getPageCount()) {
+    if (zoomActive) {
+      zoomActive = false;
+      LOG_DBG("XTR", "XTC Edge2x zoom off");
+    } else {
+      zoomCenterX = touch.x;
+      zoomCenterY = touch.y;
+      zoomActive = true;
+      LOG_DBG("XTR", "XTC Edge2x zoom on around %d,%d", zoomCenterX, zoomCenterY);
+    }
+    zoomRefreshPending = true;
     requestUpdate();
     return;
   }
@@ -1369,12 +1392,12 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   renderer.clearScreen();
 
   // XTC stays 1-bit. At 1x keep the proven build-99 path byte-for-byte;
-  // at 2x render only a half-size source viewport through Scale2x/EPX.
+  // at 2x render only a half-size source viewport through edge reconstruction.
   const size_t srcRowBytes = (pageWidth + 7) / 8;  // 60 bytes for 480 width
   if (zoomActive) {
     const XtcZoomViewport viewport =
         makeXtcZoomViewport(pageWidth, pageHeight, renderer, zoomCenterX, zoomCenterY);
-    drawXtcScale2x(pageBuffer, pageWidth, pageHeight, viewport, renderer);
+    drawXtcEdge2x(pageBuffer, pageWidth, pageHeight, viewport, renderer);
   } else {
     for (uint16_t srcY = 0; srcY < pageHeight; srcY++) {
       const size_t srcRowStart = srcY * srcRowBytes;
