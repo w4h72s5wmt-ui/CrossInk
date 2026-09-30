@@ -46,6 +46,7 @@ class XtcReaderActivity final : public Activity {
   // so both normal reading and zoom can be converted to fast 1-bit output.
   HeapByteBuffer xtchPageBuffer;
   size_t xtchPageBufferSize = 0;
+  uint32_t xtchBufferedPage = UINT32_MAX;
   bool zoomActive = false;
   bool zoomRefreshPending = false;
   int zoomCenterX = 0;
