@@ -1642,7 +1642,9 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   // XTG 1-bit remains compatible with existing files. The page buffer is the
   // same allocation used by the 1.6 reader; only the zoom reconstruction changes.
   const size_t pageBufferSize = ((pageWidth + 7) / 8) * pageHeight;
-  uint8_t* pageBuffer = static_cast<uint8_t*>(malloc(pageBufferSize));
+  // Runtime page size is too large for the render-task stack. Keep ownership
+  // automatic so all error paths release the buffer without raw malloc/free.
+  auto pageBuffer = makeUniqueNoThrow<uint8_t[]>(pageBufferSize);
   if (!pageBuffer) {
     LOG_ERR("XTR", "Failed to allocate page buffer (%lu bytes)", pageBufferSize);
     renderer.clearScreen();
@@ -1651,11 +1653,10 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
     return;
   }
 
-  const size_t bytesRead = xtc->loadPage(pageToRender, pageBuffer, pageBufferSize);
+  const size_t bytesRead = xtc->loadPage(pageToRender, pageBuffer.get(), pageBufferSize);
   if (bytesRead == 0) {
     LOG_ERR("XTR", "Failed to load page %lu: bufferSize=%lu bitDepth=%u error=%s", pageToRender, pageBufferSize,
             bitDepth, xtc::errorToString(xtc->getLastError()));
-    free(pageBuffer);
     renderer.clearScreen();
     renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
     renderer.displayBuffer();
@@ -1665,7 +1666,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
   renderer.clearScreen();
   const size_t srcRowBytes = (pageWidth + 7) / 8;
   if (zoom.active) {
-    drawXtcXbr2x(pageBuffer, pageWidth, pageHeight, zoom, renderer);
+    drawXtcXbr2x(pageBuffer.get(), pageWidth, pageHeight, zoom, renderer);
   } else {
     for (uint16_t srcY = 0; srcY < pageHeight; ++srcY) {
       const size_t srcRowStart = srcY * srcRowBytes;
@@ -1678,7 +1679,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
     }
   }
 
-  free(pageBuffer);
+  pageBuffer.reset();
 
   if (SETTINGS.xtcStatusBarMode == CrossPointSettings::XTC_STATUS_BAR_MODE::XTC_STATUS_BAR_TOP) {
     renderStatusBarOverlay(StatusBarOverlayPosition::Top, pageToRender);
