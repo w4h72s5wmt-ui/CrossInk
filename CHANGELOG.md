@@ -2,7 +2,7 @@
 
 ### Added
 
-- XTC readers on X4 Pro can toggle a session-only 2x zoom with a short tap. Existing 1-bit XTC files use xBR-style edge reconstruction, while 2-bit XTCH files retain their four source levels in PSRAM for dithered fast reading and cubic 2x zoom without the slow grayscale zoom transition.
+- XTC/XTCH readers on X4 Pro auto-detect native 480x800 and 2x-source 960x1600 pages. Native pages use a lightweight 2x zoom, while hi-res pages downscale 2:1 for normal reading and show a native 480x800 crop when zoomed; both keep fast e-ink zoom transitions.
 
 ### Fixed
 
