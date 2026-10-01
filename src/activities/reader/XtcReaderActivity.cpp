@@ -85,14 +85,6 @@ XtcZoomViewport makeNativeZoomViewport(const GfxRenderer& renderer, const int ta
   return {static_cast<uint16_t>(x), static_cast<uint16_t>(y), width, height};
 }
 
-bool xtc1BitBlack(const uint8_t* pageBuffer, const size_t rowBytes, const int x, const int y) {
-  const int cx = std::clamp(x, 0, 479);
-  const int cy = std::clamp(y, 0, 799);
-  return ((pageBuffer[static_cast<size_t>(cy) * rowBytes + static_cast<size_t>(cx >> 3)] >>
-           (7 - (cx & 7))) &
-          1) == 0;
-}
-
 void drawXtc1BitNormal(const uint8_t* pageBuffer, GfxRenderer& renderer) {
   constexpr size_t rowBytes = 60;
   for (int y = 0; y < 800; ++y) {
