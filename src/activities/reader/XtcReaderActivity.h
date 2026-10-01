@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <Memory.h>
 #include <Xtc.h>
 
 #include <memory>
@@ -38,9 +39,15 @@ class XtcReaderActivity final : public Activity {
   // Queue the turn so it follows the same guarded XTC page-turn path.
   bool shortcutPageTurnPending = false;
   bool shortcutPreviousPagePending = false;
-  // Session-only display toggles; fixed-layout XTC pages are never regenerated.
+  // Session-only display state; fixed-layout XTC pages are never regenerated.
   bool statusBarVisible = true;
+  // Zoom is intentionally limited to native 480x800 pages on X4 Pro. The
+  // current source page is cached in PSRAM so tap zoom/dezoom never rereads SD.
+  HeapByteBuffer zoomPageBuffer;
+  size_t zoomPageBufferSize = 0;
+  uint32_t zoomBufferedPage = UINT32_MAX;
   bool zoomActive = false;
+  bool zoomRefreshPending = false;
   uint32_t zoomPage = 0;
   int zoomTapX = 0;
   int zoomTapY = 0;
