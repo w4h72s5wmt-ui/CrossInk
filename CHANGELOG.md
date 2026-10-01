@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- X4 Pro XTC/XTCH readers support a session-only 2x tap zoom for native 480x800 pages only. 1-bit XTC uses lightweight EPX edge reconstruction; 2-bit XTCH uses its four source levels with fast 1-bit dithering. The current page is cached in PSRAM so zoom/dezoom avoids SD rereads and stays on FAST_REFRESH.
+
 ### Fixed
 
 - X4 Pro's sleep clock updates periodically again with Page Overlay, including PNG sleep images. PNG overlays use black and white while the clock is enabled.
